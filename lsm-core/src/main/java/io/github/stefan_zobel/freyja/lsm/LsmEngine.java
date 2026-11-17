@@ -10,9 +10,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
+import io.github.stefan_zobel.freyja.common.ByteComparator;
 import io.github.stefan_zobel.freyja.common.DecodeException;
 import io.github.stefan_zobel.freyja.lsm.fs.ReadableFile;
 import io.github.stefan_zobel.freyja.lsm.fs.StorageFileSystem;
@@ -25,6 +27,8 @@ import io.github.stefan_zobel.freyja.lsm.manifest.FileNames;
 import io.github.stefan_zobel.freyja.lsm.manifest.Version;
 import io.github.stefan_zobel.freyja.lsm.manifest.VersionEdit;
 import io.github.stefan_zobel.freyja.lsm.table.BlockCache;
+import io.github.stefan_zobel.freyja.lsm.table.InternalIterator;
+import io.github.stefan_zobel.freyja.lsm.table.InternalKey;
 import io.github.stefan_zobel.freyja.lsm.table.Lookup;
 import io.github.stefan_zobel.freyja.lsm.table.SSTableReader;
 import io.github.stefan_zobel.freyja.lsm.table.SSTableWriter;
@@ -45,12 +49,15 @@ import io.github.stefan_zobel.freyja.lsm.table.SSTableWriter;
  *
  * <p><b>Reads</b> never block. They look at the MemTable, at a MemTable that is being
  * flushed, and at the table files, newest first, and see every write that has returned.
+ * A {@link Snapshot} fixes the sequence number a read uses; a {@link ScanIterator} walks a
+ * key range at one sequence number.
  *
  * <p><b>Failure.</b> If a write to the log, a table, or the manifest fails, the instance
  * enters a failed state and rejects all further writes with {@link EngineFailedException}.
  * Damage found while opening prevents opening; the engine never opens with data loss.
  *
- * <p>Safe for concurrent use. The engine must not be used while or after it is closed.
+ * <p>Safe for concurrent use. The engine must not be used while or after it is closed, and
+ * every scan must be closed before the engine is.
  */
 public final class LsmEngine implements Closeable {
 
@@ -104,6 +111,10 @@ public final class LsmEngine implements Closeable {
     private Closeable directoryLock;
 
     private volatile ReadState state;
+
+    /** Live snapshots: sequence number to number of snapshots at it. */
+    private final TreeMap<Long, Integer> snapshots = new TreeMap<>();
+    private final AtomicInteger openScans = new AtomicInteger();
 
     /** Sequence number of the last write that is visible to readers. */
     private volatile long lastSequence;
@@ -592,12 +603,23 @@ public final class LsmEngine implements Closeable {
      * @throws CorruptionException if a table block needed for the answer is damaged
      */
     public byte[] get(byte[] key) throws IOException {
+        // The sequence number is read before the state: the state read afterward holds at
+        // least everything up to it.
+        return lookup(key, lastSequence);
+    }
+
+    /**
+     * Returns the value {@code key} had when {@code snapshot} was taken, or {@code null} if
+     * it had none.
+     */
+    public byte[] get(byte[] key, Snapshot snapshot) throws IOException {
+        return lookup(key, snapshot.sequenceFor(this));
+    }
+
+    private byte[] lookup(byte[] key, long snapshot) throws IOException {
         if (key.length == 0) {
             throw new IllegalArgumentException("keys must not be empty");
         }
-        // The sequence number is read first: the state read afterward holds at least
-        // everything up to it.
-        long snapshot = lastSequence;
         ReadState current = state;
 
         Lookup lookup = current.mem().get(key, snapshot);
@@ -617,6 +639,99 @@ public final class LsmEngine implements Closeable {
             }
         }
         return lookup.kind() == Lookup.Kind.VALUE ? lookup.value() : null;
+    }
+
+    // ---- snapshots and scans ---------------------------------------------------------------
+
+    /**
+     * Takes a snapshot of the current contents. It must be closed when no longer needed.
+     */
+    public Snapshot snapshot() {
+        synchronized (snapshots) {
+            long sequence = lastSequence;
+            snapshots.merge(sequence, 1, Integer::sum);
+            return new Snapshot(this, sequence);
+        }
+    }
+
+    void releaseSnapshot(Snapshot snapshot) {
+        synchronized (snapshots) {
+            snapshots.computeIfPresent(snapshot.sequence(), (k, count) -> count > 1 ? count - 1 : null);
+        }
+    }
+
+    /** Returns the number of snapshots that are not closed. */
+    public int liveSnapshotCount() {
+        synchronized (snapshots) {
+            int total = 0;
+            for (int count : snapshots.values()) {
+                total += count;
+            }
+            return total;
+        }
+    }
+
+    /**
+     * Returns the sequence number of the oldest live snapshot, or the current last sequence
+     * number if there is none. Versions that are only visible below it are not needed.
+     */
+    public long oldestSnapshotSequence() {
+        synchronized (snapshots) {
+            return snapshots.isEmpty() ? lastSequence : snapshots.firstKey();
+        }
+    }
+
+    /**
+     * Scans the keys from {@code start} (inclusive) to {@code end} (exclusive) in their
+     * current state.
+     *
+     * @param start the first key, or {@code null} to start at the smallest key
+     * @param end   the key to stop before, or {@code null} to scan to the largest key
+     */
+    public ScanIterator scan(byte[] start, byte[] end) throws IOException {
+        return scan(start, end, lastSequence);
+    }
+
+    /** Scans a range as it was when {@code snapshot} was taken. */
+    public ScanIterator scan(byte[] start, byte[] end, Snapshot snapshot) throws IOException {
+        return scan(start, end, snapshot.sequenceFor(this));
+    }
+
+    private ScanIterator scan(byte[] start, byte[] end, long snapshot) throws IOException {
+        if ((start != null && start.length == 0) || (end != null && end.length == 0)) {
+            throw new IllegalArgumentException("range bounds must not be empty; use null for no bound");
+        }
+        ReadState current = state;
+        List<InternalIterator> sources = new ArrayList<>();
+        sources.add(current.mem().iterator());
+        if (current.imm() != null) {
+            sources.add(current.imm().iterator());
+        }
+        for (FileMeta file : current.version().allFiles()) {
+            if (overlaps(file, start, end)) {
+                sources.add(tables.get(file.number()).iterator());
+            }
+        }
+        openScans.incrementAndGet();
+        return new ScanIterator(new MergingIterator(sources), snapshot, start, end,
+                openScans::decrementAndGet);
+    }
+
+    /** Returns whether the user-key range of {@code file} intersects {@code [start, end)}. */
+    private static boolean overlaps(FileMeta file, byte[] start, byte[] end) {
+        byte[] smallest = file.smallestKey();
+        byte[] largest = file.largestKey();
+        if (end != null && ByteComparator.compare(smallest, 0, InternalKey.userKeyLength(smallest),
+                end, 0, end.length) >= 0) {
+            return false;
+        }
+        return start == null || ByteComparator.compare(largest, 0, InternalKey.userKeyLength(largest),
+                start, 0, start.length) >= 0;
+    }
+
+    /** Returns the number of scans that are not closed. */
+    public int openScanCount() {
+        return openScans.get();
     }
 
     /** Returns the sequence number of the last write that readers can see. */
