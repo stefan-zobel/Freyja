@@ -50,13 +50,30 @@ class EndToEndTest {
         /**
          * Starts the process and waits for the line that says where it listens.
          *
+         * <p>A node that is started again listens for clients where it did before: the
+         * cluster tells clients that address when the node leads, and it would send them to a
+         * port where nobody listens if the node came back on another one.
+         *
          * @param peerPort the port for peers; 0 for any free port
          */
-        void start(int peerPort, List<String> seeds) throws IOException {
+        void start(int peerPort, List<String> seeds) throws IOException, InterruptedException {
+            // A port of the last life of the node may not be free at once.
+            for (int attempt = 0; ; attempt++) {
+                if (tryStart(peerPort, seeds)) {
+                    return;
+                }
+                if (attempt == 20) {
+                    throw new AssertionError("node " + id + " ended without saying that it listens");
+                }
+                Thread.sleep(250);
+            }
+        }
+
+        private boolean tryStart(int peerPort, List<String> seeds) throws IOException {
             List<String> command = new ArrayList<>(List.of(
                     Path.of(System.getProperty("java.home"), "bin", "java").toString(), "--enable-preview",
                     "-Xmx256m", "-cp", System.getProperty("java.class.path"), FreyjaNode.class.getName(), "run",
-                    "--data", data.toString(), "--peer", "127.0.0.1:" + peerPort, "--client", "127.0.0.1:0",
+                    "--data", data.toString(), "--peer", "127.0.0.1:" + peerPort, "--client", "127.0.0.1:" + client,
                     "--admin", "127.0.0.1:0", "--tick-ms", "20"));
             for (String seed : seeds) {
                 command.add("--seed");
@@ -87,10 +104,10 @@ class EndToEndTest {
                             // the process is gone
                         }
                     });
-                    return;
+                    return true;
                 }
             }
-            throw new AssertionError("node " + id + " ended without saying that it listens");
+            return false;
         }
 
         void kill() throws InterruptedException {
@@ -237,6 +254,15 @@ class EndToEndTest {
                 }
             });
             assertTrue(admin(joiner.admin, "status").contains("node 3 voter"), admin(joiner.admin, "status"));
+            // The node that was killed leads now. Clients are sent to it, at the address the
+            // cluster knows it by.
+            await("the node that was killed leads", () -> {
+                if (admin(first.admin, "status").contains("role:            LEADER")) {
+                    return true;
+                }
+                admin(leaderOrFirst().admin, "transfer", Integer.toString(first.id));
+                return false;
+            });
             client.put(b("after"), b("growth"));
 
             // The tool says what a node refuses.

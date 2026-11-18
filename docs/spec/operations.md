@@ -56,6 +56,11 @@ to one node and prints the answer: `status`, `add-learner N PEER CLIENT`, `promo
 `remove N [--force]`, `transfer N`, `snapshot`, `scrub`, `compact`, `clear-alarm`, `set-version V`,
 `set-address N PEER CLIENT`. Exit code 0: done; 1: refused or not reachable; 2: wrong usage.
 
+The addresses of a node are part of the replicated state, and a node that is not the leader
+sends clients to the address the cluster knows the leader by. A node therefore listens at
+the same addresses after every restart; if it has to move, its new addresses are set with
+`set-address` before clients are expected to find it.
+
 **The node program.** `FreyjaNode init --data DIR --cluster HEX --node N [--voters N,...]
 [--cluster-version V]` prepares a data directory; without voters, for a node that is to
 join. `FreyjaNode run --data DIR --peer HOST:PORT --client HOST:PORT --admin HOST:PORT
