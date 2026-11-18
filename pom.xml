@@ -13,10 +13,10 @@
     <modules>
         <module>kv-common</module>
         <module>lsm-core</module>
-        <module>kv-tools</module>
         <module>raft-core</module>
         <module>raft-sim</module>
         <module>kv-node</module>
+        <module>kv-tools</module>
     </modules>
 
     <properties>

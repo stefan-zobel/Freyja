@@ -47,10 +47,10 @@ public final class RaftLogStore implements LogView, Closeable {
 
     private static final String SUFFIX = ".rlog";
     /** Logical records. The first byte of a record is its type. */
-    static final int RECORD_HEADER = 1;
-    static final int RECORD_ENTRIES = 2;
-    static final int RECORD_TRUNCATE = 3;
-    static final int SEGMENT_VERSION = 1;
+    public static final int RECORD_HEADER = 1;
+    public static final int RECORD_ENTRIES = 2;
+    public static final int RECORD_TRUNCATE = 3;
+    public static final int SEGMENT_VERSION = 1;
     /** The segment header record follows the header record of the file. */
     private static final long HEADER_RECORD_OFFSET = 14;
 
@@ -68,7 +68,7 @@ public final class RaftLogStore implements LogView, Closeable {
     }
 
     /** What the header record of a segment says. */
-    record SegmentHeader(long firstIndex, long previousNumber, long previousValidLength,
+    public record SegmentHeader(long firstIndex, long previousNumber, long previousValidLength,
                          ClusterConfig config) {
     }
 
@@ -649,7 +649,7 @@ public final class RaftLogStore implements LogView, Closeable {
 
     // ------------------------------------------------------------------ records
 
-    static byte[] encodeHeader(SegmentHeader header) {
+    public static byte[] encodeHeader(SegmentHeader header) {
         byte[] config = header.config().encode();
         byte[] record = new byte[2 + 8 + 8 + 8 + 4 + config.length];
         record[0] = RECORD_HEADER;
@@ -662,7 +662,7 @@ public final class RaftLogStore implements LogView, Closeable {
         return record;
     }
 
-    static SegmentHeader decodeHeader(byte[] record, String file) throws IOException {
+    public static SegmentHeader decodeHeader(byte[] record, String file) throws IOException {
         if (record.length < 30 || record[0] != RECORD_HEADER) {
             throw new CorruptionException(file, HEADER_RECORD_OFFSET, "not a segment header record");
         }
@@ -683,7 +683,7 @@ public final class RaftLogStore implements LogView, Closeable {
         }
     }
 
-    static byte[] encodeEntries(List<LogEntry> entries) {
+    public static byte[] encodeEntries(List<LogEntry> entries) {
         int size = 1 + 8 + 4;
         for (LogEntry entry : entries) {
             size += 8 + 1 + 4 + entry.payload().length;
@@ -703,7 +703,7 @@ public final class RaftLogStore implements LogView, Closeable {
         return record;
     }
 
-    static List<LogEntry> decodeEntries(byte[] record, String file, long offset) throws IOException {
+    public static List<LogEntry> decodeEntries(byte[] record, String file, long offset) throws IOException {
         if (record.length < 13 || record[0] != RECORD_ENTRIES) {
             throw new CorruptionException(file, offset, "not an entries record");
         }
@@ -733,7 +733,7 @@ public final class RaftLogStore implements LogView, Closeable {
         return entries;
     }
 
-    static long decodeTruncate(byte[] record, String file, long offset) throws IOException {
+    public static long decodeTruncate(byte[] record, String file, long offset) throws IOException {
         if (record.length != 9) {
             throw new CorruptionException(file, offset, "a truncation record of the wrong length");
         }
