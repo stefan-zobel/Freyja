@@ -22,7 +22,7 @@ Timing defaults: tick 100 ms, heartbeat every tick, election timeout 10–20 tic
 
 ```
 NODE              identity: cluster id, node id, format version (written once)
-HARDSTATE-A/-B    term, vote, log-recovering flag (§3.2)
+HARDSTATE-A/-B    term, vote, state of the log-recovering mode (§3.2)
 raft/             Raft log segments
 sm/CURRENT        name of the active state-machine generation
 sm/<generation>/  an lsm-core engine directory
@@ -46,17 +46,44 @@ snap/             checkpoints being sent, snapshots being received
 
 ### 3.2 Hard State
 
-Term, vote, and the log-recovering flag are stored in two files, `HARDSTATE-A` and
-`HARDSTATE-B`, each holding one checksummed record with a version counter.
+Term, vote, and the state of the log-recovering mode (flag, log epoch, and the end of the
+lost log; `raft.md` §8) are stored in two files, `HARDSTATE-A` and `HARDSTATE-B`, each
+holding one checksummed record with a version counter.
 
 - Update: write and sync A, then write and sync B. The node acts on the new state only after
   both are durable.
+  - Each file is replaced as a whole: the record is written to a temporary file and synced,
+    the file is renamed over the old one, and the directory is synced. A crash leaves each
+    file with its old or its new content.
+  - A failed update is fatal for the node (a failed sync is never retried). A restart decides
+    from what is on disk.
 - Recovery:
   - Both valid: use the one with the higher counter.
   - Exactly one valid: use it. If A is unreadable, the update to A never completed or A was
     damaged later; in both cases B holds a state the node had fully committed to. If B is
     unreadable, A is at least as new.
   - Both invalid: the identity is lost (§3.4).
+  - If the two files do not hold the same record, the state that counts is written to both
+    again before the node acts on it. Temporary files of an update that did not complete
+    are removed.
+
+Format of `NODE` and of the hard-state files (all integers little-endian):
+
+```
+magic      uint32   "FRYN" for NODE, "FRYH" for a hard-state file
+version    uint8    1
+body       ...      see below
+checksum   uint32   CRC32C over everything before it, bound to the file and to offset 0
+```
+
+- Body of `NODE`: cluster id (`uint64`), node id (`uint32`).
+- Body of a hard-state file: version counter (`uint64`), term (`uint64`), vote (`int32`, -1
+  for none), flags (`uint8`; bit 0: log-recovering), log epoch (`uint64`), last index of the
+  lost log (`uint64`), term of that entry (`uint64`; the maximum value if unknown).
+- The checksum covers a number that stands for the file (`NODE`, A, or B), so the record of
+  one file is not valid in another.
+- A record with a valid checksum and another version is rejected as an unsupported format.
+  It is not treated as damage: the other file must not be taken for the truth then.
 
 ### 3.3 Log Damage
 

@@ -16,6 +16,7 @@
         <module>kv-tools</module>
         <module>raft-core</module>
         <module>raft-sim</module>
+        <module>kv-node</module>
     </modules>
 
     <properties>
