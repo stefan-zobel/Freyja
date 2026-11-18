@@ -1,6 +1,6 @@
 name: build
 
-# Started by hand only: Actions tab, "Run workflow".
+# Started by hand only: Actions tab, workflow "build", "Run workflow".
 on:
   workflow_dispatch:
 
