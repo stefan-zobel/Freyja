@@ -20,6 +20,7 @@ import io.github.stefan_zobel.freyja.common.DecodeException;
 import io.github.stefan_zobel.freyja.common.wire.Frames;
 import io.github.stefan_zobel.freyja.common.wire.Handshake;
 import io.github.stefan_zobel.freyja.common.LittleEndian;
+import io.github.stefan_zobel.freyja.common.tls.Tls;
 import io.github.stefan_zobel.freyja.node.Transport;
 import io.github.stefan_zobel.freyja.node.concurrent.Scopes;
 
@@ -29,6 +30,9 @@ import io.github.stefan_zobel.freyja.node.concurrent.Scopes;
  * <p>Every node keeps one connection to each peer it sends to, and accepts one from each
  * peer that sends to it. A connection starts with a handshake in both directions; a peer of
  * another cluster is turned away. Frames are length-prefixed.
+ *
+ * <p>With TLS, both sides of a connection show a certificate, and each checks that of the
+ * other before the handshake of the protocol (docs/spec/operations.md, section 5).
  *
  * <p>Sending never blocks the caller: a frame goes into a bounded queue of its peer, and a
  * frame that does not fit, or that is on its way when the connection breaks, is lost. The
@@ -119,10 +123,11 @@ public final class TcpTransport implements Transport, Closeable {
                 fresh.connect(new InetSocketAddress(address.getHostString(), address.getPort()),
                         options.connectTimeoutMillis());
                 fresh.setSoTimeout(options.handshakeTimeoutMillis());
-                OutputStream stream = new BufferedOutputStream(fresh.getOutputStream(), 64 * 1024);
+                Socket secured = tls == null ? fresh : tls.connect(fresh, address.getHostString(), address.getPort());
+                OutputStream stream = new BufferedOutputStream(secured.getOutputStream(), 64 * 1024);
                 Frames.write(stream, new Handshake(Handshake.PEER, clusterId, nodeId, software).encode());
                 stream.flush();
-                byte[] answer = Frames.read(fresh.getInputStream(), Handshake.MAX_BYTES);
+                byte[] answer = Frames.read(secured.getInputStream(), Handshake.MAX_BYTES);
                 if (answer == null) {
                     throw new IOException("node " + peer + " closed the connection during the handshake");
                 }
@@ -132,7 +137,7 @@ public final class TcpTransport implements Transport, Closeable {
                             + Long.toHexString(other.clusterId()) + ", not node " + peer + " of this cluster");
                 }
                 fresh.setSoTimeout(0);
-                socket = fresh;
+                socket = secured;
                 out = stream;
             } catch (IOException | DecodeException e) {
                 fresh.close();
@@ -159,6 +164,7 @@ public final class TcpTransport implements Transport, Closeable {
     private final String software;
     private final Options options;
     private final Consumer<byte[]> inbound;
+    private final Tls tls;
     private final Map<Integer, InetSocketAddress> addresses = new ConcurrentHashMap<>();
     private final Map<Integer, Link> links = new ConcurrentHashMap<>();
     private final AtomicLong sent = new AtomicLong();
@@ -174,6 +180,17 @@ public final class TcpTransport implements Transport, Closeable {
      *                thread of its connection, it must not block
      */
     public TcpTransport(long clusterId, int nodeId, String software, Options options, Consumer<byte[]> inbound) {
+        this(clusterId, nodeId, software, options, inbound, null);
+    }
+
+    /**
+     * @param inbound takes every frame that a peer of this cluster sends; called from the
+     *                thread of its connection, it must not block
+     * @param tls     TLS between the nodes; {@code null} for none
+     */
+    public TcpTransport(long clusterId, int nodeId, String software, Options options, Consumer<byte[]> inbound,
+                        Tls tls) {
+        this.tls = tls;
         this.clusterId = clusterId;
         this.nodeId = nodeId;
         this.software = software;
@@ -231,9 +248,16 @@ public final class TcpTransport implements Transport, Closeable {
     }
 
     /** One accepted connection: the handshake, then frames until the peer closes. */
-    private void accepted(Socket socket) throws IOException {
-        socket.setTcpNoDelay(true);
-        socket.setSoTimeout(options.handshakeTimeoutMillis());
+    private void accepted(Socket raw) throws IOException {
+        raw.setTcpNoDelay(true);
+        raw.setSoTimeout(options.handshakeTimeoutMillis());
+        Socket socket;
+        try {
+            socket = tls == null ? raw : tls.accept(raw, Tls.ClientCertificate.NEEDED);
+        } catch (IOException e) {
+            refused.incrementAndGet();
+            return; // no certificate of a node of this cluster
+        }
         InputStream in = new BufferedInputStream(socket.getInputStream(), 64 * 1024);
         byte[] first = Frames.read(in, Handshake.MAX_BYTES);
         Handshake other;
@@ -250,7 +274,7 @@ public final class TcpTransport implements Transport, Closeable {
         OutputStream out = socket.getOutputStream();
         Frames.write(out, new Handshake(Handshake.PEER, clusterId, nodeId, software).encode());
         out.flush();
-        socket.setSoTimeout(0);
+        raw.setSoTimeout(0);
         int peer = other.nodeId();
         for (byte[] frame = Frames.read(in, options.maxFrameBytes()); frame != null && !closed;
                 frame = Frames.read(in, options.maxFrameBytes())) {

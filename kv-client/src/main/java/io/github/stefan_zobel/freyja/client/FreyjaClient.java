@@ -6,6 +6,7 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.util.ArrayList;
@@ -35,6 +36,7 @@ import io.github.stefan_zobel.freyja.common.kv.CommandResult;
 import io.github.stefan_zobel.freyja.common.kv.CommandResult.ConditionalApplied;
 import io.github.stefan_zobel.freyja.common.kv.CommandResult.Failed;
 import io.github.stefan_zobel.freyja.common.kv.CommandResult.SessionRegistered;
+import io.github.stefan_zobel.freyja.common.tls.Tls;
 import io.github.stefan_zobel.freyja.common.wire.Frames;
 import io.github.stefan_zobel.freyja.common.wire.Handshake;
 
@@ -52,6 +54,10 @@ import io.github.stefan_zobel.freyja.common.wire.Handshake;
  * needs requests in parallel opens several clients.
  *
  * <p>Reads are linearizable unless the method says otherwise.
+ *
+ * <p>A cluster that is not run in its insecure mode is talked to with TLS
+ * (docs/spec/operations.md, section 5): the client checks the certificate of every node it
+ * connects to, and proves itself with a certificate of its own or with a token.
  */
 public final class FreyjaClient implements Closeable {
 
@@ -69,11 +75,22 @@ public final class FreyjaClient implements Closeable {
      * @param keepAliveMillis      after this much idle time the client tells the cluster that
      *                             it is alive, so that its session does not expire; 0 for
      *                             never
+     * @param tls                  the trust store with the authorities of the certificates of
+     *                             the nodes, and the key store of the client if it has a
+     *                             certificate; {@code null} for a cluster in insecure mode
+     * @param token                what the client proves itself with if it has no
+     *                             certificate; {@code null} for none
      */
     public record Options(List<String> endpoints, long clusterId, int requestTimeoutMillis,
                           int attemptTimeoutMillis, int backoffMillis, int maxBackoffMillis,
-                          int connectTimeoutMillis, int keepAliveMillis) {
+                          int connectTimeoutMillis, int keepAliveMillis, Tls.Settings tls, String token) {
         public Options {
+            if (tls != null && tls.trustStore() == null) {
+                throw new IllegalArgumentException("TLS without a trust store: no node could be recognized");
+            }
+            if (token != null && tls == null) {
+                throw new IllegalArgumentException("a token is sent over TLS only");
+            }
             endpoints = List.copyOf(endpoints);
             if (endpoints.isEmpty() || requestTimeoutMillis < 1 || attemptTimeoutMillis < 1 || backoffMillis < 1
                     || maxBackoffMillis < backoffMillis || connectTimeoutMillis < 1 || keepAliveMillis < 0) {
@@ -84,6 +101,20 @@ public final class FreyjaClient implements Closeable {
             }
         }
 
+        /** The settings for a cluster in insecure mode. */
+        public Options(List<String> endpoints, long clusterId, int requestTimeoutMillis, int attemptTimeoutMillis,
+                       int backoffMillis, int maxBackoffMillis, int connectTimeoutMillis, int keepAliveMillis) {
+            this(endpoints, clusterId, requestTimeoutMillis, attemptTimeoutMillis, backoffMillis, maxBackoffMillis,
+                    connectTimeoutMillis, keepAliveMillis, null, null);
+        }
+
+        /** The token is a secret and is not printed. */
+        @Override
+        public String toString() {
+            return "Options[endpoints=" + endpoints + ", clusterId=" + Long.toHexString(clusterId) + ", tls=" + tls
+                    + (token == null ? "" : ", with a token") + "]";
+        }
+
         /** The defaults: 10 s per request, 2 s per attempt, pauses of 20 to 500 ms, keep alive after 10 s. */
         public static Options of(String... endpoints) {
             return new Options(List.of(endpoints), 0, 10_000, 2_000, 20, 500, 1_000, 10_000);
@@ -91,12 +122,23 @@ public final class FreyjaClient implements Closeable {
 
         public Options withRequestTimeout(int millis) {
             return new Options(endpoints, clusterId, millis, Math.min(attemptTimeoutMillis, millis), backoffMillis,
-                    maxBackoffMillis, connectTimeoutMillis, keepAliveMillis);
+                    maxBackoffMillis, connectTimeoutMillis, keepAliveMillis, tls, token);
+        }
+
+        /**
+         * Talks to the cluster with TLS.
+         *
+         * @param settings the trust store, and the key store if the client has a certificate
+         * @param secret   the token of a client without a certificate; {@code null} for none
+         */
+        public Options withTls(Tls.Settings settings, String secret) {
+            return new Options(endpoints, clusterId, requestTimeoutMillis, attemptTimeoutMillis, backoffMillis,
+                    maxBackoffMillis, connectTimeoutMillis, keepAliveMillis, settings, secret);
         }
 
         public Options withKeepAlive(int millis) {
             return new Options(endpoints, clusterId, requestTimeoutMillis, attemptTimeoutMillis, backoffMillis,
-                    maxBackoffMillis, connectTimeoutMillis, millis);
+                    maxBackoffMillis, connectTimeoutMillis, millis, tls, token);
         }
     }
 
@@ -109,6 +151,7 @@ public final class FreyjaClient implements Closeable {
     }
 
     private final Options options;
+    private final Tls tls;
     private final ReentrantLock lock = new ReentrantLock();
     private Socket socket;
     private InputStream in;
@@ -125,10 +168,19 @@ public final class FreyjaClient implements Closeable {
 
     private FreyjaClient(Options options) {
         this.options = options;
+        try {
+            this.tls = options.tls() == null ? null : Tls.open(options.tls());
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
         this.target = options.endpoints().getFirst();
     }
 
-    /** Creates a client. It connects and opens its session with its first request. */
+    /**
+     * Creates a client. It connects and opens its session with its first request.
+     *
+     * @throws UncheckedIOException if the files for TLS cannot be read or cannot be used
+     */
     public static FreyjaClient open(Options options) {
         FreyjaClient client = new FreyjaClient(options);
         if (options.keepAliveMillis() > 0) {
@@ -444,9 +496,11 @@ public final class FreyjaClient implements Closeable {
             fresh.setTcpNoDelay(true);
             fresh.connect(new InetSocketAddress(address.getHostString(), address.getPort()), Math.max(1, timeoutMillis));
             fresh.setSoTimeout(options.connectTimeoutMillis());
-            OutputStream stream = new BufferedOutputStream(fresh.getOutputStream(), 64 * 1024);
-            InputStream input = new BufferedInputStream(fresh.getInputStream(), 64 * 1024);
-            Frames.write(stream, new Handshake(Handshake.CLIENT, options.clusterId(), -1, Version.SOFTWARE).encode());
+            Socket secured = tls == null ? fresh : tls.connect(fresh, address.getHostString(), address.getPort());
+            OutputStream stream = new BufferedOutputStream(secured.getOutputStream(), 64 * 1024);
+            InputStream input = new BufferedInputStream(secured.getInputStream(), 64 * 1024);
+            Frames.write(stream, new Handshake(Handshake.CLIENT, options.clusterId(), -1, Version.SOFTWARE,
+                    options.token() == null ? "" : options.token()).encode());
             stream.flush();
             byte[] answer = Frames.read(input, Handshake.MAX_BYTES);
             if (answer == null) {
@@ -456,7 +510,7 @@ public final class FreyjaClient implements Closeable {
             if (options.clusterId() != 0 && node.clusterId() != options.clusterId()) {
                 throw new IOException(target + " belongs to another cluster");
             }
-            socket = fresh;
+            socket = secured;
             in = input;
             out = stream;
         } catch (IOException | DecodeException e) {

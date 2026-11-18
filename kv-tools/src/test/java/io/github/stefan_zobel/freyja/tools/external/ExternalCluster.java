@@ -71,7 +71,7 @@ final class ExternalCluster implements Closeable {
                     Path.of(System.getProperty("java.home"), "bin", "java").toString(), "--enable-preview",
                     "-Xmx192m", "-cp", System.getProperty("java.class.path"), FreyjaNode.class.getName(), "run",
                     "--data", data.toString(), "--peer", "127.0.0.1:" + peerPort, "--client",
-                    "127.0.0.1:" + clientPort, "--admin", "127.0.0.1:" + adminPort, "--tick-ms", "20"));
+                    "127.0.0.1:" + clientPort, "--admin", "127.0.0.1:" + adminPort, "--tick-ms", "20", "--insecure", "yes"));
             command.addAll(nodeOptions);
             for (NodeProcess other : nodes) {
                 if (other != this) {

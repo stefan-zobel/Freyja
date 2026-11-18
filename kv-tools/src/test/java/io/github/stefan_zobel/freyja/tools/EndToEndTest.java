@@ -74,7 +74,7 @@ class EndToEndTest {
                     Path.of(System.getProperty("java.home"), "bin", "java").toString(), "--enable-preview",
                     "-Xmx256m", "-cp", System.getProperty("java.class.path"), FreyjaNode.class.getName(), "run",
                     "--data", data.toString(), "--peer", "127.0.0.1:" + peerPort, "--client", "127.0.0.1:" + client,
-                    "--admin", "127.0.0.1:0", "--tick-ms", "20"));
+                    "--admin", "127.0.0.1:0", "--tick-ms", "20", "--insecure", "yes"));
             for (String seed : seeds) {
                 command.add("--seed");
                 command.add(seed);

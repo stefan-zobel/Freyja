@@ -67,7 +67,7 @@ class StatusEndpointTest {
                     new InetSocketAddress(LOOPBACK, 0), new InetSocketAddress(LOOPBACK, 0), Map.of(), node,
                     new StateMachineStore.Options(new EngineOptions().deterministic(true).reserveSize(0)
                             .minFreeSpace(0).memTableSize(16 * 1024).blockCacheCapacity(1 << 20), 60_000), 20,
-                    new InetSocketAddress(LOOPBACK, 0))));
+                    new InetSocketAddress(LOOPBACK, 0), Security.INSECURE)));
         }
         for (NodeServer server : servers) {
             for (NodeServer other : servers) {

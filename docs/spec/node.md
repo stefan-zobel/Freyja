@@ -504,7 +504,13 @@ repair on the one path that is verified for a node that has lost what it acknowl
   - The handshake is the first frame in both directions; the side that connects speaks
     first: magic `FRYA` (`uint32`), protocol (`uint8`, 1), role (`uint8`: 1 peer, 2 client,
     3 administrator), cluster id (`uint64`), node id (`uint32`; all bits set from a client
-    or an administrator), software version (length `uint8`, UTF-8), CRC32C (`uint32`).
+    or an administrator), software version (length `uint8`, UTF-8), token (length `uint8`,
+    UTF-8), CRC32C (`uint32`).
+  - The token is what a client without a certificate proves itself with
+    (`operations.md` §5). It is empty from everybody else and in every answer.
+  - With TLS, the TLS handshake comes first, and the handshake of the protocol is the first
+    thing that is sent through it. A listener answers a handshake only after the other side
+    has proven what the listener demands.
   - A listener answers only a handshake of its own role and protocol. A peer must name this
     cluster and another node than the one it talks to. A client or an administrator may
     name cluster 0 for "not known"; one that names a cluster must name this one. A

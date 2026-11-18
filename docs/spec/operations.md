@@ -65,7 +65,8 @@ the same addresses after every restart; if it has to move, its new addresses are
 [--cluster-version V]` prepares a data directory; without voters, for a node that is to
 join. `FreyjaNode run --data DIR --peer HOST:PORT --client HOST:PORT --admin HOST:PORT
 [--seed N=HOST:PORT]... [--tick-ms MILLIS]` runs the node and prints
-`READY node=N peer=PORT client=PORT admin=PORT` when it listens. Further options of `run`,
+`READY node=N peer=PORT client=PORT admin=PORT` when it listens. It needs either
+`--insecure yes` or the options for TLS (§5). Further options of `run`,
 each with a number of bytes or of entries: `--segment-bytes` (a segment of the Raft log,
 64 MiB), `--snapshot-log-bytes` (the size of the log at which the node takes a snapshot and
 shortens it, 1 GiB), `--snapshot-retain` (the applied entries it keeps then, 10,000),
@@ -196,6 +197,99 @@ Only the JDK's TLS implementation is used.
 - An insecure mode exists for development and tests. It must be enabled explicitly and is
   reported in the log and the metrics.
 - Data at rest is not encrypted by the system.
+
+**How a role is expressed.** A node has three listeners, and says for each of them whose
+certificates it accepts there:
+
+- by a **trust store** of the listener: the certificate authorities whose certificates are
+  accepted at this listener and at no other;
+- and, optionally, by a **required name**: an attribute that the subject of the certificate
+  must have, written `ATTRIBUTE=VALUE`, for example `OU=freyja-admin`. The attribute is found
+  whatever its case; the value must be the same, character for character. An attribute that
+  shares its part of the subject with another one (a multi-valued part) does not count.
+
+So the roles are kept apart either by an authority per role, or by one authority and a name
+per role. **With one authority for everything and no names, every certificate is good for
+every listener:** a client could then administer the cluster and pose as a node. An
+installation with one authority sets all three names.
+
+**Files.** Every store is a PKCS12 file. One password file holds the password of all stores
+of a process in its first line; without it the password is empty.
+
+- The **key store** of a node holds its private key and its certificate chain. The node
+  shows this certificate at all three listeners and to the peers it connects to.
+- A **trust store** holds certificates of authorities and nothing else that matters. A node
+  never trusts the authorities that come with the JDK.
+- The **token file** holds one token per line; empty lines and lines that start with `#` do
+  not count. A token has 16 to 255 bytes. A file with a token outside of that, or with no
+  token, is not used.
+
+**The options of a node** (`FreyjaNode run`):
+
+| Option | Meaning |
+|---|---|
+| `--insecure yes` | No TLS and no authentication at any listener. Excludes every option below. |
+| `--tls-key FILE` | The key store of the node. |
+| `--tls-password-file FILE` | The password file. |
+| `--peer-trust FILE`, `--peer-name A=V` | Whose certificates are those of nodes. |
+| `--client-trust FILE`, `--client-name A=V` | Whose certificates are those of clients. |
+| `--client-tokens FILE` | The token file. |
+| `--admin-trust FILE`, `--admin-name A=V` | Whose certificates are those of administrators. |
+
+A node that is given neither `--insecure yes` nor `--tls-key` does not start. With TLS, the
+trust stores for peers and for administrators are required, and for clients a trust store, a
+token file, or both.
+
+**What is checked on a connection.** Only TLS 1.3 is spoken.
+
+- The side that **connects** (a node to a peer, a client, the tool of an administrator)
+  checks the certificate of the node it reaches: it must come from an authority of its trust
+  store, it must be made out for the name or the address that was dialed (a subject
+  alternative name), and it must carry the required name if one is set. The addresses that
+  the cluster holds of its members (`set-address`, `add-learner`) are therefore names or
+  addresses for which the certificates of those members are made out.
+- A node that **accepts a peer or an administrator** demands a certificate from an authority
+  of the trust store of that listener, with the required name of that listener.
+- A node that **accepts a client:**
+  - with a trust store and no token file, it demands a certificate as above;
+  - with a token file and no trust store, it asks for no certificate, and the client sends a
+    token in its handshake (`node.md` §8);
+  - with both, a client shows a certificate or sends a token. A certificate that is shown
+    must be good for this listener, whatever the token.
+- A token is compared with every token of the file, each in a time that does not depend on
+  where they differ. A client sends a token over TLS only.
+- A connection that fails a check is closed without an answer and counted
+  (`transport.refused`, `listener.clients.refused`, `listener.administrators.refused`).
+- The node id that a peer names in its handshake is not bound to its certificate: a
+  certificate of a node is trusted to be used by a node of the cluster.
+
+**Reloading.** When a connection is made, and at most once a second, a process compares the
+content of its stores, its password file, and its token file with what it has loaded. Changed
+files are loaded and used for this and every later connection. Files that cannot be used
+leave the last good ones in force; the log says so. Connections that exist go on as they
+are; a node whose certificate is replaced is not restarted. The metrics count both
+(`security.reloads`, `security.reload_failures`).
+
+**Rotating certificates** follows from that:
+
+- A new certificate of the same authority: replace the key store of each node, of each
+  client, of each administrator, in any order.
+- A new authority: first add its certificate to every trust store, beside the old one; then
+  replace the key stores; then remove the old authority from the trust stores.
+- A token: add the new one to the token files, move the clients over, remove the old one.
+
+**The insecure mode** is said to the node with `--insecure yes`. The node writes a warning
+to its log when it starts, and its metrics show `security.insecure` as 1.
+
+**Outside of this:** the HTTP endpoint for metrics and health (`--status`) speaks plain HTTP,
+serves nothing but reads of the metrics and the health, and is bound to an address that only
+the monitoring reaches. A backup is written with the rights of the node on its machine.
+
+**The client library** takes a trust store, optionally a key store, optionally the name the
+certificates of the nodes must carry, and optionally a token
+(`FreyjaClient.Options.withTls`). **The tool of an administrator** takes the same before the
+address of the node: `--tls-key FILE --tls-trust FILE [--tls-password-file FILE]
+[--tls-name A=V]`.
 
 ## 6. Upgrades
 

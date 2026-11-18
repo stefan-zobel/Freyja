@@ -6,12 +6,14 @@ import java.io.OutputStream;
 import java.io.PrintStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.nio.file.Path;
 
 import io.github.stefan_zobel.freyja.common.DecodeException;
 import io.github.stefan_zobel.freyja.common.Version;
 import io.github.stefan_zobel.freyja.common.admin.AdminCodec;
 import io.github.stefan_zobel.freyja.common.admin.AdminRequest;
 import io.github.stefan_zobel.freyja.common.admin.AdminResponse;
+import io.github.stefan_zobel.freyja.common.tls.Tls;
 import io.github.stefan_zobel.freyja.common.wire.Frames;
 import io.github.stefan_zobel.freyja.common.wire.Handshake;
 
@@ -20,7 +22,13 @@ import io.github.stefan_zobel.freyja.common.wire.Handshake;
  * one request to the administration listener of one node and prints the answer.
  *
  * <pre>
- * usage: FreyjaAdmin HOST:PORT COMMAND [ARGUMENT]...
+ * usage: FreyjaAdmin [TLS] HOST:PORT COMMAND [ARGUMENT]...
+ *
+ *   TLS, for a node that is not run in its insecure mode (section 5):
+ *   --tls-key FILE             the private key and the certificate of the administrator (PKCS12)
+ *   --tls-trust FILE           the authorities of the certificates of the nodes (PKCS12)
+ *   --tls-password-file FILE   the password of both stores in its first line
+ *   --tls-name ATTRIBUTE=VALUE what the subject of the certificate of the node must carry
  *
  *   status                             the state of the node
  *   add-learner N PEER-ADDR CLIENT-ADDR  announce node N and add it as a learner
@@ -51,7 +59,33 @@ public final class FreyjaAdmin {
     public static int run(String[] args, PrintStream out, PrintStream err) {
         AdminRequest request;
         InetSocketAddress address;
+        Tls tls;
         try {
+            Path key = null;
+            Path trust = null;
+            Path password = null;
+            String name = null;
+            int options = 0;
+            while (options + 1 < args.length && args[options].startsWith("--tls-")) {
+                switch (args[options]) {
+                    case "--tls-key" -> key = Path.of(args[options + 1]);
+                    case "--tls-trust" -> trust = Path.of(args[options + 1]);
+                    case "--tls-password-file" -> password = Path.of(args[options + 1]);
+                    case "--tls-name" -> name = args[options + 1];
+                    default -> throw new IllegalArgumentException("unknown option " + args[options]);
+                }
+                options += 2;
+            }
+            args = java.util.Arrays.copyOfRange(args, options, args.length);
+            if (options > 0 && (key == null || trust == null)) {
+                throw new IllegalArgumentException("TLS needs --tls-key and --tls-trust");
+            }
+            try {
+                tls = options == 0 ? null : Tls.open(new Tls.Settings(key, trust, password, name));
+            } catch (IOException e) {
+                err.println("error: " + e.getMessage());
+                return 1;
+            }
             if (args.length < 2) {
                 throw new IllegalArgumentException("a node and a command are needed");
             }
@@ -63,7 +97,9 @@ public final class FreyjaAdmin {
             request = request(args);
         } catch (IllegalArgumentException e) {
             err.println("error: " + e.getMessage());
-            err.println("usage: FreyjaAdmin HOST:PORT status | add-learner N PEER CLIENT | promote N [--force]"
+            err.println("usage: FreyjaAdmin [--tls-key FILE --tls-trust FILE [--tls-password-file FILE]"
+                    + " [--tls-name ATTRIBUTE=VALUE]]");
+            err.println("       HOST:PORT status | add-learner N PEER CLIENT | promote N [--force]"
                     + " | remove N [--force] | backup DIRECTORY"
                     + " | transfer N | snapshot | scrub | compact | clear-alarm | set-version V"
                     + " | set-address N PEER CLIENT");
@@ -72,8 +108,9 @@ public final class FreyjaAdmin {
         try (Socket socket = new Socket()) {
             socket.connect(address, 5_000);
             socket.setSoTimeout(30_000);
-            InputStream in = socket.getInputStream();
-            OutputStream output = socket.getOutputStream();
+            Socket secured = tls == null ? socket : tls.connect(socket, address.getHostString(), address.getPort());
+            InputStream in = secured.getInputStream();
+            OutputStream output = secured.getOutputStream();
             Frames.write(output, new Handshake(Handshake.ADMIN, 0, -1, Version.SOFTWARE).encode());
             output.flush();
             byte[] hello = Frames.read(in, Handshake.MAX_BYTES);

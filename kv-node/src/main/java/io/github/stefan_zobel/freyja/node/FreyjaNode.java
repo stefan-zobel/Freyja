@@ -15,6 +15,7 @@ import io.github.stefan_zobel.freyja.common.Clock;
 import io.github.stefan_zobel.freyja.lsm.EngineOptions;
 import io.github.stefan_zobel.freyja.lsm.fs.RealFileSystem;
 import io.github.stefan_zobel.freyja.node.backup.Backups;
+import io.github.stefan_zobel.freyja.node.net.Security;
 import io.github.stefan_zobel.freyja.node.sm.StateMachineStore;
 import io.github.stefan_zobel.freyja.node.snapshot.SnapshotTransfers;
 import io.github.stefan_zobel.freyja.node.store.NodeIdentity;
@@ -30,7 +31,19 @@ import io.github.stefan_zobel.freyja.raft.RaftConfig;
  *                 [--seed N=HOST:PORT]... [--tick-ms MILLIS] [--status HOST:PORT]
  *                 [--segment-bytes N] [--snapshot-log-bytes N] [--snapshot-retain N]
  *                 [--quota-bytes N] [--min-free-bytes N]
+ *                 --insecure yes
+ *               | --tls-key FILE [--tls-password-file FILE]
+ *                 --peer-trust FILE [--peer-name ATTRIBUTE=VALUE]
+ *                 [--client-trust FILE [--client-name ATTRIBUTE=VALUE]] [--client-tokens FILE]
+ *                 --admin-trust FILE [--admin-name ATTRIBUTE=VALUE]
  * </pre>
+ *
+ * <p>A node runs with TLS on its three listeners unless it is told {@code --insecure yes}
+ * (docs/spec/operations.md, section 5). The key store holds the private key of the node and
+ * its certificate; a trust store holds the authorities whose certificates are accepted at
+ * one listener; a name is an attribute that the subject of such a certificate must have. All
+ * stores are PKCS12 files with the password in the first line of the password file. Clients
+ * need a certificate, or a token of the token file, or either if both are given.
  *
  * <p>The last five set the size of a segment of the Raft log (64 MiB), the size of the log at
  * which the node takes a snapshot and shortens it (1 GiB), the number of applied entries it
@@ -114,6 +127,10 @@ public final class FreyjaNode {
                 + " [--seed N=HOST:PORT]... [--tick-ms MILLIS] [--status HOST:PORT]");
         err.println("                      [--segment-bytes N] [--snapshot-log-bytes N] [--snapshot-retain N]"
                 + " [--quota-bytes N] [--min-free-bytes N]");
+        err.println("                      --insecure yes | --tls-key FILE [--tls-password-file FILE]"
+                + " --peer-trust FILE [--peer-name A=V]");
+        err.println("                      [--client-trust FILE [--client-name A=V]] [--client-tokens FILE]"
+                + " --admin-trust FILE [--admin-name A=V]");
         return 2;
     }
 
@@ -192,6 +209,7 @@ public final class FreyjaNode {
             seeds.put(Integer.parseInt(seed.substring(0, equals)), seed.substring(equals + 1));
         }
         int tick = Integer.parseInt(one(options, "tick-ms", "100"));
+        Security security = security(options);
         Node.Limits limits = Node.Limits.defaults();
         limits = new Node.Limits(limits.maxApplyLag(), size(options, "quota-bytes", limits.quotaBytes()),
                 size(options, "min-free-bytes", limits.minFreeBytes()), limits.alarmCheckTicks(),
@@ -203,7 +221,7 @@ public final class FreyjaNode {
                 resolve(one(options, "peer", null)), resolve(one(options, "client", null)),
                 resolve(one(options, "admin", null)), seeds, node,
                 new StateMachineStore.Options(new EngineOptions(), 60_000), tick,
-                options.containsKey("status") ? resolve(one(options, "status", null)) : null));
+                options.containsKey("status") ? resolve(one(options, "status", null)) : null, security));
         out.println("READY node=" + server.identity().nodeId() + " peer=" + server.peerPort() + " client="
                 + server.clientPort() + " admin=" + server.adminPort()
                 + (server.statusPort() < 0 ? "" : " status=" + server.statusPort()));
@@ -226,6 +244,38 @@ public final class FreyjaNode {
             Thread.currentThread().interrupt();
         }
         return 0;
+    }
+
+    private static final List<String> TLS_OPTIONS = List.of("tls-key", "tls-password-file", "peer-trust",
+            "peer-name", "client-trust", "client-name", "client-tokens", "admin-trust", "admin-name");
+
+    private static Security security(Map<String, List<String>> options) throws IOException {
+        if (options.containsKey("insecure")) {
+            if (!one(options, "insecure", null).equals("yes")) {
+                throw new IllegalArgumentException("--insecure takes yes");
+            }
+            for (String name : TLS_OPTIONS) {
+                if (options.containsKey(name)) {
+                    throw new IllegalArgumentException("--insecure and --" + name + " exclude each other");
+                }
+            }
+            return Security.INSECURE;
+        }
+        if (!options.containsKey("tls-key")) {
+            throw new IllegalArgumentException("--tls-key is missing; a node without TLS must be told --insecure yes");
+        }
+        return Security.open(new Security.Files(file(options, "tls-key"), file(options, "tls-password-file"),
+                file(options, "peer-trust"), text(options, "peer-name"), file(options, "client-trust"),
+                text(options, "client-name"), file(options, "client-tokens"), file(options, "admin-trust"),
+                text(options, "admin-name")));
+    }
+
+    private static String text(Map<String, List<String>> options, String name) {
+        return options.containsKey(name) ? one(options, name, null) : null;
+    }
+
+    private static Path file(Map<String, List<String>> options, String name) {
+        return options.containsKey(name) ? Path.of(one(options, name, null)) : null;
     }
 
     private static long size(Map<String, List<String>> options, String name, long fallback) {

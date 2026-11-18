@@ -118,6 +118,9 @@ Rules:
   - `NodeVerify` checks the whole data directory of a node that is not running: the small
     files, every segment of the Raft log, and the engine of the state machine.
 - **E2.** TLS for peers, clients, and administration. Authentication. Certificate reload.
+  - Done: TLS 1.3 on the three listeners, a trust store and an optional required name per
+    listener, tokens for clients, reloading of all files, the insecure mode as an explicit
+    choice (`operations.md` §5). Tested with a cluster of processes (`SecureClusterTest`).
 - **E3.** Backup and restore. Upgrade procedure with finalization. Compatibility suite.
   Lost-majority tool. Runbook, each procedure executed. Review against the exit criteria.
   - Done so far: backup of a running node, its verification, restore as a new cluster, and
@@ -142,7 +145,6 @@ leaves this list in the change that completes it.
 | Workloads during compaction, snapshot transfer, and follower catch-up | D3 | `verification.md` §7 |
 | Write and space amplification in the results | D3 | Needs figures of the nodes |
 | Overload tests at twice the sustainable load | D3 | |
-| TLS for peers, clients, and administration; authentication; certificate reload | E2 | Not started; how the role of an administrator is expressed is to be decided |
 | The runbook as a text | E3 | Its execution is listed below |
 
 **Work that needs Linux:**

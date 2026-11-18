@@ -17,6 +17,7 @@ import io.github.stefan_zobel.freyja.common.wire.Frames;
 import io.github.stefan_zobel.freyja.common.wire.Handshake;
 import io.github.stefan_zobel.freyja.common.kv.ClientCodec;
 import io.github.stefan_zobel.freyja.common.kv.ClientResponse;
+import io.github.stefan_zobel.freyja.common.tls.Tls;
 import io.github.stefan_zobel.freyja.node.concurrent.Scopes;
 import io.github.stefan_zobel.freyja.node.service.ClientService;
 
@@ -28,6 +29,10 @@ import io.github.stefan_zobel.freyja.node.service.ClientService;
  * writes answers, which arrive from the thread of the node through a bounded queue; a client
  * that does not read its answers fills that queue and loses its connection, and the node
  * never waits for it.
+ *
+ * <p>With TLS, a connection must prove itself before its handshake is answered: by a
+ * certificate, or, where the listener takes tokens, by a token in its handshake
+ * (docs/spec/operations.md, section 5).
  */
 public final class ClientListener implements Closeable {
 
@@ -68,6 +73,9 @@ public final class ClientListener implements Closeable {
     private final int role;
     private final Options options;
     private final Sink sink;
+    private final Tls tls;
+    private final Tls.ClientCertificate certificate;
+    private final TokenFile tokens;
     private final AtomicLong connections = new AtomicLong();
     private final AtomicLong refused = new AtomicLong();
     private ServerSocket server;
@@ -78,6 +86,25 @@ public final class ClientListener implements Closeable {
      *             or {@link Handshake#ADMIN}
      */
     public ClientListener(long clusterId, int nodeId, String software, int role, Options options, Sink sink) {
+        this(clusterId, nodeId, software, role, options, sink, null, Tls.ClientCertificate.NONE, null);
+    }
+
+    /**
+     * @param role        the role a connection must name in its handshake
+     * @param tls         TLS of this listener; {@code null} for none, and then nobody has to
+     *                    prove anything
+     * @param certificate whether a connection is asked for a certificate
+     * @param tokens      the tokens that are taken in place of a certificate; {@code null}
+     *                    for none
+     */
+    public ClientListener(long clusterId, int nodeId, String software, int role, Options options, Sink sink,
+                          Tls tls, Tls.ClientCertificate certificate, TokenFile tokens) {
+        if (tls != null && certificate != Tls.ClientCertificate.NEEDED && tokens == null) {
+            throw new IllegalArgumentException("a listener with TLS that asks for no proof");
+        }
+        this.tls = tls;
+        this.certificate = certificate;
+        this.tokens = tokens;
         this.clusterId = clusterId;
         this.nodeId = nodeId;
         this.software = software;
@@ -110,9 +137,21 @@ public final class ClientListener implements Closeable {
         return server.getLocalPort();
     }
 
-    private void accepted(Socket socket) throws Exception {
-        socket.setTcpNoDelay(true);
-        socket.setSoTimeout(options.handshakeTimeoutMillis());
+    private void accepted(Socket raw) throws Exception {
+        raw.setTcpNoDelay(true);
+        raw.setSoTimeout(options.handshakeTimeoutMillis());
+        Socket socket = raw;
+        boolean certified = false;
+        if (tls != null) {
+            try {
+                javax.net.ssl.SSLSocket secured = tls.accept(raw, certificate);
+                certified = Tls.certified(secured);
+                socket = secured;
+            } catch (IOException e) {
+                refused.incrementAndGet();
+                return;
+            }
+        }
         InputStream in = new BufferedInputStream(socket.getInputStream(), 64 * 1024);
         byte[] first = Frames.read(in, Handshake.MAX_BYTES);
         Handshake other;
@@ -126,10 +165,14 @@ public final class ClientListener implements Closeable {
             refused.incrementAndGet();
             return;
         }
+        if (tls != null && !certified && (tokens == null || !tokens.accepts(other.token()))) {
+            refused.incrementAndGet();
+            return; // neither a certificate nor a token that is known
+        }
         OutputStream out = new BufferedOutputStream(socket.getOutputStream(), 64 * 1024);
         Frames.write(out, new Handshake(role, clusterId, nodeId, software).encode());
         out.flush();
-        socket.setSoTimeout(0);
+        raw.setSoTimeout(0);
         connections.incrementAndGet();
 
         ArrayBlockingQueue<byte[]> answers = new ArrayBlockingQueue<>(options.answerQueue());
@@ -137,7 +180,7 @@ public final class ClientListener implements Closeable {
             if (!answers.offer(frame)) {
                 // The client does not read. It loses its connection; the node does not wait.
                 try {
-                    socket.close();
+                    raw.close();
                 } catch (IOException e) {
                     // closed already
                 }

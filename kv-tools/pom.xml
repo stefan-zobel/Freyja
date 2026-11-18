@@ -69,6 +69,14 @@
             <version>${project.version}</version>
             <scope>test</scope>
         </dependency>
+        <!-- The test of a secured cluster makes its certificates with the helper of kv-common. -->
+        <dependency>
+            <groupId>io.github.stefan-zobel</groupId>
+            <artifactId>kv-common</artifactId>
+            <version>${project.version}</version>
+            <type>test-jar</type>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>

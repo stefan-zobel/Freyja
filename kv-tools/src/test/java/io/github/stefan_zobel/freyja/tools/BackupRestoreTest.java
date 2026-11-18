@@ -28,6 +28,7 @@ import io.github.stefan_zobel.freyja.lsm.EngineOptions;
 import io.github.stefan_zobel.freyja.lsm.fs.MemoryFileSystem;
 import io.github.stefan_zobel.freyja.node.Node;
 import io.github.stefan_zobel.freyja.node.NodeServer;
+import io.github.stefan_zobel.freyja.node.net.Security;
 import io.github.stefan_zobel.freyja.node.backup.Backups;
 import io.github.stefan_zobel.freyja.node.sm.StateMachineStore;
 import io.github.stefan_zobel.freyja.node.snapshot.SnapshotTransfers;
@@ -68,7 +69,7 @@ class BackupRestoreTest {
         NodeServer server = NodeServer.start(fs, new NodeServer.Settings(data, new InetSocketAddress(LOOPBACK, 0),
                 new InetSocketAddress(LOOPBACK, 0), new InetSocketAddress(LOOPBACK, 0), Map.of(), node,
                 new StateMachineStore.Options(new EngineOptions().deterministic(true).reserveSize(0).minFreeSpace(0)
-                        .memTableSize(32 * 1024).blockCacheCapacity(1 << 20), 60_000), 20, null));
+                        .memTableSize(32 * 1024).blockCacheCapacity(1 << 20), 60_000), 20, null, Security.INSECURE));
         servers.add(server);
         return server;
     }

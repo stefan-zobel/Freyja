@@ -16,7 +16,9 @@ import io.github.stefan_zobel.freyja.common.wire.Handshake;
 import io.github.stefan_zobel.freyja.lsm.fs.StorageFileSystem;
 import io.github.stefan_zobel.freyja.node.backup.Backups;
 import io.github.stefan_zobel.freyja.node.metrics.MetricsRegistry;
+import io.github.stefan_zobel.freyja.common.tls.Tls;
 import io.github.stefan_zobel.freyja.node.net.ClientListener;
+import io.github.stefan_zobel.freyja.node.net.Security;
 import io.github.stefan_zobel.freyja.node.net.StatusEndpoint;
 import io.github.stefan_zobel.freyja.node.net.TcpTransport;
 import io.github.stefan_zobel.freyja.node.service.ClientService;
@@ -46,14 +48,20 @@ public final class NodeServer implements Closeable {
      * @param machine       the settings of the state machine
      * @param tickMillis    how long a tick takes
      * @param statusListen  where to serve metrics and health over HTTP; {@code null} for nowhere
+     * @param security      TLS and authentication of the three listeners, or
+     *                      {@link Security#INSECURE}
      */
     public record Settings(Path dataDirectory, InetSocketAddress peerListen, InetSocketAddress clientListen,
                            InetSocketAddress adminListen, Map<Integer, String> seedPeers, Node.Options node,
-                           StateMachineStore.Options machine, int tickMillis, InetSocketAddress statusListen) {
+                           StateMachineStore.Options machine, int tickMillis, InetSocketAddress statusListen,
+                           Security security) {
         public Settings {
             seedPeers = Map.copyOf(seedPeers);
+            java.util.Objects.requireNonNull(security, "security");
         }
     }
+
+    private static final System.Logger LOG = System.getLogger("freyja.node");
 
     private final NodeIdentity identity;
     private final NodeRuntime runtime;
@@ -64,11 +72,13 @@ public final class NodeServer implements Closeable {
     private final MetricsRegistry metrics = new MetricsRegistry();
     private final StorageFileSystem fs;
     private final Path dataDirectory;
+    private final Security security;
     private final java.util.concurrent.atomic.AtomicLong backups = new java.util.concurrent.atomic.AtomicLong();
     private StatusEndpoint status;
 
     private NodeServer(StorageFileSystem fs, Settings settings) throws IOException {
         identity = NodeIdentity.read(fs, settings.dataDirectory());
+        security = settings.security();
         // The engine reports to the same registry as the node.
         settings.machine().engine().metrics(metrics);
         runtime = new NodeRuntime(fs, new NodeRuntime.Config(settings.dataDirectory(), settings.node(),
@@ -76,13 +86,22 @@ public final class NodeServer implements Closeable {
                 settings.tickMillis(), 4096, 500, System::currentTimeMillis,
                 node -> clientAddresses.getOrDefault(node, ""), this::learned));
         transport = new TcpTransport(identity.clusterId(), identity.nodeId(), Version.SOFTWARE,
-                TcpTransport.Options.defaults(), runtime::peerFrame);
+                TcpTransport.Options.defaults(), runtime::peerFrame, security.peers());
+        Tls.ClientCertificate ofClients = security.insecure() || security.clients().settings().trustStore() == null
+                ? Tls.ClientCertificate.NONE
+                : security.tokens() == null ? Tls.ClientCertificate.NEEDED : Tls.ClientCertificate.WANTED;
         clients = new ClientListener(identity.clusterId(), identity.nodeId(), Version.SOFTWARE, Handshake.CLIENT,
-                ClientListener.Options.defaults(), runtime::clientRequest);
+                ClientListener.Options.defaults(), runtime::clientRequest, security.clients(), ofClients,
+                security.tokens());
         this.fs = fs;
         this.dataDirectory = settings.dataDirectory();
         administrators = new ClientListener(identity.clusterId(), identity.nodeId(), Version.SOFTWARE,
-                Handshake.ADMIN, ClientListener.Options.defaults(), this::adminRequest);
+                Handshake.ADMIN, ClientListener.Options.defaults(), this::adminRequest, security.administrators(),
+                security.insecure() ? Tls.ClientCertificate.NONE : Tls.ClientCertificate.NEEDED, null);
+        if (security.insecure()) {
+            LOG.log(System.Logger.Level.WARNING, "node " + identity.nodeId() + " runs in INSECURE mode: no TLS,"
+                    + " and whoever reaches a port is taken for what it says it is");
+        }
         runtime.measure(metrics);
         boolean started = false;
         try {
@@ -244,6 +263,11 @@ public final class NodeServer implements Closeable {
         metrics.gauge("transport.refused", transport.refusedCount());
         metrics.gauge("listener.clients.connections", clients.connectionCount());
         metrics.gauge("listener.clients.refused", clients.refusedCount());
+        metrics.gauge("listener.administrators.connections", administrators.connectionCount());
+        metrics.gauge("listener.administrators.refused", administrators.refusedCount());
+        metrics.gauge("security.insecure", security.insecure() ? 1 : 0);
+        metrics.gauge("security.reloads", security.reloadCount());
+        metrics.gauge("security.reload_failures", security.reloadFailureCount());
         return metrics.render();
     }
 
