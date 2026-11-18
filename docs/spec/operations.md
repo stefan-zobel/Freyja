@@ -125,6 +125,12 @@ Each format gets its dump tool in the milestone that introduces the format.
 
 - Dump an SSTable, a WAL, a manifest, a Raft log segment, the hard state.
 - Verify a data directory or a backup: every checksum, manifest consistency, log continuity.
+  - The tools, all in `kv-tools`: `SstDump`, `WalDump`, `ManifestDump`, `RaftLogDump`,
+    `NodeStateDump` (the small files of a node), `DbVerify` (an engine directory), and
+    `NodeVerify` (the whole data directory of a node that is not running: the small files,
+    every segment of the Raft log, the engine of the generation that counts). None of them
+    changes anything. Each ends with 0 if all is well, 1 on damage, 2 on wrong usage, and
+    says what the node will do about damage at its next start.
 - Salvage: open a damaged standalone engine directory with stated data loss. Never used
   automatically.
 
