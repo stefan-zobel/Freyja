@@ -25,7 +25,7 @@ class LsmEngineCheckpointTest {
     private final MemoryFileSystem fs = new MemoryFileSystem();
     private final Path dir = Path.of("checkpoint-test", "db").toAbsolutePath();
     private final Path copy = Path.of("checkpoint-test", "copy").toAbsolutePath();
-    private final EngineOptions options = new EngineOptions().deterministic(true)
+    private final EngineOptions options = new EngineOptions().reserveSize(0).minFreeSpace(0).deterministic(true)
             .blockCacheCapacity(1 << 20)
             .level0CompactionTrigger(2);
 

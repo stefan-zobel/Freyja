@@ -37,7 +37,7 @@ public final class RealFileSystem implements StorageFileSystem {
     public WritableFile create(Path path) throws IOException {
         FileChannel channel = FileChannel.open(path,
                 StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
-        return new RealWritableFile(channel);
+        return new RealWritableFile(channel, path);
     }
 
     @Override
@@ -152,16 +152,35 @@ public final class RealFileSystem implements StorageFileSystem {
 
     private static final class RealWritableFile implements WritableFile {
         private final FileChannel channel;
+        private final Path path;
         private long size;
 
-        RealWritableFile(FileChannel channel) {
+        RealWritableFile(FileChannel channel, Path path) {
             this.channel = channel;
+            this.path = path;
         }
 
         @Override
         public void append(ByteBuffer src) throws IOException {
-            while (src.hasRemaining()) {
-                size += channel.write(src);
+            try {
+                while (src.hasRemaining()) {
+                    size += channel.write(src);
+                }
+            } catch (IOException e) {
+                // The platforms report a full device with different messages. Ask the file
+                // store instead: if what is left to write does not fit, that was the reason.
+                long free;
+                try {
+                    free = Files.getFileStore(path).getUsableSpace();
+                } catch (IOException | RuntimeException ignored) {
+                    throw e;
+                }
+                if (free < src.remaining()) {
+                    NoSpaceException full = new NoSpaceException("no space left on device: " + path);
+                    full.initCause(e);
+                    throw full;
+                }
+                throw e;
             }
         }
 

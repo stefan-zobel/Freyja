@@ -23,7 +23,7 @@ class LsmEngineCompactionTest {
 
     private final MemoryFileSystem fs = new MemoryFileSystem();
     private final Path dir = Path.of("compaction-test").toAbsolutePath();
-    private final EngineOptions options = new EngineOptions().deterministic(true)
+    private final EngineOptions options = new EngineOptions().reserveSize(0).minFreeSpace(0).deterministic(true)
             .blockCacheCapacity(1 << 20)
             .level0CompactionTrigger(2);
 
@@ -320,7 +320,10 @@ class LsmEngineCompactionTest {
             assertEquals("1", s(engine.get(b("other"))));
             assertEquals(100, engine.get(b(key(0))).length);
             engine.put(b("more"), b("2"));
-            assertThrows(CorruptionException.class, engine::compact);
+            // The table is marked as damaged and is left alone from now on: compacting it
+            // would fail every time.
+            assertEquals(1, engine.damagedFileCount());
+            assertFalse(engine.compact());
             assertEquals(0, engine.blockCache().pinnedCount());
         }
         assertEquals(0, fs.openHandleCount());

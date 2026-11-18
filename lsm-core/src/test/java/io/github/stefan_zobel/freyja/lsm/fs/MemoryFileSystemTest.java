@@ -208,10 +208,11 @@ class MemoryFileSystemTest extends FileSystemContract {
         try (WritableFile file = fs.create(a)) {
             file.append(new byte[60], 0, 60);
             assertEquals(40, fs.freeSpace(root));
-            assertThrows(IOException.class, () -> file.append(new byte[41], 0, 41));
-            assertEquals(60, file.size()); // a failed append writes nothing
-            file.append(new byte[40], 0, 40);
+            // As on a real device, the part that still fits is written before the failure.
+            assertThrows(NoSpaceException.class, () -> file.append(new byte[41], 0, 41));
+            assertEquals(100, file.size());
             assertEquals(0, fs.freeSpace(root));
+            assertThrows(NoSpaceException.class, () -> file.append(new byte[1], 0, 1));
         }
         // A hard link uses no additional space; deleting the last name frees it.
         fs.link(a, root.resolve("b"));

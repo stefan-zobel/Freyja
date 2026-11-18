@@ -149,7 +149,7 @@ class LsmEngineFuzzTest {
             Random random = new Random(seed);
             MemoryFileSystem fs = new MemoryFileSystem();
             Path dir = Path.of("fuzz-" + seed).toAbsolutePath();
-            EngineOptions options = new EngineOptions().deterministic(true)
+            EngineOptions options = new EngineOptions().reserveSize(0).minFreeSpace(0).deterministic(true)
                     .memTableSize(1024 + random.nextInt(64 * 1024))
                     .blockCacheCapacity(random.nextInt(4) == 0 ? 0 : 64 * 1024 * (1 + random.nextInt(8)))
                     // Small limits, so that data moves through several levels.

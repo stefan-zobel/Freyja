@@ -16,6 +16,7 @@ import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
@@ -51,6 +52,23 @@ public final class MemoryFileSystem implements StorageFileSystem {
     private final TreeSet<Path> directories = new TreeSet<>();
     private TreeMap<Path, Inode> entries = new TreeMap<>();
     private final TreeMap<Path, Inode> durableEntries = new TreeMap<>();
+
+    /**
+     * A change to the names of a directory that is not durable yet.
+     *
+     * @param kind   {@link #PUT}, {@link #REMOVE}, or {@link #RENAME}
+     * @param name   the name that is added, removed, or renamed
+     * @param target the new name of a rename
+     * @param inode  the file behind the name
+     */
+    private record NameChange(int kind, Path name, Path target, Inode inode) {
+        static final int PUT = 0;
+        static final int REMOVE = 1;
+        static final int RENAME = 2;
+    }
+
+    /** Name changes since the last sync of their directory, in the order they happened. */
+    private final List<NameChange> pendingNameChanges = new ArrayList<>();
     private final Map<Path, Integer> openHandles = new HashMap<>();
     private final Set<Path> locks = new HashSet<>();
     private long capacity = Long.MAX_VALUE;
@@ -59,18 +77,131 @@ public final class MemoryFileSystem implements StorageFileSystem {
     // ---- test controls ---------------------------------------------------------------------
 
     /**
-     * Simulates a crash: everything that is not durable disappears, and every handle that is
-     * still open fails from now on.
+     * Simulates a crash with the simplest outcome: everything that is not durable
+     * disappears, and every handle that is still open fails from now on.
      */
     public void crash() {
         synchronized (lock) {
             epoch++;
             openHandles.clear();
             locks.clear(); // a crashed process holds no locks
+            pendingNameChanges.clear();
             entries = new TreeMap<>(durableEntries);
             for (Inode inode : entries.values()) {
                 inode.size = inode.syncedSize;
             }
+        }
+    }
+
+    /**
+     * Simulates a crash with a random outcome that the storage fault model allows
+     * (docs/spec/verification.md, section 2.2):
+     * <ul>
+     *   <li>Of the name changes of a directory that were not synced, a prefix survives: the
+     *       first few in the order they were made, possibly none, possibly all.</li>
+     *   <li>Of the bytes of a file that were written but not synced, a prefix of any length
+     *       survives, and within it any stretch may have been replaced by zeros or by
+     *       garbage.</li>
+     *   <li>Synced bytes and synced names survive unchanged.</li>
+     * </ul>
+     * What survives is durable afterward. Every open handle fails from now on.
+     */
+    public void crash(Random random) {
+        synchronized (lock) {
+            epoch++;
+            openHandles.clear();
+            locks.clear();
+
+            // Names: per directory, a prefix of the pending changes.
+            Map<Path, List<NameChange>> byDirectory = new HashMap<>();
+            for (NameChange change : pendingNameChanges) {
+                byDirectory.computeIfAbsent(change.name().getParent(), k -> new ArrayList<>()).add(change);
+            }
+            TreeMap<Path, Inode> survived = new TreeMap<>(durableEntries);
+            for (Path directory : new TreeSet<>(byDirectory.keySet())) {
+                List<NameChange> changes = byDirectory.get(directory);
+                int kept = switch (random.nextInt(3)) {
+                    case 0 -> 0;
+                    case 1 -> changes.size();
+                    default -> random.nextInt(changes.size() + 1);
+                };
+                for (NameChange change : changes.subList(0, kept)) {
+                    switch (change.kind()) {
+                        case NameChange.PUT -> survived.put(change.name(), change.inode());
+                        case NameChange.REMOVE -> survived.remove(change.name());
+                        default -> {
+                            survived.remove(change.name());
+                            survived.put(change.target(), change.inode());
+                        }
+                    }
+                }
+            }
+            pendingNameChanges.clear();
+            entries = survived;
+            durableEntries.clear();
+            durableEntries.putAll(survived);
+
+            // Contents: the unsynced tail of every file.
+            IdentityHashMap<Inode, Boolean> seen = new IdentityHashMap<>();
+            for (Inode inode : entries.values()) {
+                if (seen.put(inode, Boolean.TRUE) == null) {
+                    tear(inode, random);
+                }
+            }
+        }
+    }
+
+    /** Decides what is left of the unsynced bytes of one file. */
+    private static void tear(Inode inode, Random random) {
+        int synced = inode.syncedSize;
+        int unsynced = inode.size - synced;
+        if (unsynced > 0) {
+            int kept = switch (random.nextInt(3)) {
+                case 0 -> 0;
+                case 1 -> unsynced;
+                default -> random.nextInt(unsynced + 1);
+            };
+            int pos = synced;
+            int end = synced + kept;
+            while (pos < end) {
+                int length = Math.min(end - pos, 1 + random.nextInt(4096));
+                int fate = random.nextInt(10);
+                if (fate == 0) {
+                    Arrays.fill(inode.data, pos, pos + length, (byte) 0);
+                } else if (fate == 1) {
+                    byte[] garbage = new byte[length];
+                    random.nextBytes(garbage);
+                    System.arraycopy(garbage, 0, inode.data, pos, length);
+                }
+                pos += length;
+            }
+            inode.size = end;
+        }
+        inode.syncedSize = inode.size;
+    }
+
+    /**
+     * Damages stored data: replaces the bytes at {@code offset} of the file, synced or not,
+     * as a failing device would. The file must be long enough.
+     */
+    public void overwrite(Path path, long offset, byte[] bytes) throws IOException {
+        synchronized (lock) {
+            Inode inode = requireFile(key(path));
+            if (offset < 0 || offset + bytes.length > inode.size) {
+                throw new IllegalArgumentException("range outside the file " + path);
+            }
+            System.arraycopy(bytes, 0, inode.data, (int) offset, bytes.length);
+        }
+    }
+
+    /** Returns a copy of {@code length} bytes at {@code offset} of the file, for tests. */
+    public byte[] peek(Path path, long offset, int length) throws IOException {
+        synchronized (lock) {
+            Inode inode = requireFile(key(path));
+            if (offset < 0 || offset + length > inode.size) {
+                throw new IllegalArgumentException("range outside the file " + path);
+            }
+            return Arrays.copyOfRange(inode.data, (int) offset, (int) offset + length);
         }
     }
 
@@ -116,6 +247,7 @@ public final class MemoryFileSystem implements StorageFileSystem {
             }
             Inode inode = new Inode();
             entries.put(name, inode);
+            pendingNameChanges.add(new NameChange(NameChange.PUT, name, null, inode));
             return new Handle(name, inode);
         }
     }
@@ -142,6 +274,7 @@ public final class MemoryFileSystem implements StorageFileSystem {
             }
             entries.remove(from);
             entries.put(to, inode);
+            pendingNameChanges.add(new NameChange(NameChange.RENAME, from, to, inode));
         }
     }
 
@@ -156,6 +289,7 @@ public final class MemoryFileSystem implements StorageFileSystem {
                 throw new FileAlreadyExistsException(to.toString());
             }
             entries.put(to, inode);
+            pendingNameChanges.add(new NameChange(NameChange.PUT, to, null, inode));
         }
     }
 
@@ -166,6 +300,7 @@ public final class MemoryFileSystem implements StorageFileSystem {
             requireFile(name);
             requireNotOpen(name);
             entries.remove(name);
+            pendingNameChanges.add(new NameChange(NameChange.REMOVE, name, null, null));
         }
     }
 
@@ -225,6 +360,7 @@ public final class MemoryFileSystem implements StorageFileSystem {
         synchronized (lock) {
             Path parent = key(dir);
             requireDirectory(parent);
+            pendingNameChanges.removeIf(change -> parent.equals(change.name().getParent()));
             durableEntries.keySet().removeIf(p -> parent.equals(p.getParent()));
             for (Map.Entry<Path, Inode> e : entries.entrySet()) {
                 if (parent.equals(e.getKey().getParent())) {
@@ -238,6 +374,9 @@ public final class MemoryFileSystem implements StorageFileSystem {
     public long freeSpace(Path dir) throws IOException {
         synchronized (lock) {
             requireDirectory(key(dir));
+            if (capacity == Long.MAX_VALUE) {
+                return Long.MAX_VALUE;
+            }
             return Math.max(0, capacity - usedBytes());
         }
     }
@@ -251,7 +390,9 @@ public final class MemoryFileSystem implements StorageFileSystem {
                 if (directories.contains(name)) {
                     throw new FileSystemException(name.toString(), null, "is a directory");
                 }
-                entries.put(name, new Inode());
+                Inode inode = new Inode();
+                entries.put(name, inode);
+                pendingNameChanges.add(new NameChange(NameChange.PUT, name, null, inode));
             }
             if (!locks.add(name)) {
                 throw new IOException("the lock " + name + " is held by another owner");
@@ -342,7 +483,16 @@ public final class MemoryFileSystem implements StorageFileSystem {
                 requireUsable();
                 int length = src.remaining();
                 if (capacity != Long.MAX_VALUE && usedBytes() + length > capacity) {
-                    throw new IOException("no space left on device: " + name);
+                    // As on a real device, the part that still fits is written.
+                    int fits = (int) Math.max(0, Math.min(length, capacity - usedBytes()));
+                    if (fits > 0) {
+                        if (inode.size + fits > inode.data.length) {
+                            inode.data = Arrays.copyOf(inode.data, inode.size + fits);
+                        }
+                        src.get(inode.data, inode.size, fits);
+                        inode.size += fits;
+                    }
+                    throw new NoSpaceException("no space left on device: " + name);
                 }
                 long newSize = (long) inode.size + length;
                 if (newSize > Integer.MAX_VALUE - 8) {

@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -19,8 +20,11 @@ import java.util.concurrent.locks.ReentrantLock;
 
 import io.github.stefan_zobel.freyja.common.ByteComparator;
 import io.github.stefan_zobel.freyja.common.DecodeException;
+import io.github.stefan_zobel.freyja.common.Metrics;
+import io.github.stefan_zobel.freyja.lsm.fs.NoSpaceException;
 import io.github.stefan_zobel.freyja.lsm.fs.ReadableFile;
 import io.github.stefan_zobel.freyja.lsm.fs.StorageFileSystem;
+import io.github.stefan_zobel.freyja.lsm.fs.WritableFile;
 import io.github.stefan_zobel.freyja.lsm.log.FileKind;
 import io.github.stefan_zobel.freyja.lsm.log.LogReader;
 import io.github.stefan_zobel.freyja.lsm.log.LogWriter;
@@ -257,6 +261,15 @@ public final class LsmEngine implements Closeable {
     /** Number of writers that are being delayed or stalled right now. */
     private final AtomicInteger heldBackWriters = new AtomicInteger();
 
+    private final Metrics metrics;
+    private final DamageListener damageListener;
+    /** Numbers of the table files in which damage was found. */
+    private final Set<Long> damagedFiles = ConcurrentHashMap.newKeySet();
+    private final Object reserveMonitor = new Object();
+    private volatile long lastScrubNanos;
+    /** For each sequence number with a live snapshot: when its first snapshot was taken. */
+    private final TreeMap<Long, Long> snapshotTimes = new TreeMap<>(); // guarded by snapshots
+
     private volatile ReadState state;
 
     /** Set when the engine is closed, so that reads fail instead of using released tables. */
@@ -276,6 +289,8 @@ public final class LsmEngine implements Closeable {
         this.fs = fs;
         this.dir = dir;
         this.options = new EngineOptions(options);
+        this.metrics = this.options.metrics();
+        this.damageListener = this.options.damageListener();
     }
 
     /**
@@ -303,6 +318,9 @@ public final class LsmEngine implements Closeable {
                     engine.options.deterministic() ? 0 : engine.options.compactionBytesPerSecond(),
                     engine.options.clock(), RateLimiter.PARK, () -> engine.heldBackWriters.get() > 0);
             engine.recover();
+            engine.ensureReserve();
+            engine.lastScrubNanos = engine.options.clock().nanoTime();
+            engine.reportGauges();
         } catch (Throwable t) {
             engine.releaseResources(t);
             throw t;
@@ -434,7 +452,7 @@ public final class LsmEngine implements Closeable {
                 throw new CorruptionException(path.toString(), 0, "table has " + size
                         + " bytes, the manifest records " + file.size());
             }
-            tables.put(file.number(), SSTableReader.open(fs, path, file.number(), cache, metadataBudget));
+            tables.put(file.number(), openReader(path, file.number()));
         } catch (NoSuchFileException e) {
             throw new CorruptionException(path.toString(), 0,
                     "a table listed in the manifest is missing", e);
@@ -639,8 +657,8 @@ public final class LsmEngine implements Closeable {
         lock.unlock();
         try {
             action.run();
-        } catch (WriteStalledException e) {
-            error = e;
+        } catch (WriteStalledException | DiskFullException e) {
+            error = e; // the request failed; the engine is intact
             fatal = false;
         } catch (EngineFailedException e) {
             error = e; // the engine has failed already
@@ -697,17 +715,31 @@ public final class LsmEngine implements Closeable {
                 bytes += write.batch.encodedSize();
             }
 
+            long groupBytes = bytes;
             error = runUnlocked(() -> {
+                requireFreeSpace();
                 makeRoom();
                 long first = lastSequence + 1;
                 long next = first;
-                for (Pending write : group) {
-                    wal.addRecord(write.batch.encode(next));
-                    next += write.batch.count();
+                long logSizeBefore = wal.size();
+                try {
+                    for (Pending write : group) {
+                        wal.addRecord(write.batch.encode(next));
+                        next += write.batch.count();
+                    }
+                } catch (NoSpaceException e) {
+                    // Only this group fails. The log gets rid of what was written of it.
+                    replaceLogAfterNoSpace(logSizeBefore);
+                    throw new DiskFullException("the write did not fit into the log", e);
                 }
                 if (sync) {
+                    long started = options.clock().nanoTime();
                     wal.sync();
+                    metrics.duration("wal.sync", options.clock().nanoTime() - started);
                 }
+                metrics.count("write.groups", 1);
+                metrics.count("write.batches", group.size());
+                metrics.count("write.bytes", groupBytes);
                 // Logged; now make the entries readable.
                 WriteBatch.Handler inserter = inserter(state.mem());
                 next = first;
@@ -822,13 +854,15 @@ public final class LsmEngine implements Closeable {
             }
             long remaining = deadline - now;
             if (remaining <= 0) {
+                metrics.count("write.stall.timeouts", 1);
                 throw new WriteStalledException("the write stalled for "
                         + options.writeStallTimeoutMillis() + " ms: " + reason);
             }
             backgroundWake = true;
             backgroundSignal.signal();
             try {
-                progress.awaitNanos(remaining);
+                long left = progress.awaitNanos(remaining);
+                metrics.duration("write.stall", remaining - Math.max(left, 0));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new WriteStalledException("interrupted while the write waited: " + reason);
@@ -895,8 +929,22 @@ public final class LsmEngine implements Closeable {
             }
             Frozen oldest = before.frozen().get(0);
 
-            // 1. The table file, durable before the manifest mentions it.
-            FileMeta file = writeTable(oldest.mem());
+            // 1. The table file, durable before the manifest mentions it. If the disk is
+            //    full, the reserve is given up for it.
+            long started = options.clock().nanoTime();
+            FileMeta file;
+            try {
+                file = writeTable(oldest.mem());
+            } catch (NoSpaceException e) {
+                if (!freeReserve()) {
+                    throw new DiskFullException("no space to flush a MemTable", e);
+                }
+                try {
+                    file = writeTable(oldest.mem());
+                } catch (NoSpaceException again) {
+                    throw new DiskFullException("no space to flush a MemTable", again);
+                }
+            }
 
             // 2. One manifest edit makes the file live and the MemTable's log obsolete. It
             //    takes effect only once it is synced.
@@ -910,9 +958,9 @@ public final class LsmEngine implements Closeable {
                         .nextFileNumber(nextFileNumber.get())
                         .lastSequence(oldest.lastSequence())
                         .minWalNumber(oldestLiveWal);
-                manifest.addRecord(edit.encode());
-                manifest.sync();
-                publish(new ReadState(now.mem(), now.memWalNumber(), remaining, now.version().apply(edit), tables));
+                Version after = now.version().apply(edit);
+                appendToManifest(edit, after);
+                publish(new ReadState(now.mem(), now.memWalNumber(), remaining, after, tables));
                 rollManifestIfLarge();
             } finally {
                 stateLock.unlock();
@@ -921,6 +969,11 @@ public final class LsmEngine implements Closeable {
             // 3. The log is no longer needed.
             deleteQuietly(FileNames.wal(dir, oldest.walNumber()));
             signalProgress();
+            metrics.count("flush.count", 1);
+            metrics.count("flush.bytes", file.size());
+            metrics.duration("flush.time", options.clock().nanoTime() - started);
+            restoreReserve();
+            reportGauges();
             return true;
         } finally {
             flushLock.unlock();
@@ -928,18 +981,48 @@ public final class LsmEngine implements Closeable {
     }
 
     /**
-     * Replaces the manifest by a new one that holds only the current state, once it has
-     * grown past its limit. Called with {@code stateLock} held, after an edit took effect.
-     * A failure leaves it unknown which manifest {@code CURRENT} names, so it stops the
-     * engine.
+     * Appends an edit to the manifest and syncs it. Called with {@code stateLock} held.
+     *
+     * <p>If the disk is full, the reserve is given up and the manifest is replaced by a new
+     * one that describes {@code after}; what was written of the edit stays behind in the old
+     * manifest and is never read. Any other failure, and a failure of the replacement, stop
+     * the engine: the durable state of the manifest is unknown then.
+     *
+     * @param after the version the edit leads to
+     */
+    private void appendToManifest(VersionEdit edit, Version after) throws IOException {
+        try {
+            manifest.addRecord(edit.encode());
+            manifest.sync();
+        } catch (NoSpaceException e) {
+            freeReserve();
+            replaceManifest(after);
+        } catch (IOException e) {
+            EngineFailedException failed = new EngineFailedException("a manifest write failed", e);
+            fail(failed);
+            throw failed;
+        }
+    }
+
+    /**
+     * Replaces the manifest once it has grown past its limit. Called with {@code stateLock}
+     * held, after an edit took effect.
      */
     private void rollManifestIfLarge() throws IOException {
-        if (manifest.size() < options.maxManifestSize()) {
-            return;
+        if (manifest.size() >= options.maxManifestSize()) {
+            replaceManifest(state.version());
         }
+    }
+
+    /**
+     * Replaces the manifest by a new one that holds only {@code version}, by the same steps
+     * as at open. A failure leaves it unknown which manifest {@code CURRENT} names, so it
+     * stops the engine.
+     */
+    private void replaceManifest(Version version) throws IOException {
         try {
             long number = nextFileNumber.getAndIncrement();
-            Version snapshot = state.version().apply(new VersionEdit().nextFileNumber(nextFileNumber.get()));
+            Version snapshot = version.apply(new VersionEdit().nextFileNumber(nextFileNumber.get()));
             LogWriter next = new LogWriter(fs.create(FileNames.manifest(dir, number)), number, FileKind.MANIFEST);
             try {
                 next.addRecord(snapshot.toEdit().encode());
@@ -956,6 +1039,7 @@ public final class LsmEngine implements Closeable {
             manifestNumber = number;
             previous.close();
             deleteQuietly(FileNames.manifest(dir, previousNumber));
+            metrics.count("manifest.replaced", 1);
         } catch (IOException e) {
             EngineFailedException failed = new EngineFailedException("replacing the manifest failed", e);
             fail(failed);
@@ -968,14 +1052,19 @@ public final class LsmEngine implements Closeable {
         long number = nextFileNumber.getAndIncrement();
         Path path = FileNames.table(dir, number);
         SSTableWriter.TableInfo info;
-        try (SSTableWriter writer = new SSTableWriter(fs, path, number)) {
-            for (Map.Entry<byte[], byte[]> entry : source.entries()) {
-                writer.add(entry.getKey(), entry.getValue());
+        try {
+            try (SSTableWriter writer = new SSTableWriter(fs, path, number)) {
+                for (Map.Entry<byte[], byte[]> entry : source.entries()) {
+                    writer.add(entry.getKey(), entry.getValue());
+                }
+                info = writer.finish();
             }
-            info = writer.finish();
+            fs.syncDirectory(dir);
+        } catch (IOException e) {
+            deleteQuietly(path); // nothing refers to the unfinished file
+            throw e;
         }
-        fs.syncDirectory(dir);
-        tables.put(number, SSTableReader.open(fs, path, number, cache, metadataBudget));
+        tables.put(number, openReader(path, number));
         return new FileMeta(number, info.fileSize(), info.smallestKey(), info.largestKey(),
                 info.smallestSequence(), info.largestSequence());
     }
@@ -994,6 +1083,8 @@ public final class LsmEngine implements Closeable {
         boolean flushed;
         try {
             flushed = flushOldest();
+        } catch (DiskFullException | EngineFailedException e) {
+            throw e; // no space: the MemTable stays in its log; or the engine has stopped
         } catch (IOException e) {
             // The manifest or the table may be half written: no further writes.
             EngineFailedException failed = new EngineFailedException("a flush failed", e);
@@ -1018,10 +1109,20 @@ public final class LsmEngine implements Closeable {
 
     private void backgroundLoop() {
         while (true) {
+            boolean scrubDue = false;
             lock.lock();
             try {
-                while (!backgroundWake && !closed) {
-                    backgroundSignal.awaitUninterruptibly();
+                while (!backgroundWake && !closed && !scrubDue) {
+                    long wait = nanosUntilScrub();
+                    if (wait <= 0) {
+                        scrubDue = true;
+                    } else {
+                        try {
+                            backgroundSignal.awaitNanos(wait);
+                        } catch (InterruptedException e) {
+                            // Only a close ends this thread.
+                        }
+                    }
                 }
                 if (closed) {
                     return;
@@ -1033,6 +1134,9 @@ public final class LsmEngine implements Closeable {
             try {
                 while (!closed && failure == null && runBackgroundWork()) {
                     lastCompactionProblem = null;
+                }
+                if (scrubDue && !closed) {
+                    scrub();
                 }
             } catch (IOException | RuntimeException e) {
                 // A failed flush has put the engine into the failed state. A failed
@@ -1125,7 +1229,24 @@ public final class LsmEngine implements Closeable {
                 if (plan == null) {
                     return false;
                 }
-                runCompaction(pinned, plan);
+                long started = options.clock().nanoTime();
+                try {
+                    runCompaction(pinned, plan);
+                } catch (NoSpaceException e) {
+                    // The reserve is there for exactly this: compaction is what frees space.
+                    if (!freeReserve()) {
+                        throw new DiskFullException("no space to compact", e);
+                    }
+                    try {
+                        runCompaction(pinned, plan);
+                    } catch (NoSpaceException again) {
+                        throw new DiskFullException("no space to compact", again);
+                    }
+                }
+                metrics.count("compaction.count", 1);
+                metrics.duration("compaction.time", options.clock().nanoTime() - started);
+                restoreReserve();
+                reportGauges();
                 // Only success counts as progress: writers that wait for a compaction that
                 // keeps failing wait until their time is over instead of retrying in a loop.
                 signalProgress();
@@ -1185,7 +1306,20 @@ public final class LsmEngine implements Closeable {
                 largest = high;
             }
         }
-        return new CompactionPlan(best, inputs, version.overlapping(best + 1, smallest, largest));
+        CompactionPlan plan = new CompactionPlan(best, inputs, version.overlapping(best + 1, smallest, largest));
+        // A damaged table is not compacted: its damage would abort the compaction every
+        // time. It stays where it is until the node repairs the replica.
+        for (FileMeta file : plan.inputs()) {
+            if (damagedFiles.contains(file.number())) {
+                return null;
+            }
+        }
+        for (FileMeta file : plan.nextLevelInputs()) {
+            if (damagedFiles.contains(file.number())) {
+                return null;
+            }
+        }
+        return plan;
     }
 
     /**
@@ -1209,8 +1343,8 @@ public final class LsmEngine implements Closeable {
             writeCompactionOutputs(pinned, plan, allInputs, new Retention(liveSnapshots), outputs);
             fs.syncDirectory(dir);
             for (FileMeta output : outputs) {
-                outputReaders.put(output.number(), SSTableReader.open(
-                        fs, FileNames.table(dir, output.number()), output.number(), cache, metadataBudget));
+                outputReaders.put(output.number(),
+                        openReader(FileNames.table(dir, output.number()), output.number()));
             }
 
             // 2. One edit replaces the inputs by the outputs.
@@ -1231,20 +1365,13 @@ public final class LsmEngine implements Closeable {
                     throw rejected;
                 }
                 edit.nextFileNumber(nextFileNumber.get());
+                ReadState before = state;
+                Version after = before.version().apply(edit);
                 // From here on the edit may be durable, so the outputs must stay.
                 editAttempted = true;
-                try {
-                    manifest.addRecord(edit.encode());
-                    manifest.sync();
-                } catch (IOException e) {
-                    EngineFailedException failed = new EngineFailedException("a manifest write failed", e);
-                    fail(failed);
-                    throw failed;
-                }
+                appendToManifest(edit, after);
                 tables.putAll(outputReaders);
-                ReadState before = state;
-                publish(new ReadState(before.mem(), before.memWalNumber(), before.frozen(),
-                        before.version().apply(edit), tables));
+                publish(new ReadState(before.mem(), before.memWalNumber(), before.frozen(), after, tables));
                 rollManifestIfLarge();
             } finally {
                 stateLock.unlock();
@@ -1333,6 +1460,7 @@ public final class LsmEngine implements Closeable {
                 }
                 byte[] value = merged.value();
                 compactionLimiter.acquire(key.length + value.length);
+                metrics.count("compaction.bytes", key.length + value.length);
                 writer.add(key, value);
             }
             if (writer != null) {
@@ -1352,6 +1480,188 @@ public final class LsmEngine implements Closeable {
         SSTableWriter.TableInfo info = writer.finish();
         return new FileMeta(number, info.fileSize(), info.smallestKey(), info.largestKey(),
                 info.smallestSequence(), info.largestSequence());
+    }
+
+    // ---- damage and scrubbing --------------------------------------------------------------
+
+    /** Opens the reader of a table file and connects it to the damage reports. */
+    private SSTableReader openReader(Path path, long number) throws IOException {
+        SSTableReader reader = SSTableReader.open(fs, path, number, cache, metadataBudget);
+        reader.onDamage(damage -> reportDamage(number, damage));
+        return reader;
+    }
+
+    /** Marks a table file as damaged and tells the listener. The engine never repairs. */
+    private void reportDamage(long fileNumber, CorruptionException damage) {
+        if (damagedFiles.add(fileNumber)) {
+            metrics.count("damage.files", 1);
+        }
+        try {
+            damageListener.damaged(damage);
+        } catch (RuntimeException e) {
+            // A failing listener must not turn a detected fault into another one.
+        }
+    }
+
+    /** Returns the number of table files in which damage was found since the engine opened. */
+    public int damagedFileCount() {
+        return damagedFiles.size();
+    }
+
+    /**
+     * Reads every block of every live table and verifies it
+     * (docs/spec/storage-engine.md, section 3.1). Damage goes to the damage listener and to
+     * the metrics; the scrub goes on with the next table.
+     *
+     * @return the number of tables in which this pass found damage
+     */
+    public int scrub() throws IOException {
+        int damaged = 0;
+        ReadState pinned = pinState();
+        try {
+            for (FileMeta file : pinned.version().allFiles()) {
+                if (closed) {
+                    break;
+                }
+                try {
+                    pinned.reader(file.number()).verify(bytes -> {
+                        compactionLimiter.acquire(bytes);
+                        metrics.count("scrub.bytes", bytes);
+                    });
+                } catch (CorruptionException e) {
+                    damaged++; // reported through the reader already
+                }
+            }
+        } finally {
+            pinned.unpin();
+        }
+        lastScrubNanos = options.clock().nanoTime();
+        metrics.count("scrub.passes", 1);
+        reportGauges();
+        return damaged;
+    }
+
+    /** Returns the time until the next scrub pass is due; not positive if it is due. */
+    private long nanosUntilScrub() {
+        long period = options.scrubPeriodMillis();
+        if (period == 0) {
+            return Long.MAX_VALUE;
+        }
+        return period * 1_000_000L - (options.clock().nanoTime() - lastScrubNanos);
+    }
+
+    // ---- disk space ------------------------------------------------------------------------
+
+    /** Rejects a write while the file system has less free space than the engine wants. */
+    private void requireFreeSpace() throws IOException {
+        long wanted = options.minFreeSpace();
+        if (wanted > 0) {
+            long free = fs.freeSpace(dir);
+            if (free < wanted) {
+                metrics.count("write.rejected.disk.full", 1);
+                throw new DiskFullException("only " + free + " bytes are free; writes need " + wanted);
+            }
+        }
+    }
+
+    /**
+     * Called when a group did not fit into the log. Cuts the log back to where the group
+     * began, so that none of its records can ever be replayed, and continues with a new
+     * log: a log is never appended to after a failed write. The MemTable of the old log is
+     * frozen with it. Runs on behalf of the writer at the head of the queue.
+     */
+    private void replaceLogAfterNoSpace(long sizeBeforeGroup) throws IOException {
+        long sealedWal = walNumber;
+        Path sealedPath = FileNames.wal(dir, sealedWal);
+        wal.close();
+        fs.truncate(sealedPath, sizeBeforeGroup);
+        freeReserve(); // room for the next log
+        walNumber = nextFileNumber.getAndIncrement();
+        wal = new LogWriter(fs.create(FileNames.wal(dir, walNumber)), walNumber, FileKind.WAL);
+        fs.syncDirectory(dir);
+
+        stateLock.lock();
+        try {
+            ReadState before = state;
+            if (before.mem().isEmpty()) {
+                // The cut log holds no record; the empty MemTable moves on to the new log.
+                publish(new ReadState(before.mem(), walNumber, before.frozen(), before.version(), tables));
+                deleteQuietly(sealedPath);
+            } else {
+                List<Frozen> frozen = new ArrayList<>(before.frozen());
+                frozen.add(new Frozen(before.mem(), sealedWal, lastSequence));
+                publish(new ReadState(new MemTable(), walNumber, frozen, before.version(), tables));
+            }
+        } finally {
+            stateLock.unlock();
+        }
+        wakeBackground();
+    }
+
+    /** Creates the reserve file if it is configured and missing. */
+    private void ensureReserve() throws IOException {
+        long size = options.reserveSize();
+        if (size == 0) {
+            return;
+        }
+        synchronized (reserveMonitor) {
+            Path path = dir.resolve(FileNames.RESERVE);
+            if (fs.exists(path)) {
+                if (fs.size(path) == size) {
+                    return;
+                }
+                fs.delete(path); // left unfinished by a crash, or the size was changed
+            }
+            byte[] zeros = new byte[(int) Math.min(size, 1 << 20)];
+            try {
+                try (WritableFile file = fs.create(path)) {
+                    for (long written = 0; written < size; written += zeros.length) {
+                        file.append(zeros, 0, (int) Math.min(zeros.length, size - written));
+                    }
+                    file.sync();
+                }
+                fs.syncDirectory(dir);
+            } catch (NoSpaceException e) {
+                deleteQuietly(path); // no room for a reserve now
+            }
+        }
+    }
+
+    /**
+     * Deletes the reserve file to make room for a flush, a compaction, or a manifest write.
+     *
+     * @return whether there was a reserve to give up
+     */
+    private boolean freeReserve() {
+        synchronized (reserveMonitor) {
+            Path path = dir.resolve(FileNames.RESERVE);
+            try {
+                if (!fs.exists(path)) {
+                    return false;
+                }
+                fs.delete(path);
+                metrics.count("reserve.released", 1);
+                return true;
+            } catch (IOException e) {
+                return false;
+            }
+        }
+    }
+
+    /** Creates the reserve file again once there is room for it and for writes. */
+    private void restoreReserve() {
+        long size = options.reserveSize();
+        if (size == 0) {
+            return;
+        }
+        try {
+            if (!fs.exists(dir.resolve(FileNames.RESERVE))
+                    && fs.freeSpace(dir) - size >= options.minFreeSpace()) {
+                ensureReserve();
+            }
+        } catch (IOException e) {
+            // Tried again after the next flush or compaction.
+        }
     }
 
     // ---- read state ------------------------------------------------------------------------
@@ -1448,6 +1758,7 @@ public final class LsmEngine implements Closeable {
         synchronized (snapshots) {
             long sequence = lastSequence;
             snapshots.merge(sequence, 1, Integer::sum);
+            snapshotTimes.putIfAbsent(sequence, options.clock().nanoTime());
             return new Snapshot(this, sequence);
         }
     }
@@ -1455,6 +1766,9 @@ public final class LsmEngine implements Closeable {
     void releaseSnapshot(Snapshot snapshot) {
         synchronized (snapshots) {
             snapshots.computeIfPresent(snapshot.sequence(), (k, count) -> count > 1 ? count - 1 : null);
+            if (!snapshots.containsKey(snapshot.sequence())) {
+                snapshotTimes.remove(snapshot.sequence());
+            }
         }
     }
 
@@ -1539,6 +1853,45 @@ public final class LsmEngine implements Closeable {
     }
 
     // ---- figures ---------------------------------------------------------------------------
+
+    /**
+     * Publishes the current values of the engine's gauges to the metrics sink: files and
+     * bytes per level, waiting MemTables, cache figures, snapshots, damage, free space. The
+     * engine does this after every flush, compaction, and scrub; a node calls it before it
+     * exports its metrics.
+     */
+    public void reportGauges() {
+        if (metrics == Metrics.NONE) {
+            return;
+        }
+        ReadState current = state;
+        if (current == null) {
+            return;
+        }
+        Version version = current.version();
+        for (int level = 0; level < version.levelCount(); level++) {
+            metrics.gauge("level." + level + ".files", version.files(level).size());
+            metrics.gauge("level." + level + ".bytes", version.levelBytes(level));
+        }
+        metrics.gauge("memtables.waiting", current.frozen().size());
+        metrics.gauge("memtable.bytes", current.mem().approximateBytes());
+        metrics.gauge("cache.hits", cache.hits());
+        metrics.gauge("cache.misses", cache.misses());
+        metrics.gauge("cache.evictions", cache.evictions());
+        metrics.gauge("table.metadata.bytes", metadataBudget.usedBytes());
+        metrics.gauge("damage.files.current", damagedFiles.size());
+        synchronized (snapshots) {
+            metrics.gauge("snapshots.live", snapshots.size());
+            long oldest = snapshotTimes.isEmpty() ? 0
+                    : (options.clock().nanoTime() - snapshotTimes.firstEntry().getValue()) / 1_000_000L;
+            metrics.gauge("snapshots.oldest.age.millis", oldest);
+        }
+        try {
+            metrics.gauge("disk.free.bytes", fs.freeSpace(dir));
+        } catch (IOException e) {
+            // The gauge keeps its last value.
+        }
+    }
 
     /** Returns the number of scans that are not closed. */
     public int openScanCount() {

@@ -41,9 +41,21 @@ Checks:
 
 - Crash at every file-system operation of a workload in turn, reopen, and verify: every
   acknowledged write is present, no partial batch is visible, the engine accepts new writes.
+  - The workload mixes synced and unsynced writes, flushes, compactions through several
+    levels, checkpoints, manifest replacements, and reopens.
+  - Each crash has a random outcome within the fault model for everything not synced.
+  - The recovered state must be one of: the state after the last write known to be durable,
+    any later state, or the state a write in flight would have produced.
+  - For a part of the crash points the recovery crashes as well, once or twice in a row.
 - Damage synced files: the engine must detect it and fail the affected read or the open. It
   must never return wrong data. The classification of `storage-format.md` §3.2 is tested with
   both torn tails and damage, including the stated residual case.
+  - Damage is a flipped bit, a zeroed range, a garbled range, or bytes of another file (a
+    misdirected write), at a random place in a table, a log, the manifest, or `CURRENT`.
+  - In a log and in the manifest only bytes that a later sync point proves to be synced are
+    damaged. Damage in the tail after the last sync point is the stated residual case and
+    is covered by the format tests.
+  - Every such damage must be noticed: by the open, by a point read, or by a full scan.
 - Disk full: writes are rejected, reads keep working, compaction frees space, writes resume.
 
 ### 2.3 File-Handle Leaks

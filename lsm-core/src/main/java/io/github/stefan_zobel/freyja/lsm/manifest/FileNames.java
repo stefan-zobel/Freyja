@@ -17,6 +17,9 @@ public final class FileNames {
     /** Name of the lock file. */
     public static final String LOCK = "LOCK";
 
+    /** Name of the file that keeps space in reserve for the case that the disk fills up. */
+    public static final String RESERVE = "RESERVE";
+
     private static final String WAL_SUFFIX = ".wal";
     private static final String TABLE_SUFFIX = ".sst";
     private static final String MANIFEST_PREFIX = "MANIFEST-";

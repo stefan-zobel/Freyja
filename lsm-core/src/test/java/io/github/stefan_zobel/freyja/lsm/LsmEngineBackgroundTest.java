@@ -29,7 +29,7 @@ class LsmEngineBackgroundTest {
 
     private final MemoryFileSystem fs = new MemoryFileSystem();
     private final Path dir = Path.of("background-test").toAbsolutePath();
-    private final EngineOptions options = new EngineOptions()
+    private final EngineOptions options = new EngineOptions().reserveSize(0).minFreeSpace(0)
             .blockCacheCapacity(1 << 20)
             .memTableSize(8 * 1024)
             .level0CompactionTrigger(2)

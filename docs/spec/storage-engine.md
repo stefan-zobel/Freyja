@@ -23,6 +23,17 @@ milestone with three implementations:
     an open file is allowed.
   - An optional capacity makes appends fail when the file system is full.
 - **Faulty:** wraps another implementation and injects the faults in `verification.md`.
+  - It counts every operation that changes something. A fault source can make any of them
+    fail with an I/O error.
+  - A crash can be scheduled at any counted operation. The operation then happens not at
+    all, in part (an append), or completely; the wrapped file system crashes; and from then
+    on every call fails, so that code which keeps running cannot change what the crash left.
+- The in-memory crash has two forms. The plain one drops everything that is not durable.
+  The randomized one follows the storage fault model: of the unsynced name changes of a
+  directory a prefix survives, and of the unsynced bytes of a file a prefix of any length
+  survives, in which any stretch may be zeroed or garbled.
+- An append that runs out of space fails with a dedicated error (`NoSpaceException`); the
+  part that still fit has been written.
 
 SSTables are read with positional reads into the block cache. Memory-mapped files are not used:
 they cannot be fault-injected, bypass the memory budget, and block file deletion on Windows.
@@ -92,6 +103,10 @@ The engine never returns data it cannot verify and never hides a fault.
    further writes. It never retries the sync.
 2. **Checksum failure on read:** the read fails with a corruption error that names the file
    and offset. The file is marked damaged and reported through the damage listener.
+   - Every path that reads a table reports: point reads, scans, compaction, scrubbing.
+   - A table that is marked damaged is never chosen for compaction again, because the
+     compaction would fail every time. Reads of its intact blocks keep working.
+   - The mark lasts until the engine is closed. Nothing is repaired locally.
 3. **Damage at open** (WAL, manifest, footer, index, or filter block): opening fails with a
    corruption error. An explicit salvage operation in the offline tools can open such a
    directory with data loss; the engine never does that on its own.
@@ -103,8 +118,18 @@ The engine never returns data it cannot verify and never hides a fault.
      write fails for lack of space, the engine deletes it to finish that operation and
      recreates it once space is available.
    - A failed append for lack of space fails only that write. A failed sync stays fatal.
-   - Until disk-full handling is built (milestone A6), every failed log append is treated
-     like a failed sync: a partly written record leaves the log in an unknown state.
+   - Writes rejected for lack of space fail with `DiskFullException`. The engine is intact.
+   - **A group that does not fit into the log:** the log is closed and cut back to where
+     the group began, so that no record of it can ever be replayed. Then a new log is
+     started (a log is never appended to after a failed write), and the MemTable of the old
+     log is frozen with it. If not even the new log can be created, the engine stops.
+   - **A flush or compaction that runs out of space** removes its unfinished output, gives
+     up `RESERVE`, and tries once more. If it fails again, it fails with
+     `DiskFullException` and leaves the engine as it was; the data stays in its log.
+   - **A manifest edit that runs out of space:** `RESERVE` is given up and the manifest is
+     replaced by a new one that already contains the edit.
+   - `RESERVE` is created again after a flush or compaction when there is room for it and
+     for `minFreeSpace`. A `RESERVE` of the wrong size (left by a crash) is recreated at open.
 5. **Damage listener:** a callback through which the engine reports damaged files. The
    standalone default logs it. The node uses it to start a replica repair (`node.md`).
 
@@ -113,6 +138,14 @@ The engine never returns data it cannot verify and never hides a fault.
 A low-priority background task reads every block of every live SSTable and verifies its
 checksum. A full pass completes within `scrubPeriod` (default 7 days). Findings go to the
 damage listener and to the metrics.
+
+- A pass verifies, for every table: the footer, the index block, the filter block, the
+  checksum and structure of every data block, the ascending order of all keys, and that the
+  index names the last key of every block. It reads from the file, never from the cache.
+- The background thread starts a pass when the period has elapsed since the last one.
+  `scrub()` runs a pass on request, also in deterministic mode. A period of 0 disables the
+  periodic pass.
+- A pass continues after a finding and reports how many tables were damaged.
 
 ### 3.2 I/O Rate Limiting
 
@@ -347,3 +380,14 @@ The engine exposes counters and gauges through a small metrics interface from `k
 (no dependency on any metrics library): bytes written and read, flush and compaction counts
 and durations, level sizes and file counts, stall time, cache hits and misses, sync latency
 histogram, scrub progress, damage count, oldest snapshot age, free space.
+
+The interface has three calls: add to a counter, set a gauge, record one duration.
+
+| Kind | Names |
+|---|---|
+| Counters | `write.groups`, `write.batches`, `write.bytes`, `write.stall.timeouts`, `write.rejected.disk.full`, `flush.count`, `flush.bytes`, `compaction.count`, `compaction.bytes`, `scrub.passes`, `scrub.bytes`, `damage.files`, `reserve.released`, `manifest.replaced` |
+| Durations | `wal.sync`, `write.stall`, `flush.time`, `compaction.time` |
+| Gauges | `level.N.files`, `level.N.bytes`, `memtables.waiting`, `memtable.bytes`, `cache.hits`, `cache.misses`, `cache.evictions`, `table.metadata.bytes`, `snapshots.live`, `snapshots.oldest.age.millis`, `damage.files.current`, `disk.free.bytes` |
+
+Gauges are published after every flush, compaction, and scrub, and when the owner asks for
+them before it exports its metrics.

@@ -8,6 +8,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
+import java.util.function.LongConsumer;
 import java.util.zip.CRC32C;
 
 import io.github.stefan_zobel.freyja.common.Checksums;
@@ -52,6 +54,7 @@ public final class SSTableReader {
     private final BlockCache cache; // may be null
     private final AtomicInteger references = new AtomicInteger(1);
     private volatile Runnable whenUnused; // run once after the last reference is released
+    private volatile Consumer<CorruptionException> damageReporter;
 
     /**
      * The index and filter block of the table.
@@ -132,15 +135,21 @@ public final class SSTableReader {
     }
 
     private void load() throws IOException {
+        readFooter();
+        metadata(); // opening verifies the index and the filter block
+    }
+
+    /** Reads and verifies the footer and takes the block handles and the version from it. */
+    private void readFooter() throws IOException {
         if (fileSize < TableFormat.FOOTER_LENGTH) {
-            throw new CorruptionException(name, 0, "file of " + fileSize + " bytes has no footer");
+            throw damage(0, "file of " + fileSize + " bytes has no footer");
         }
         byte[] footer = new byte[TableFormat.FOOTER_LENGTH];
         readFully(footerOffset, footer, "footer");
 
         long magic = LittleEndian.getUint64(footer, 40);
         if ((magic & ~TableFormat.VERSION_MASK) != (TableFormat.MAGIC & ~TableFormat.VERSION_MASK)) {
-            throw new CorruptionException(name, footerOffset,
+            throw damage(footerOffset,
                     "bad magic number 0x" + Long.toHexString(magic));
         }
         CRC32C crc = new CRC32C();
@@ -148,7 +157,7 @@ public final class SSTableReader {
         crc.update(footer, 40, 8);
         int expected = Checksums.finishWithContext(crc, fileNumber, footerOffset);
         if (expected != LittleEndian.getInt32(footer, TableFormat.FOOTER_CHECKSUM_OFFSET)) {
-            throw new CorruptionException(name, footerOffset, "footer checksum mismatch");
+            throw damage(footerOffset, "footer checksum mismatch");
         }
         formatVersion = (int) (magic & TableFormat.VERSION_MASK);
         if (formatVersion != TableFormat.FORMAT_VERSION) {
@@ -158,7 +167,6 @@ public final class SSTableReader {
 
         filterHandle = BlockHandle.decode(footer, 0);
         indexHandle = BlockHandle.decode(footer, 16);
-        metadata(); // opening verifies the index and the filter block
     }
 
     /** Returns the index and filter block, loading and verifying them if necessary. */
@@ -185,12 +193,12 @@ public final class SSTableReader {
         try {
             index = new Block(indexContents);
         } catch (DecodeException e) {
-            throw new CorruptionException(name, indexHandle.offset(), "malformed index block", e);
+            throw damage(indexHandle.offset(), "malformed index block", e);
         }
         try {
             filter = new BloomFilter(filterContents);
         } catch (DecodeException e) {
-            throw new CorruptionException(name, filterHandle.offset(), "malformed filter block", e);
+            throw damage(filterHandle.offset(), "malformed filter block", e);
         }
         current = new Metadata(index, filter, (long) indexContents.length + filterContents.length);
         metadata = current;
@@ -214,6 +222,99 @@ public final class SSTableReader {
     /** Returns whether the index and filter block are in memory now. */
     public boolean metadataLoaded() {
         return metadata != null;
+    }
+
+    // ---- damage ----------------------------------------------------------------------------
+
+    /**
+     * Registers who is told about every piece of damage this reader finds, in addition to
+     * the exception that the failing read throws.
+     */
+    public void onDamage(Consumer<CorruptionException> reporter) {
+        this.damageReporter = reporter;
+    }
+
+    private CorruptionException damage(long offset, String detail) {
+        return damage(offset, detail, null);
+    }
+
+    /** Builds the exception for damage in this table and reports it. */
+    private CorruptionException damage(long offset, String detail, Throwable cause) {
+        CorruptionException damage = (cause == null)
+                ? new CorruptionException(name, offset, detail)
+                : new CorruptionException(name, offset, detail, cause);
+        Consumer<CorruptionException> reporter = damageReporter;
+        if (reporter != null) {
+            reporter.accept(damage);
+        }
+        return damage;
+    }
+
+    /**
+     * Reads the whole table and verifies it: the checksum of every block, the structure of
+     * every block, and the order of all keys. Nothing is taken from the block cache.
+     *
+     * @param onBytes told the size of each block before it is read, for I/O rate limiting;
+     *                may be {@code null}
+     * @return the number of entries in the table
+     * @throws CorruptionException at the first damage found
+     */
+    public long verify(LongConsumer onBytes) throws IOException {
+        retain();
+        try {
+            // The stored footer, index block, and filter block, whether they are in memory
+            // or not.
+            readFooter();
+            Block index;
+            try {
+                index = new Block(readBlock(indexHandle));
+                new BloomFilter(readBlock(filterHandle));
+            } catch (DecodeException e) {
+                throw damage(indexHandle.offset(), "malformed index or filter block", e);
+            }
+            long entries = 0;
+            byte[] previousKey = null;
+            Block.Iterator blocks = index.iterator(InternalKey.COMPARATOR);
+            try {
+                for (blocks.seekToFirst(); blocks.valid(); blocks.next()) {
+                    BlockHandle handle = decodeHandle(blocks.value());
+                    if (onBytes != null) {
+                        onBytes.accept(handle.size() + TableFormat.BLOCK_TRAILER_LENGTH);
+                    }
+                    byte[] lastOfBlock = null;
+                    Block.Iterator it;
+                    try {
+                        it = new Block(readBlock(handle)).iterator(InternalKey.COMPARATOR);
+                        for (it.seekToFirst(); it.valid(); it.next()) {
+                            byte[] key = it.key();
+                            if (!InternalKey.isWellFormed(key) || InternalKey.userKeyLength(key) == 0) {
+                                throw damage(handle.offset(), "malformed internal key");
+                            }
+                            if (previousKey != null && InternalKey.compare(previousKey, key) >= 0) {
+                                throw damage(handle.offset(), "keys are not in ascending order");
+                            }
+                            previousKey = key;
+                            lastOfBlock = key;
+                            it.value();
+                            entries++;
+                        }
+                    } catch (DecodeException e) {
+                        throw damage(handle.offset(), "malformed data block", e);
+                    }
+                    if (lastOfBlock == null || InternalKey.compare(lastOfBlock, blocks.key()) != 0) {
+                        throw damage(handle.offset(), "the index does not name the last key of the block");
+                    }
+                }
+            } catch (DecodeException e) {
+                throw damage(indexHandle.offset(), "malformed index block", e);
+            }
+            if (entries == 0) {
+                throw damage(0, "the table holds no entry");
+            }
+            return entries;
+        } finally {
+            release();
+        }
     }
 
     // ---- reference counting ----------------------------------------------------------------
@@ -352,7 +453,7 @@ public final class SSTableReader {
                 blocks.add(new DataBlockInfo(it.key(), decodeHandle(it.value())));
             }
         } catch (DecodeException e) {
-            throw new CorruptionException(name, indexHandle.offset(), "malformed index block", e);
+            throw damage(indexHandle.offset(), "malformed index block", e);
         }
         return blocks;
     }
@@ -367,7 +468,7 @@ public final class SSTableReader {
         long size = handle.size();
         if (offset < 0 || size < 0 || size > Integer.MAX_VALUE - 64
                 || offset > footerOffset - TableFormat.BLOCK_TRAILER_LENGTH - size) {
-            throw new CorruptionException(name, offset,
+            throw damage(offset,
                     "block handle (offset " + offset + ", size " + size + ") is outside the file");
         }
         int contentLength = (int) size;
@@ -378,7 +479,7 @@ public final class SSTableReader {
         crc.update(raw, 0, contentLength + 1);
         int expected = Checksums.finishWithContext(crc, fileNumber, offset);
         if (expected != LittleEndian.getInt32(raw, contentLength + 1)) {
-            throw new CorruptionException(name, offset, "block checksum mismatch");
+            throw damage(offset, "block checksum mismatch");
         }
         if (raw[contentLength] != TableFormat.COMPRESSION_NONE) {
             throw new UnsupportedFormatException("block at " + offset + " of " + name
@@ -391,7 +492,7 @@ public final class SSTableReader {
         try {
             file.readFully(position, dst, 0, dst.length);
         } catch (EOFException e) {
-            throw new CorruptionException(name, position, what + " is cut off", e);
+            throw damage(position, what + " is cut off", e);
         }
     }
 
@@ -479,7 +580,7 @@ public final class SSTableReader {
         public byte[] key() throws IOException {
             byte[] key = dataIterator().key();
             if (!InternalKey.isWellFormed(key) || InternalKey.userKeyLength(key) == 0) {
-                throw new CorruptionException(name, dataBlockOffset, "malformed internal key");
+                throw damage(dataBlockOffset, "malformed internal key");
             }
             return key;
         }
@@ -557,7 +658,7 @@ public final class SSTableReader {
 
         private CorruptionException malformed(DecodeException e) {
             long offset = dataBlockOffset >= 0 ? dataBlockOffset : indexHandle.offset();
-            return new CorruptionException(name, offset, "malformed block: " + e.getMessage(), e);
+            return damage(offset, "malformed block: " + e.getMessage(), e);
         }
 
         private void requireOpen() {

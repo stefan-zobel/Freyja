@@ -31,7 +31,7 @@ class LsmEngineTest {
 
     private final MemoryFileSystem fs = new MemoryFileSystem();
     private final Path dir = Path.of("engine-test").toAbsolutePath();
-    private final EngineOptions options = new EngineOptions().deterministic(true).blockCacheCapacity(1 << 20);
+    private final EngineOptions options = new EngineOptions().reserveSize(0).minFreeSpace(0).deterministic(true).blockCacheCapacity(1 << 20);
 
     private static byte[] b(String text) {
         return text.getBytes(StandardCharsets.UTF_8);

@@ -1,12 +1,18 @@
 package io.github.stefan_zobel.freyja.lsm;
 
 import io.github.stefan_zobel.freyja.common.Clock;
+import io.github.stefan_zobel.freyja.common.Metrics;
 
 /**
  * Limits and settings of an engine instance (docs/spec/storage-engine.md, section 4).
  * All limits are enforced. The engine copies the options when it is opened.
  */
 public final class EngineOptions {
+
+    /** The default damage listener writes a warning to the system logger. */
+    private static final DamageListener DEFAULT_DAMAGE_LISTENER = damage ->
+            System.getLogger(LsmEngine.class.getName())
+                    .log(System.Logger.Level.WARNING, "damaged file: {0}", damage.getMessage());
 
     private int maxKeySize = 64 * 1024;
     private int maxValueSize = 1024 * 1024;
@@ -27,6 +33,11 @@ public final class EngineOptions {
     private long tableMetadataBudget = 128L * 1024 * 1024;
     private long maxManifestSize = 64L * 1024 * 1024;
     private long compactionBytesPerSecond;
+    private long minFreeSpace = 1024L * 1024 * 1024;
+    private long reserveSize = 256L * 1024 * 1024;
+    private long scrubPeriodMillis = 7L * 24 * 60 * 60 * 1000;
+    private DamageListener damageListener = DEFAULT_DAMAGE_LISTENER;
+    private Metrics metrics = Metrics.NONE;
 
     public EngineOptions() {
     }
@@ -51,6 +62,11 @@ public final class EngineOptions {
         this.tableMetadataBudget = other.tableMetadataBudget;
         this.maxManifestSize = other.maxManifestSize;
         this.compactionBytesPerSecond = other.compactionBytesPerSecond;
+        this.minFreeSpace = other.minFreeSpace;
+        this.reserveSize = other.reserveSize;
+        this.scrubPeriodMillis = other.scrubPeriodMillis;
+        this.damageListener = other.damageListener;
+        this.metrics = other.metrics;
     }
 
     /** Sets the largest key size in bytes. Default: 64 KiB. */
@@ -314,6 +330,76 @@ public final class EngineOptions {
 
     public long compactionBytesPerSecond() {
         return compactionBytesPerSecond;
+    }
+
+    /**
+     * Sets the free space below which the engine rejects writes with
+     * {@link DiskFullException}. It stays readable, and flushes and compactions continue.
+     * Zero disables the check. Default: 1 GiB.
+     */
+    public EngineOptions minFreeSpace(long bytes) {
+        if (bytes < 0) {
+            throw new IllegalArgumentException("must not be negative: " + bytes);
+        }
+        this.minFreeSpace = bytes;
+        return this;
+    }
+
+    public long minFreeSpace() {
+        return minFreeSpace;
+    }
+
+    /**
+     * Sets the size of the {@code RESERVE} file. The engine deletes the file when a flush, a
+     * compaction, or a manifest write runs out of space, and creates it again when space is
+     * available. Zero means no reserve. Default: 256 MiB.
+     */
+    public EngineOptions reserveSize(long bytes) {
+        if (bytes < 0) {
+            throw new IllegalArgumentException("must not be negative: " + bytes);
+        }
+        this.reserveSize = bytes;
+        return this;
+    }
+
+    public long reserveSize() {
+        return reserveSize;
+    }
+
+    /**
+     * Sets the period within which the background thread reads and verifies every block of
+     * every live table once. Zero disables scrubbing. Default: 7 days.
+     */
+    public EngineOptions scrubPeriodMillis(long millis) {
+        if (millis < 0) {
+            throw new IllegalArgumentException("must not be negative: " + millis);
+        }
+        this.scrubPeriodMillis = millis;
+        return this;
+    }
+
+    public long scrubPeriodMillis() {
+        return scrubPeriodMillis;
+    }
+
+    /** Sets who is told about damaged files. Default: a warning in the system logger. */
+    public EngineOptions damageListener(DamageListener listener) {
+        this.damageListener = java.util.Objects.requireNonNull(listener);
+        return this;
+    }
+
+    public DamageListener damageListener() {
+        return damageListener;
+    }
+
+    /** Sets the sink for the engine's figures. Default: none. */
+    public EngineOptions metrics(Metrics metrics) {
+        this.metrics = java.util.Objects.requireNonNull(metrics);
+        return this;
+    }
+
+    public Metrics metrics() {
+        return metrics;
     }
 
     private static int requirePositive(int value) {

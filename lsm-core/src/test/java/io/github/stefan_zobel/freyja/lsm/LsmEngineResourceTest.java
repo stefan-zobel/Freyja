@@ -27,7 +27,7 @@ class LsmEngineResourceTest {
 
     private final MemoryFileSystem fs = new MemoryFileSystem();
     private final Path dir = Path.of("resource-test").toAbsolutePath();
-    private final EngineOptions options = new EngineOptions()
+    private final EngineOptions options = new EngineOptions().reserveSize(0).minFreeSpace(0)
             .deterministic(true)
             .blockCacheCapacity(1 << 20)
             .level0StallTrigger(10_000)
@@ -213,7 +213,7 @@ class LsmEngineResourceTest {
 
     @Test
     void compactionIsHeldToItsRateInNormalMode() throws Exception {
-        EngineOptions normal = new EngineOptions()
+        EngineOptions normal = new EngineOptions().reserveSize(0).minFreeSpace(0)
                 .blockCacheCapacity(1 << 20)
                 .level0CompactionTrigger(4)
                 .compactionBytesPerSecond(2_000_000);
