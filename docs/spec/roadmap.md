@@ -96,6 +96,10 @@ Rules:
 
 - **D1.** Continuous simulation runner, seed corpus, probe thresholds. Multi-version
   simulation harness.
+  - Done so far: the runner with its report, the filing of failing seeds, and the
+    thresholds for the probes that the simulation counts.
+  - Open: a scheduled job that runs it; the multi-version harness, which needs a second
+    release to load.
 - **D2.** External fault suite on Linux with the independent checker cross-check.
 - **D3.** `kv-bench`: workloads, open-loop load generator, baselines. Tuning. Overload tests.
 - **D4.** Soak tests with monitoring.

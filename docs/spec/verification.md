@@ -498,6 +498,21 @@ A runner works through seeds indefinitely on dedicated machines or scheduled CI 
 the simulated time and the number of seeds per commit, and files every failing seed into the
 corpus.
 
+- `./mvnw -pl kv-node -am test -Pcontinuous-simulation -Dfreyja.sim.minutes=60` runs it for
+  the given time. It is not part of the normal build.
+- It takes the seed sets `system-faulty`, `system-hostile`, and `system-changing` in turn,
+  each with the same fresh seed, then the next seed. The first seed follows from the time of
+  day unless `-Dfreyja.sim.start` names it, so every run covers new ground.
+- A failing seed does not end the run. It is appended to the corpus file of its set, so it
+  runs on every build from then on, and the run fails at its end.
+- The report is appended to `target/continuous-simulation.txt` (or `-Dfreyja.sim.report`):
+  the commit, the range of seeds, and per set the number of runs, the simulated hours, and
+  the counters of §3.
+- A run of twelve or more seeds must have reached every probe that the simulation counts;
+  otherwise it fails.
+- First run on record: commit `566590f`, 58 seeds, 174 runs, about 37 simulated hours in
+  3 minutes on the development machine, no failure.
+
 ## 4. External Fault Tests (Linux)
 
 Real processes on real file systems and sockets.

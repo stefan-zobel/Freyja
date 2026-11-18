@@ -12,6 +12,38 @@
 
     <artifactId>kv-node</artifactId>
 
+    <properties>
+        <!-- The continuous simulation runs for as long as it is told and only in its profile. -->
+        <excludedTestGroups>continuous</excludedTestGroups>
+        <includedTestGroups/>
+    </properties>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <groups>${includedTestGroups}</groups>
+                    <excludedGroups>${excludedTestGroups}</excludedGroups>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <!-- ./mvnw -pl kv-node -am test -Pcontinuous-simulation -Dfreyja.sim.minutes=60
+             Works through fresh seeds of the whole-system simulation for the given time,
+             files every failing seed into the corpus, and writes a report. -->
+        <profile>
+            <id>continuous-simulation</id>
+            <properties>
+                <excludedTestGroups/>
+                <includedTestGroups>continuous</includedTestGroups>
+            </properties>
+        </profile>
+    </profiles>
+
     <dependencies>
         <dependency>
             <groupId>io.github.stefan-zobel</groupId>
