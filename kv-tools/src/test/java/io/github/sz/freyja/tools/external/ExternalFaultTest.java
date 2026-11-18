@@ -164,8 +164,13 @@ class ExternalFaultTest {
             workload.export(history);
             assertNull(workload.check(), "seed " + seed + ", history in " + history);
             if (PORCUPINE != null) {
-                Process check = new ProcessBuilder(PORCUPINE, history.toString()).inheritIO().start();
-                assertEquals(0, check.waitFor(), "the independent checker, seed " + seed + ", history in " + history);
+                // What the checker says is read and printed here: output that a child writes
+                // into the streams of the test process itself is lost in a build.
+                Process check = new ProcessBuilder(PORCUPINE, history.toString()).redirectErrorStream(true).start();
+                String said = new String(check.getInputStream().readAllBytes(), StandardCharsets.UTF_8).strip();
+                System.out.println("external fault suite: the independent checker: " + said);
+                assertEquals(0, check.waitFor(), "the independent checker, seed " + seed + ", history in " + history
+                        + ": " + said);
             }
 
             // What the processes leave behind when they end in order is whole.
@@ -273,6 +278,10 @@ class ExternalFaultTest {
             assertEquals(List.of(), content.toList(), "the small file system must be empty");
         }
         long capacity = Files.getFileStore(small).getTotalSpace();
+        // The test fills what it is given. A directory that is not on a file system of its own
+        // (one that was not mounted, say) would have it fill the disk of the machine.
+        assertTrue(capacity <= 256L << 20, "the file system of " + small + " has " + capacity
+                + " bytes; that is not a small one");
         long minFree = capacity / 2;
         Path directory = workDirectory("full-disk-" + SEED);
         List<Path> data = List.of(directory.resolve("node-0"), directory.resolve("node-1"), small.resolve("node-2"));

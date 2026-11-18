@@ -117,7 +117,8 @@ The engine never returns data it cannot verify and never hides a fault.
      the only way to free space.
    - `RESERVE` is a preallocated file (default 256 MiB). If a flush, compaction, or manifest
      write fails for lack of space, the engine deletes it to finish that operation and
-     recreates it once space is available.
+     recreates it once space is available. It is created only while the file system has
+     that much room: the engine does not fill a disk to find out that the file does not fit.
    - A failed append for lack of space fails only that write. A failed sync stays fatal.
    - Writes rejected for lack of space fail with `DiskFullException`. The engine is intact.
    - **A group that does not fit into the log:** the log is closed and cut back to where

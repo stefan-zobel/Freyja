@@ -342,7 +342,13 @@ no leader can be elected. Recovery then is a manual, explicitly unsafe procedure
 - `quotaBytes` (default 16 GiB) limits the size of the state machine. When a node exceeds it,
   it proposes a `NOSPACE` alarm. While the alarm is set in the replicated state, all nodes
   reject writes other than deletes. An administrator clears it.
-- A node whose engine reports low free space raises the same alarm.
+- A node whose file system is low on free space raises the same alarm.
+- The engine of the state machine runs without its own rejection of writes for low free
+  space (`minFreeSpace` 0; a state machine is not opened with anything else). An entry that
+  is committed must be applied by every node, the one that sets the alarm and every delete
+  among them; an engine that refused them would stop the node where the alarm is needed
+  most. What keeps writes away is the alarm, and `minFreeBytes` is chosen so that what is
+  still on its way when the alarm is set fits.
 - The size is the bytes the engine holds: its tables and what waits in memory. Low free
   space is less than `minFreeBytes` (default 1 GiB) in the file system of the data directory.
 - A node looks at both every few ticks (default 10) while the alarm is not set in its state

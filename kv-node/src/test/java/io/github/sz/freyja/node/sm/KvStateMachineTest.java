@@ -54,6 +54,18 @@ class KvStateMachineTest {
         return KvStateMachine.open(fs, DIR, engineOptions(), TIMEOUT, THREE, 1);
     }
 
+    /**
+     * An engine that rejected writes on its own when free space is low would refuse entries
+     * that are committed, the one that sets the alarm among them. Found by the external fault
+     * suite: a node on a small disk stopped at every entry and never raised the alarm.
+     */
+    @Test
+    void anEngineThatRejectsWritesForLowFreeSpaceIsNotTaken() {
+        MemoryFileSystem fs = new MemoryFileSystem();
+        assertThrows(IllegalArgumentException.class,
+                () -> KvStateMachine.open(fs, DIR, engineOptions().minFreeSpace(1), TIMEOUT, THREE, 1));
+    }
+
     private static byte[] b(String text) {
         return text.getBytes(StandardCharsets.UTF_8);
     }

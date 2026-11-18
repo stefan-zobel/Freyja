@@ -574,15 +574,16 @@ The suite (`ExternalFaultTest` in `kv-tools`, profile `external-faults`):
     `kv-tools/src/test/external/porcupine`);
   - the processes end in order, and `NodeVerify` finds every data directory whole.
 - **The full disk** (`-Dfreyja.external.smallfs=DIRECTORY`, an empty directory on a file
-  system of about 64 MiB): the cluster is filled until the node on the small disk raises the
+  system of about 64 MiB; the test refuses one of more than 256 MiB, because it fills what
+  it is given): the cluster is filled until the node on the small disk raises the
   alarm. Then writes are refused, reads and deletes are served; after deletes, a snapshot,
   and a compaction on that node there is room again, the alarm is cleared, and writes are
   taken again.
 - A run prints its seed. The data directories, the output of the nodes, and the history of a
   run that fails are kept (`-Dfreyja.external.dir=DIRECTORY` says where).
 
-Open: the scenarios pause and full disk have not run yet, nor has the cross-check; they need
-Linux. The privileged stage is not built.
+All scenarios, the cross-check included, have run on Linux. Open: the 50 runs of every
+scenario that the exit criteria ask for. The privileged stage is not built.
 
 ## 5. Compatibility Suite
 

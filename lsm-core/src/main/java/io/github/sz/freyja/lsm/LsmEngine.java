@@ -1652,6 +1652,9 @@ public final class LsmEngine implements Closeable {
                 }
                 fs.delete(path); // left unfinished by a crash, or the size was changed
             }
+            if (fs.freeSpace(dir) < size) {
+                return; // no room for a reserve now; trying would fill the disk for everybody else
+            }
             byte[] zeros = new byte[(int) Math.min(size, 1 << 20)];
             try {
                 try (WritableFile file = fs.create(path)) {

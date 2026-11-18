@@ -132,10 +132,18 @@ public final class KvStateMachine implements StateMachine, Closeable {
      *                             a CONFIG entry is applied
      * @param initialClusterVersion the cluster version the cluster started with; it counts
      *                             until the version is raised through the log
+     * @throws IllegalArgumentException if the engine is to reject writes on its own when free
+     *                                  space is low: an entry that is committed must be
+     *                                  applied, and it is the alarm of the cluster that keeps
+     *                                  writes away (docs/spec/node.md, section 4.4)
      */
     public static KvStateMachine open(StorageFileSystem fs, Path directory, EngineOptions options,
                                       long sessionTimeoutMillis, ClusterConfig initialConfig,
                                       int initialClusterVersion) throws IOException {
+        if (options.minFreeSpace() != 0) {
+            throw new IllegalArgumentException("the engine of a state machine must not reject writes for low"
+                    + " free space (minFreeSpace " + options.minFreeSpace() + "): what is committed is applied");
+        }
         LsmEngine engine = LsmEngine.open(fs, directory, options);
         boolean opened = false;
         try {

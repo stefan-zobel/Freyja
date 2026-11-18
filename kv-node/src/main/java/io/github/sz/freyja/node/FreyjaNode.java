@@ -220,7 +220,8 @@ public final class FreyjaNode {
         NodeServer server = NodeServer.start(new RealFileSystem(), new NodeServer.Settings(data,
                 resolve(one(options, "peer", null)), resolve(one(options, "client", null)),
                 resolve(one(options, "admin", null)), seeds, node,
-                new StateMachineStore.Options(new EngineOptions(), 60_000), tick,
+                // The engine applies whatever is committed; low free space is answered by the alarm.
+                new StateMachineStore.Options(new EngineOptions().minFreeSpace(0), 60_000), tick,
                 options.containsKey("status") ? resolve(one(options, "status", null)) : null, security));
         out.println("READY node=" + server.identity().nodeId() + " peer=" + server.peerPort() + " client="
                 + server.clientPort() + " admin=" + server.adminPort()
