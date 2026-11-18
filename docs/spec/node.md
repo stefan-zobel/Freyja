@@ -442,8 +442,12 @@ repair on the one path that is verified for a node that has lost what it acknowl
   - A proposal whose deadline has passed is refused at admission. One that waits in the
     queue beyond its deadline is dropped when its turn comes, and the listener is told.
 - A leader whose log sync takes longer than `slowSyncThreshold` (default: one election
-  timeout) steps down, so that a node with a healthy disk can lead. This needs the clock and
-  comes with it (milestone C3).
+  timeout) steps down, so that a node with a healthy disk can lead.
+  - Measured is the time to make the work of one `Ready` durable: hard state, truncation,
+    entries, sync. The node takes the time from the clock it is given.
+  - The core is told to step down after it was told that the work is durable: the entries
+    are stored, and their acknowledgments count.
+  - Followers are not judged. A slow follower holds nobody up.
 - Proposals are rejected when the uncommitted cap of `raft.md` §4 is reached, or when the
   state machine falls more than a configured number of entries (default 10,000) behind the
   commit index.

@@ -189,6 +189,10 @@ public record Ready(
   election timeout. A node that has heard from a leader within the minimum election timeout
   does not grant votes, except for a leadership transfer. It does not answer such a request
   at all, so that a node that lost contact cannot raise the term of the others.
+- **Stepping down on request:** the runtime may ask a leader to give its leadership up
+  (`StepDown`), for example because its disk has become slow (`node.md` §7). The leader
+  becomes a follower in its term and knows no leader. Nothing else changes: what it has
+  stored stays, and it may be elected again. Any other node ignores the request.
 - **Old terms:** an append or heartbeat of an older term is answered with a rejection that
   carries the current term, so that a deposed leader steps down. A node can still win the
   election of a term the cluster has left behind (its votes arrive late). Such a leader can

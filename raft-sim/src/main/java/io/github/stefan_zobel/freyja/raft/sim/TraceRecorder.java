@@ -104,6 +104,7 @@ public final class TraceRecorder implements Simulation.StepListener {
     private static void appendEvent(StringBuilder s, RaftEvent event) {
         switch (event) {
             case RaftEvent.Tick _ -> s.append("{\"type\":\"Tick\"}");
+            case RaftEvent.StepDown _ -> s.append("{\"type\":\"StepDown\"}");
             case RaftEvent.MessageReceived m -> {
                 s.append("{\"type\":\"MessageReceived\",\"from\":").append(m.fromNode()).append(",\"message\":");
                 appendMessage(s, m.message());

@@ -176,6 +176,36 @@ class RaftNodeTest {
     }
 
     @Test
+    void aLeaderStepsDownOnRequestAndKeepsWhatItHasStored() {
+        TestCluster cluster = new TestCluster(3);
+        TestNode leader = cluster.electLeader();
+        long term = leader.view().term();
+        propose(leader, 1, 4);
+        cluster.tickAll();
+        long last = leader.view().lastLogIndex();
+
+        for (TestNode node : cluster.nodes) {
+            if (node != leader) {
+                node.step(new RaftEvent.StepDown());
+                assertEquals(Role.FOLLOWER, node.view().role(), "a follower ignores the request");
+                assertEquals(leader.config.nodeId(), node.view().leaderId());
+            }
+        }
+        leader.step(new RaftEvent.StepDown());
+        assertEquals(Role.FOLLOWER, leader.view().role());
+        assertEquals(term, leader.view().term(), "the term does not change");
+        assertEquals(last, leader.view().lastLogIndex());
+        propose(leader, 2, 4);
+        assertEquals(Reason.NOT_LEADER, leader.notes(ProposalRejected.class).getLast().reason());
+
+        TestNode next = cluster.electLeader();
+        assertTrue(next.view().term() > term);
+        propose(next, 3, 4);
+        cluster.tickAll();
+        assertEquals(next.view().commitIndex(), leader.view().commitIndex());
+    }
+
+    @Test
     void aLeaderWithoutAQuorumStepsDownAndFollowsItsSuccessor() {
         TestCluster cluster = new TestCluster(3);
         TestNode old = cluster.electLeader();

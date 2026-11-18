@@ -6,6 +6,7 @@ import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.List;
 
+import io.github.stefan_zobel.freyja.common.Clock;
 import io.github.stefan_zobel.freyja.common.DecodeException;
 import io.github.stefan_zobel.freyja.common.kv.Command;
 import io.github.stefan_zobel.freyja.common.kv.CommandCodec;
@@ -80,9 +81,11 @@ public final class Node implements Closeable {
      *                              that are a little behind
      * @param transfers             the settings of snapshot transfers
      * @param limits                the limits that protect the node and the cluster
+     * @param clock                 the time source for what the node measures
      */
     public record Options(RaftConfig raft, long segmentSize, int queueCapacity, long snapshotLogBytes,
-                          long snapshotRetainEntries, SnapshotTransfers.Options transfers, Limits limits) {
+                          long snapshotRetainEntries, SnapshotTransfers.Options transfers, Limits limits,
+                          Clock clock) {
         public Options {
             if (segmentSize < 1 || queueCapacity < 1 || snapshotLogBytes < 1 || snapshotRetainEntries < 0) {
                 throw new IllegalArgumentException("segment size " + segmentSize + ", queue capacity "
@@ -94,7 +97,7 @@ public final class Node implements Closeable {
         /** Snapshots and limits as by default: at 1 GiB of log, keeping 10,000 entries. */
         public Options(RaftConfig raft, long segmentSize, int queueCapacity) {
             this(raft, segmentSize, queueCapacity, 1L << 30, 10_000, SnapshotTransfers.Options.defaults(),
-                    Limits.defaults());
+                    Limits.defaults(), Clock.SYSTEM);
         }
 
         /** The defaults: 64 MiB segments, 4096 waiting events. */
@@ -114,18 +117,23 @@ public final class Node implements Closeable {
      *                        free, the node raises the same alarm
      * @param alarmCheckTicks how often the node looks at the two conditions, and how long it
      *                        waits before it raises the alarm again
+     * @param slowSyncNanos   a leader that needs longer than this to make the work of one
+     *                        {@code Ready} durable gives its leadership up
      */
-    public record Limits(long maxApplyLag, long quotaBytes, long minFreeBytes, int alarmCheckTicks) {
+    public record Limits(long maxApplyLag, long quotaBytes, long minFreeBytes, int alarmCheckTicks,
+                         long slowSyncNanos) {
         public Limits {
-            if (maxApplyLag < 1 || quotaBytes < 1 || minFreeBytes < 0 || alarmCheckTicks < 1) {
+            if (maxApplyLag < 1 || quotaBytes < 1 || minFreeBytes < 0 || alarmCheckTicks < 1
+                    || slowSyncNanos < 1) {
                 throw new IllegalArgumentException("apply lag " + maxApplyLag + ", quota " + quotaBytes
-                        + ", free " + minFreeBytes + ", check every " + alarmCheckTicks + " ticks");
+                        + ", free " + minFreeBytes + ", check every " + alarmCheckTicks + " ticks, slow sync "
+                        + slowSyncNanos);
             }
         }
 
-        /** The defaults: 10,000 entries, 16 GiB, 1 GiB free, a look every 10 ticks. */
+        /** The defaults: 10,000 entries, 16 GiB, 1 GiB free, a look every 10 ticks, 1 second. */
         public static Limits defaults() {
-            return new Limits(10_000, 16L << 30, 1L << 30, 10);
+            return new Limits(10_000, 16L << 30, 1L << 30, 10, 1_000_000_000L);
         }
     }
 
@@ -173,6 +181,7 @@ public final class Node implements Closeable {
     /** The time of the node: the number of ticks it has processed. */
     private long now;
     private long expiredProposals;
+    private long slowSyncStepDowns;
     private long alarmsRaised;
     /** Request ids of the proposals the node makes itself; clients use ids from 0 on. */
     private long ownRequestId = -1;
@@ -599,6 +608,7 @@ public final class Node implements Closeable {
         while (raft.hasReady()) {
             Ready ready = raft.takeReady();
             if (ready.hasPersistentWork()) {
+                long started = options.clock().nanoTime();
                 if (ready.hardState() != null) {
                     hardState.put(ready.hardState());
                 }
@@ -614,7 +624,13 @@ public final class Node implements Closeable {
                 if (logChanged) {
                     log.sync();
                 }
+                long took = options.clock().nanoTime() - started;
                 raft.step(new RaftEvent.Persisted(ready.sequence()));
+                if (took > options.limits().slowSyncNanos() && raft.view().role() == Role.LEADER) {
+                    // A node with a healthy disk should lead (section 7).
+                    slowSyncStepDowns++;
+                    raft.step(new RaftEvent.StepDown());
+                }
             }
             for (Outbound outbound : ready.messages()) {
                 transport.send(outbound.toNode(),
@@ -836,6 +852,11 @@ public final class Node implements Closeable {
     /** Proposals dropped or refused because their deadline had passed. */
     public long expiredProposals() {
         return expiredProposals;
+    }
+
+    /** How often this node has given its leadership up because its disk was slow. */
+    public long slowSyncStepDowns() {
+        return slowSyncStepDowns;
     }
 
     /** How often this node, as leader, has proposed an alarm. */

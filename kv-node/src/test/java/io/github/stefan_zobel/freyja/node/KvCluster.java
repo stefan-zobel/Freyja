@@ -152,7 +152,8 @@ final class KvCluster {
     /** Three nodes that shorten their logs when these take more than the given bytes. */
     static KvCluster ofThree(long snapshotLogBytes) throws IOException {
         return ofThree(new Node.Options(RaftConfig.defaults(0, 5), 4 * 1024, 256, snapshotLogBytes, 5,
-                new SnapshotTransfers.Options(700, 3, 40, 2), new Node.Limits(10_000, 1L << 30, 0, 10)));
+                new SnapshotTransfers.Options(700, 3, 40, 2), new Node.Limits(10_000, 1L << 30, 0, 10, 1L << 40),
+                () -> 0));
     }
 
     static KvCluster ofThree(Node.Options options) throws IOException {

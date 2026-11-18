@@ -279,6 +279,11 @@ public final class RaftNode {
             case RaftEvent.SnapshotOffered o -> snapshotOffered(o.fromNode(), o.leaderTerm(), o.meta());
             case RaftEvent.SnapshotInstalled i -> snapshotInstalled(i.meta());
             case RaftEvent.SnapshotSendFinished f -> snapshotSendFinished(f.toNode(), f.success());
+            case RaftEvent.StepDown _ -> {
+                if (role == Role.LEADER) {
+                    becomeFollower(term, NO_NODE);
+                }
+            }
         }
         RoleChanged now = new RoleChanged(role, term, leaderId);
         if (!now.equals(lastRoleNotice)) {

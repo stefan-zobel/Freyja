@@ -63,8 +63,6 @@ Rules:
     machine, shortening of the log, snapshot transfer and crash-safe installation. Repair
     of a damaged state machine. The alarm from the quota and from low free space. Deadlines
     of proposals and the limit on the apply lag.
-  - Moved: the step-down of a leader with a slow disk needs the clock and comes with the
-    whole-system simulation (C3).
   - Open decision: `node.md` §4.3 asks for reverse scans; the engine iterates forward only.
     Either the engine gets backward iteration or the client API drops reverse scans. To be
     decided before the client API of C4.

@@ -69,6 +69,14 @@ public sealed interface RaftEvent {
     record SnapshotSendFinished(int toNode, boolean success) implements RaftEvent {
     }
 
+    /**
+     * The runtime asks a leader to give its leadership up, for example because its disk has
+     * become slow. The node becomes a follower in its term and knows no leader; any other
+     * node ignores the event.
+     */
+    record StepDown() implements RaftEvent {
+    }
+
     /** A client asks to append a command to the log. */
     record ClientPropose(long requestId, byte[] command) implements RaftEvent {
         public ClientPropose {

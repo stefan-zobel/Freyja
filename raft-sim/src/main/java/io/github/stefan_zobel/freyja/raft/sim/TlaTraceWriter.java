@@ -105,6 +105,8 @@ public final class TlaTraceWriter implements Simulation.StepListener {
         step.node = node;
         switch (event) {
             case RaftEvent.Tick _ -> step.event = "Tick";
+            // The model lets a node step down at any step that a tick may take.
+            case RaftEvent.StepDown _ -> step.event = "Tick";
             case RaftEvent.MessageReceived m -> {
                 step.event = "Recv";
                 step.message = message(m.fromNode(), node, m.message());
