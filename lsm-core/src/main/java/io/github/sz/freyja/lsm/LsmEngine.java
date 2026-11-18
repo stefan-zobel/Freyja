@@ -21,6 +21,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import io.github.sz.freyja.common.ByteComparator;
 import io.github.sz.freyja.common.DecodeException;
 import io.github.sz.freyja.common.Metrics;
+import io.github.sz.freyja.common.testing.Probes;
 import io.github.sz.freyja.lsm.fs.NoSpaceException;
 import io.github.sz.freyja.lsm.fs.ReadableFile;
 import io.github.sz.freyja.lsm.fs.StorageFileSystem;
@@ -794,6 +795,7 @@ public final class LsmEngine implements Closeable {
     private void makeRoom() throws IOException {
         long deadline = 0;
         boolean delayed = false;
+        boolean heldBack = false;
         while (true) {
             IOException failed = failure;
             if (failed != null) {
@@ -802,6 +804,13 @@ public final class LsmEngine implements Closeable {
             ReadState current = state;
             int level0 = current.version().files(0).size();
 
+            if (!heldBack && (level0 >= options.level0StallTrigger()
+                    || (current.mem().approximateBytes() >= options.memTableSize()
+                            && current.frozen().size() >= options.maxImmutableMemTables()))) {
+                // The write waits for a compaction or a flush, or does that work itself.
+                heldBack = true;
+                Probes.hit(Probes.Probe.WRITE_HELD_BACK);
+            }
             if (level0 >= options.level0StallTrigger()) {
                 if (!options.deterministic()) {
                     deadline = awaitProgress(deadline, "level 0 holds " + level0 + " files");

@@ -401,11 +401,14 @@ after every step the invariants of `SystemInvariants` are checked.
 
 **Storage faults and what the simulation expects of them:**
 
-- *Damage:* a node crashes and one bit of a sealed segment of its log or of a table of its
-  state machine is flipped. Only one node at a time is damaged, and only while every node
-  runs and none is repairing: the others still hold what this one loses. In a log only
-  bytes that are proven to be synced are damaged (§2.2): the newest segment is left alone,
-  because damage at its end is the stated residual case of the format.
+- *Damage:* a node crashes and one bit of a segment of its log or of a table of its state
+  machine is flipped. Only one node at a time is damaged, and only while every node runs
+  and none is repairing: the others still hold what this one loses. In a log only bytes
+  that are proven to be synced are damaged (§2.2). A sealed segment is synced as a whole.
+  In the newest segment a flipped bit stays only if a reader of the segment finds damage,
+  which it does when a sync point after the bit proves it; otherwise the bit is put back,
+  because damage at the end of the newest segment is the stated residual case of the
+  format.
 - A node may stop itself only for a reason the simulation gave it: its files were damaged,
   or its disk is short. Any other stop fails the run.
 - A damaged node counts as whole again when a scrub of its state machine finds nothing and
@@ -462,9 +465,8 @@ Open in this milestone:
   after the record of their removal is lost (`node.md` §3.3); the Raft simulator and the
   whole-system simulation do. Runs of the Raft simulator that are validated against the
   model are therefore recorded without logs that go back.
-- Probes of §3.1 that are not counted yet: torn tail truncated, damage detected through a
-  sync point, write stalled by backpressure (they happen below the node and are covered by
-  the storage tests), upgrade finalized and downgrade before finalization (milestone D1).
+- Probes of §3.1 that are not counted yet: upgrade finalized and downgrade before
+  finalization. They need a second release (milestone D1).
 
 Seed sets, each run on every build: `system-calm`, `system-faulty` (network and crashes),
 `system-hostile` (plus storage faults), `system-changing` (plus replaced members). Each set
@@ -472,7 +474,8 @@ must reach what it is there for; counted are among others: crashes in the middle
 operation, installed snapshots, snapshots installed around a leader change, log-recovering
 mode entered and left, rebuilt state machines, commands rejected for lack of space,
 step-downs for slow disks, aborted hand-overs, sessions lost while a retry was on its way,
-replaced members, lost identities, reverted configurations.
+replaced members, lost identities, reverted configurations, and the probes below the node
+(§3.1): torn tails dropped, damage proven by a sync point, writes held back.
 
 What the simulation found while it was built:
 
@@ -498,7 +501,19 @@ stored with its batch; a delete of a batch not written.
 
 Fault injection only proves something for situations that actually occur. The code contains
 named probes (no-ops outside tests). The simulation reports how often each was hit. A probe
-that is never hit across the seed set fails the run. Required probes include at least:
+that is never hit across the seed set fails the run.
+
+- What the simulation sees from outside a node it counts itself: it injects the fault or
+  is told by the listener of the node.
+- What happens below the node is counted where it happens, by `Probes` (`kv-common`): a
+  torn tail that a log reader drops (`TORN_TAIL_DROPPED`), damage in the last file of a log
+  that a sync point proves (`DAMAGE_PROVEN_BY_SYNC_POINT`), a write of the storage engine
+  that is held back until a flush or a compaction has made room (`WRITE_HELD_BACK`; in
+  deterministic mode the write does that work itself). The counters are switched on by
+  tests only and are shared by the process; a run takes the difference and leaves out what
+  the simulation caused by reading a file itself.
+
+Required probes include at least:
 
 - snapshot installed while the leader changed
 - log-recovering mode entered and left

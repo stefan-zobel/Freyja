@@ -99,7 +99,9 @@ class ContinuousSimulationTest {
                     && changing.recoveringLeft > 0 && changing.snapshotsInstalled > 0
                     && changing.sessionsLostInRetry > 0 && changing.slowDiskStepDowns > 0
                     && changing.rejectedForSpace > 0 && changing.transfersAborted > 0
-                    && changing.crashesInAnOperation > 0, "a probe was never reached: " + changing);
+                    && changing.crashesInAnOperation > 0 && changing.tornTailsDropped > 0
+                    && changing.damageProvenBySyncPoint > 0 && changing.writesHeldBack > 0,
+                    "a probe was never reached: " + changing);
         }
     }
 

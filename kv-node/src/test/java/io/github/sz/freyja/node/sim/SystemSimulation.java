@@ -30,10 +30,14 @@ import io.github.sz.freyja.common.kv.CommandResult.Failed;
 import io.github.sz.freyja.common.kv.CommandResult.Failure;
 import io.github.sz.freyja.common.kv.CommandResult.SessionRegistered;
 import io.github.sz.freyja.common.kv.CommandResult.Written;
+import io.github.sz.freyja.common.testing.Probes;
 import io.github.sz.freyja.lsm.CorruptionException;
 import io.github.sz.freyja.lsm.EngineOptions;
 import io.github.sz.freyja.lsm.fs.FaultyFileSystem;
 import io.github.sz.freyja.lsm.fs.MemoryFileSystem;
+import io.github.sz.freyja.lsm.fs.ReadableFile;
+import io.github.sz.freyja.lsm.log.FileKind;
+import io.github.sz.freyja.lsm.log.LogReader;
 import io.github.sz.freyja.node.Node;
 import io.github.sz.freyja.node.NodeListener;
 import io.github.sz.freyja.node.service.ClientService;
@@ -157,6 +161,10 @@ public final class SystemSimulation {
         public long replacements;
         public long identitiesLost;
         public long configurationsReverted;
+        /** Probes that are counted below the node (docs/spec/verification.md, section 3.1). */
+        public long tornTailsDropped;
+        public long damageProvenBySyncPoint;
+        public long writesHeldBack;
 
         public void add(Stats other) {
             steps += other.steps;
@@ -196,6 +204,9 @@ public final class SystemSimulation {
             replacements += other.replacements;
             identitiesLost += other.identitiesLost;
             configurationsReverted += other.configurationsReverted;
+            tornTailsDropped += other.tornTailsDropped;
+            damageProvenBySyncPoint += other.damageProvenBySyncPoint;
+            writesHeldBack += other.writesHeldBack;
         }
 
         @Override
@@ -215,7 +226,9 @@ public final class SystemSimulation {
                     + rejectedForSpace + " rejections, " + alarmsCleared + " alarms cleared), slow disks "
                     + slowDisks + " (" + slowDiskStepDowns + " step-downs), transfers " + transfers + " ("
                     + transfersAborted + " aborted), members replaced " + replacements + " (" + identitiesLost
-                    + " after losing their identity), configurations reverted " + configurationsReverted;
+                    + " after losing their identity), configurations reverted " + configurationsReverted
+                    + ", torn tails dropped " + tornTailsDropped + ", damage proven by a sync point "
+                    + damageProvenBySyncPoint + ", writes held back " + writesHeldBack;
         }
     }
 
@@ -755,6 +768,8 @@ public final class SystemSimulation {
      */
     private long ownRequests = 1L << 50;
     private boolean clientsMayStart = true;
+    /** Hits of probes that the simulation caused by reading a file itself. */
+    private final long[] ownProbeHits = new long[Probes.Probe.values().length];
     private boolean faults = true;
     /** Set the environment variable FREYJA_SIM_DEBUG to see what a run does. */
     private final boolean debug = System.getenv("FREYJA_SIM_DEBUG") != null;
@@ -1129,6 +1144,7 @@ public final class SystemSimulation {
         victim.down(true);
         stats.crashes++;
         boolean log = random.nextBoolean();
+        Path newest = null;
         List<Path> candidates = new ArrayList<>();
         if (log) {
             for (Path path : victim.memory.list(DATA.resolve(Node.RAFT_DIRECTORY))) {
@@ -1136,13 +1152,8 @@ public final class SystemSimulation {
                     candidates.add(path);
                 }
             }
-            // Only bytes that are proven to be synced are damaged (verification.md,
-            // section 2.2): the newest segment has no successor that vouches for its
-            // length, and damage at its end is the stated residual case of the format.
-            if (!candidates.isEmpty()) {
-                candidates.sort(null);
-                candidates.removeLast();
-            }
+            candidates.sort(null);
+            newest = candidates.isEmpty() ? null : candidates.getLast();
         }
         if (!log || candidates.isEmpty()) {
             log = false;
@@ -1169,8 +1180,18 @@ public final class SystemSimulation {
         Path file = candidates.get(random.nextInt(candidates.size()));
         long offset = (long) (random.nextDouble() * victim.memory.size(file));
         byte[] one = victim.memory.peek(file, offset, 1);
+        byte original = one[0];
         one[0] ^= (byte) (1 << random.nextInt(8));
         victim.memory.overwrite(file, offset, one);
+        // Only bytes that are proven to be synced are damaged (verification.md, section 2.2).
+        // The newest segment has no successor that vouches for its length: there a sync
+        // point after the damage must prove it. Damage at its end is the stated residual
+        // case of the format, and what is no damage to a reader is no damage at all.
+        if (file.equals(newest) && !provenDamage(victim, file)) {
+            one[0] = original;
+            victim.memory.overwrite(file, offset, one);
+            return;
+        }
         victim.damaged = true;
         log("node " + victim.id + ": a bit of " + file.getFileName() + " flipped at " + offset);
         if (log) {
@@ -1178,6 +1199,37 @@ public final class SystemSimulation {
         } else {
             stats.damagedTables++;
         }
+    }
+
+    /**
+     * Whether a reader of the last segment of a log finds damage in it, and not a torn tail
+     * or nothing at all. The hits of the probes that this reading causes are not counted.
+     */
+    private boolean provenDamage(Host victim, Path segment) throws IOException {
+        String name = segment.getFileName().toString();
+        long number = Long.parseLong(name.substring(0, name.indexOf('.')));
+        long[] before = probeCounts();
+        try (ReadableFile file = victim.memory.open(segment)) {
+            LogReader.read(file, name, number, FileKind.RAFT_LOG, false, (offset, payload) -> {
+            });
+            return false;
+        } catch (CorruptionException proven) {
+            return true;
+        } finally {
+            long[] after = probeCounts();
+            for (int i = 0; i < after.length; i++) {
+                ownProbeHits[i] += after[i] - before[i];
+            }
+        }
+    }
+
+    private static long[] probeCounts() {
+        Probes.Probe[] probes = Probes.Probe.values();
+        long[] counts = new long[probes.length];
+        for (int i = 0; i < probes.length; i++) {
+            counts[i] = Probes.count(probes[i]);
+        }
+        return counts;
     }
 
     /**
@@ -1335,8 +1387,14 @@ public final class SystemSimulation {
      *                        the seed
      */
     public Stats run() {
+        Probes.enable();
+        long[] before = probeCounts();
         try {
             simulate();
+            long[] after = probeCounts();
+            stats.tornTailsDropped = hits(Probes.Probe.TORN_TAIL_DROPPED, before, after);
+            stats.damageProvenBySyncPoint = hits(Probes.Probe.DAMAGE_PROVEN_BY_SYNC_POINT, before, after);
+            stats.writesHeldBack = hits(Probes.Probe.WRITE_HELD_BACK, before, after);
             return stats;
         } catch (AssertionError | RuntimeException | IOException e) {
             throw new AssertionError("whole-system simulation, seed " + seed + ", time " + time + ": "
@@ -1353,6 +1411,11 @@ public final class SystemSimulation {
                 }
             }
         }
+    }
+
+    /** The hits of a probe in this run, without those that the simulation caused itself. */
+    private long hits(Probes.Probe probe, long[] before, long[] after) {
+        return after[probe.ordinal()] - before[probe.ordinal()] - ownProbeHits[probe.ordinal()];
     }
 
     private void simulate() throws IOException {

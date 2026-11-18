@@ -18,6 +18,7 @@ class SystemSimulationTest {
         SystemSimulation.Stats total = new SystemSimulation.Stats();
         Seeds.forEach(SystemSimulationTest.class, "system-calm", 3, seed ->
                 total.add(new SystemSimulation(seed, SystemSimulation.Options.calm()).run()));
+        System.out.println("system-calm: " + total);
         assertTrue(total.acknowledged > 300, total.toString());
         assertTrue(total.reads > 200, total.toString());
         assertTrue(total.casHeld > 0 && total.casFailed > 0, total.toString());
@@ -30,6 +31,7 @@ class SystemSimulationTest {
         SystemSimulation.Stats total = new SystemSimulation.Stats();
         Seeds.forEach(SystemSimulationTest.class, "system-faulty", 12, seed ->
                 total.add(new SystemSimulation(seed, SystemSimulation.Options.faulty()).run()));
+        System.out.println("system-faulty: " + total);
         assertTrue(total.acknowledged > 500, total.toString());
         assertTrue(total.reads > 200, total.toString());
         assertTrue(total.casHeld > 0 && total.casFailed > 0, total.toString());
@@ -41,6 +43,7 @@ class SystemSimulationTest {
         assertTrue(total.partitions > 5, total.toString());
         assertTrue(total.dropped > 0 && total.duplicated > 0, total.toString());
         assertTrue(total.snapshotsCreated > 0, total.toString());
+        assertTrue(total.tornTailsDropped > 12 && total.writesHeldBack > 12, total.toString());
     }
 
     @Test
@@ -48,6 +51,7 @@ class SystemSimulationTest {
         SystemSimulation.Stats total = new SystemSimulation.Stats();
         Seeds.forEach(SystemSimulationTest.class, "system-hostile", 12, seed ->
                 total.add(new SystemSimulation(seed, SystemSimulation.Options.hostile()).run()));
+        System.out.println("system-hostile: " + total);
         assertTrue(total.sessionsLostInRetry > 0, total.toString());
         assertTrue(total.transfersAborted > 0, total.toString());
         assertTrue(total.diskFullStops > 0, total.toString());
@@ -60,6 +64,8 @@ class SystemSimulationTest {
         assertTrue(total.disksShort > 3 && total.rejectedForSpace > 0 && total.alarmsCleared > 0, total.toString());
         assertTrue(total.slowDisks > 3 && total.slowDiskStepDowns > 0, total.toString());
         assertTrue(total.transfers > 3, total.toString());
+        assertTrue(total.tornTailsDropped > 12 && total.writesHeldBack > 12, total.toString());
+        assertTrue(total.damageProvenBySyncPoint > 0, total.toString());
     }
 
     @Test
@@ -67,6 +73,7 @@ class SystemSimulationTest {
         SystemSimulation.Stats total = new SystemSimulation.Stats();
         Seeds.forEach(SystemSimulationTest.class, "system-changing", 12, seed ->
                 total.add(new SystemSimulation(seed, SystemSimulation.Options.changing()).run()));
+        System.out.println("system-changing: " + total);
         assertTrue(total.configurationsReverted > 0, total.toString());
         assertTrue(total.installsAroundALeaderChange > 0, total.toString());
         assertTrue(total.acknowledged > 500, total.toString());

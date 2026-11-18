@@ -7,6 +7,7 @@ import java.util.zip.CRC32C;
 
 import io.github.sz.freyja.common.Checksums;
 import io.github.sz.freyja.common.LittleEndian;
+import io.github.sz.freyja.common.testing.Probes;
 import io.github.sz.freyja.lsm.CorruptionException;
 import io.github.sz.freyja.lsm.UnsupportedFormatException;
 import io.github.sz.freyja.lsm.fs.ReadableFile;
@@ -209,14 +210,17 @@ public final class LogReader {
             throw new CorruptionException(name, failureOffset, failure + " in a sealed file");
         }
         if (maxSynced > lastGood) {
+            Probes.hit(Probes.Probe.DAMAGE_PROVEN_BY_SYNC_POINT);
             throw new CorruptionException(name, failureOffset, failure
                     + "; an earlier sync point records " + maxSynced + " synced bytes");
         }
         long proof = findSyncPointBeyond(file, size, fileNumber, failureOffset, lastGood);
         if (proof >= 0) {
+            Probes.hit(Probes.Probe.DAMAGE_PROVEN_BY_SYNC_POINT);
             throw new CorruptionException(name, failureOffset, failure
                     + "; the sync point at " + proof + " proves that this range was synced");
         }
+        Probes.hit(Probes.Probe.TORN_TAIL_DROPPED);
         return new Result(kind, lastGood, true, failureOffset, failure);
     }
 
