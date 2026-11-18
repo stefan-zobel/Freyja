@@ -81,6 +81,7 @@ public final class Block {
         private int keyLength;
         private int valueOffset;
         private int valueLength;
+        private int currentOffset; // offset of the current entry
         private int nextOffset;   // offset of the entry after the current one
         private int nextRestart;  // index of the first restart point at or after nextOffset
         private boolean valid;
@@ -136,6 +137,57 @@ public final class Block {
             } while (valid && compareKeyTo(target) < 0);
         }
 
+        /** Moves to the last entry; the iterator is invalid afterward if the block is empty. */
+        public void seekToLast() {
+            seekToRestart(restartCount - 1);
+            next();
+            while (valid && nextOffset < restartsOffset) {
+                next();
+            }
+        }
+
+        /** Moves to the last entry whose key is less than {@code target}. */
+        public void seekBefore(byte[] target) {
+            seek(target);
+            if (valid) {
+                prev();
+            } else {
+                seekToLast();
+            }
+        }
+
+        /**
+         * Moves to the entry before the current one; the iterator is invalid afterward if
+         * there is none. Keys are stored as differences to their predecessors, so the way
+         * back leads over the restart point before the current entry.
+         */
+        public void prev() {
+            requireValid();
+            int target = currentOffset;
+            if (target == 0) {
+                valid = false;
+                return;
+            }
+            // The last restart point before the current entry. The first one is at offset 0.
+            int left = 0;
+            int right = restartCount - 1;
+            while (left < right) {
+                int mid = (left + right + 1) >>> 1;
+                if (restartOffset(mid) < target) {
+                    left = mid;
+                } else {
+                    right = mid - 1;
+                }
+            }
+            seekToRestart(left);
+            do {
+                next();
+            } while (valid && nextOffset < target);
+            if (!valid || nextOffset != target) {
+                throw new DecodeException("no entry ends at " + target);
+            }
+        }
+
         /** Moves to the next entry; the iterator is invalid afterward if there is none. */
         public void next() {
             int pos = nextOffset;
@@ -143,6 +195,7 @@ public final class Block {
                 valid = false;
                 return;
             }
+            currentOffset = pos;
             boolean atRestart = nextRestart < restartCount && restartOffset(nextRestart) == pos;
             if (atRestart) {
                 nextRestart++;

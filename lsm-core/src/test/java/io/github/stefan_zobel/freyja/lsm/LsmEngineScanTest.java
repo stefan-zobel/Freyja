@@ -70,6 +70,7 @@ class LsmEngineScanTest {
             engine.put(b("f"), b("f3"));
 
             assertEquals(List.of("a=a3", "c=c2", "d=d3", "f=f3"), collect(engine.scan(null, null)));
+            assertEquals(List.of("f=f3", "d=d3", "c=c2", "a=a3"), collect(engine.scanReverse(null, null)));
             assertEquals(0, engine.openScanCount());
             assertEquals(0, engine.blockCache().pinnedCount());
         }
@@ -91,6 +92,15 @@ class LsmEngineScanTest {
             assertEquals(List.of(), collect(engine.scan(b("x"), null)));
             assertEquals(List.of(), collect(engine.scan(b("c"), b("c"))), "an empty range");
             assertEquals(List.of(), collect(engine.scan(b("d"), b("b"))), "an inverted range");
+            // Backward the range is the same: its end stays exclusive, its start inclusive.
+            assertEquals(List.of("ca=CA", "c=C", "bb=BB", "b=B"), collect(engine.scanReverse(b("b"), b("d"))));
+            assertEquals(List.of("c=C", "bb=BB"), collect(engine.scanReverse(b("ba"), b("ca"))));
+            assertEquals(List.of("b=B", "a=A"), collect(engine.scanReverse(null, b("bb"))));
+            assertEquals(List.of("d=D", "ca=CA"), collect(engine.scanReverse(b("ca"), null)));
+            assertEquals(List.of(), collect(engine.scanReverse(b("x"), null)));
+            assertEquals(List.of(), collect(engine.scanReverse(b("c"), b("c"))));
+            assertEquals(List.of(), collect(engine.scanReverse(b("d"), b("b"))));
+            assertThrows(IllegalArgumentException.class, () -> engine.scanReverse(new byte[0], null));
             assertThrows(IllegalArgumentException.class, () -> engine.scan(new byte[0], null));
             assertThrows(IllegalArgumentException.class, () -> engine.scan(null, new byte[0]));
         }
@@ -229,6 +239,8 @@ class LsmEngineScanTest {
             assertNull(engine.get(b("b"), second));
             assertEquals("2", s(engine.get(b("c"), second)));
             assertEquals(List.of("a=2", "c=2"), collect(engine.scan(null, null, second)));
+            assertEquals(List.of("c=2", "a=2"), collect(engine.scanReverse(null, null, second)));
+            assertEquals(List.of("b=1", "a=1"), collect(engine.scanReverse(null, null, first)));
 
             assertEquals(List.of("a=3", "b=3"), collect(engine.scan(null, null)));
             first.close();

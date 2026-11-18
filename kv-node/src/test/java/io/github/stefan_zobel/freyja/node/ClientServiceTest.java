@@ -98,6 +98,17 @@ class ClientServiceTest {
         Pairs all = assertInstanceOf(Pairs.class, call(cluster, leader,
                 new ClientRequest.Scan(new byte[0], new byte[0], 2, false, false)));
         assertEquals(2, all.pairs().size(), "the limit of the request");
+        // A reverse scan gives the same range from its end, and its limit keeps the largest keys.
+        Pairs backward = assertInstanceOf(Pairs.class, call(cluster, leader,
+                new ClientRequest.Scan(KvCluster.b("a"), KvCluster.b("c"), 10, true, false)));
+        assertEquals(List.of("b", "a"), backward.pairs().stream().map(p -> new String(p.key())).toList());
+        Pairs last = assertInstanceOf(Pairs.class, call(cluster, leader,
+                new ClientRequest.Scan(new byte[0], new byte[0], 1, true, false)));
+        Pairs everything = assertInstanceOf(Pairs.class, call(cluster, leader,
+                new ClientRequest.Scan(new byte[0], new byte[0], 100, false, false)));
+        assertEquals(1, last.pairs().size());
+        assertArrayEquals(everything.pairs().getLast().key(), last.pairs().getFirst().key(), "the largest key");
+        assertEquals(everything.pairs().getLast().modIndex(), last.pairs().getFirst().modIndex());
 
         // A follower sends the client to the leader, for commands and for linearizable reads.
         NotLeader redirect = assertInstanceOf(NotLeader.class, call(cluster, follower, put(session, 4, "d", "four")));
@@ -142,8 +153,6 @@ class ClientServiceTest {
                 new ClientRequest.Execute(new Command.SetAlarm(Command.Alarm.NOSPACE))));
         assertEquals(new Rejected(Reason.INVALID), call(cluster, leader,
                 new ClientRequest.Execute(new Command.SetClusterVersion(9))));
-        assertEquals(new Rejected(Reason.UNSUPPORTED), call(cluster, leader,
-                new ClientRequest.Scan(new byte[0], new byte[0], 5, true, false)));
         // Bytes that are no request get no answer.
         List<byte[]> answers = new ArrayList<>();
         leader.service.request(new byte[] {1, 2, 3}, answers::add);

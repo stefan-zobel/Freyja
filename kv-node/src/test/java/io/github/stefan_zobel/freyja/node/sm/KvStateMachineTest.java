@@ -108,6 +108,13 @@ class KvStateMachineTest {
             assertEquals(List.of("a", "c", "d"), all.stream().map(p -> s(p.key())).toList());
             assertEquals(List.of("c"), machine.scan(b("b"), b("d"), 100).stream().map(p -> s(p.key())).toList());
             assertEquals(2, machine.scan(null, null, 2).size());
+            // Backward: system keys below and above the user keys stay out of it.
+            assertEquals(List.of("d", "c", "a"),
+                    machine.scan(null, null, 100, true).stream().map(p -> s(p.key())).toList());
+            assertEquals(List.of("d", "c"), machine.scan(null, null, 2, true).stream().map(p -> s(p.key())).toList());
+            assertEquals(List.of("c", "a"),
+                    machine.scan(b("a"), b("d"), 100, true).stream().map(p -> s(p.key())).toList());
+            assertEquals(3, machine.scan(null, null, 1, true).getFirst().modIndex());
             assertEquals(3, all.getLast().modIndex());
         }
         try (KvStateMachine machine = open(fs)) {

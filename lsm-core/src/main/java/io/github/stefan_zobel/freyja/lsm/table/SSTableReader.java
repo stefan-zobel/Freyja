@@ -571,6 +571,61 @@ public final class SSTableReader {
             }
         }
 
+        /** Moves to the last entry of the table. */
+        @Override
+        public void seekToLast() throws IOException {
+            requireOpen();
+            try {
+                indexIterator.seekToLast();
+                loadDataBlock();
+                if (dataIterator != null) {
+                    dataIterator.seekToLast();
+                }
+                skipExhaustedBlocksBackward();
+            } catch (DecodeException e) {
+                throw malformed(e);
+            }
+        }
+
+        /** Moves to the last entry whose internal key is before {@code internalKey}. */
+        @Override
+        public void seekBefore(byte[] internalKey) throws IOException {
+            requireOpen();
+            try {
+                // The first block that may hold a key at or after the bound; what is before
+                // the bound is in that block or ends the block before it.
+                indexIterator.seek(internalKey);
+                if (!indexIterator.valid()) {
+                    indexIterator.seekToLast();
+                    loadDataBlock();
+                    if (dataIterator != null) {
+                        dataIterator.seekToLast();
+                    }
+                } else {
+                    loadDataBlock();
+                    dataIterator.seekBefore(internalKey);
+                }
+                skipExhaustedBlocksBackward();
+            } catch (DecodeException e) {
+                throw malformed(e);
+            }
+        }
+
+        /** Moves to the entry before the current one. */
+        @Override
+        public void prev() throws IOException {
+            requireOpen();
+            if (!valid()) {
+                throw new IllegalStateException("iterator is not positioned at an entry");
+            }
+            try {
+                dataIterator.prev();
+                skipExhaustedBlocksBackward();
+            } catch (DecodeException e) {
+                throw malformed(e);
+            }
+        }
+
         /**
          * Returns the current internal key.
          *
@@ -652,6 +707,17 @@ public final class SSTableReader {
                 loadDataBlock();
                 if (dataIterator != null) {
                     dataIterator.seekToFirst();
+                }
+            }
+        }
+
+        /** While the current data block has no entry left, moves back to the block before. */
+        private void skipExhaustedBlocksBackward() throws IOException {
+            while (dataIterator != null && !dataIterator.valid()) {
+                indexIterator.prev();
+                loadDataBlock();
+                if (dataIterator != null) {
+                    dataIterator.seekToLast();
                 }
             }
         }

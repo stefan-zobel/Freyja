@@ -63,8 +63,8 @@ Rules:
     machine, shortening of the log, snapshot transfer and crash-safe installation. Repair
     of a damaged state machine. The alarm from the quota and from low free space. Deadlines
     of proposals and the limit on the apply lag.
-  - Decided: reverse scans stay in the client API (`node.md` §4.3), so the engine gets
-    backward iteration. Until it has, a node refuses them as unsupported.
+  - Reverse scans: the engine iterates backward too (`storage-engine.md`), and node and
+    client serve them.
 - **C3.** Whole-system simulation with all faults and the reachability probes. Protected
   `SystemInvariants` file. Trace validation of whole-system traces.
   - Done so far: the step-down of a leader with a slow disk; the simulation with clients,
@@ -129,7 +129,6 @@ leaves this list in the change that completes it.
 
 | Item | Milestone | Notes |
 |---|---|---|
-| Backward iteration in the engine, reverse scans through node and client | C2 | Decided; the wire format has the flag already |
 | Trace validation of the runs with membership changes, transfers, and log damage | B3 | A run of TLC; `docs/tla/README.md` |
 | Exhaustive check of a configuration with membership change | B3 | A run of TLC; the last attempt ran out of memory |
 | Export of whole-system runs as traces, and their validation | C3 | The export is not written; then runs of TLC |

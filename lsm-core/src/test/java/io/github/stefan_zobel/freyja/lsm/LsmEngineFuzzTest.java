@@ -81,9 +81,16 @@ class LsmEngineFuzzTest {
         return true;
     }
 
-    /** Scans a range and compares it with the same range of the model, entry by entry. */
+    /** Scans a range in both directions and compares it with the same range of the model. */
     private static void checkScan(LsmEngine engine, Snapshot snapshot, TreeMap<byte[], byte[]> model,
                                   byte[] start, byte[] end, String when) throws IOException {
+        checkScan(engine, snapshot, model, start, end, false, when);
+        checkScan(engine, snapshot, model, start, end, true, "backward " + when);
+    }
+
+    /** Scans a range and compares it with the same range of the model, entry by entry. */
+    private static void checkScan(LsmEngine engine, Snapshot snapshot, TreeMap<byte[], byte[]> model,
+                                  byte[] start, byte[] end, boolean reverse, String when) throws IOException {
         NavigableMap<byte[], byte[]> expected = model;
         if (start != null && end != null && ByteComparator.compare(start, end) >= 0) {
             expected = newModel(); // an empty or inverted range
@@ -95,9 +102,13 @@ class LsmEngineFuzzTest {
                 expected = expected.headMap(end, false);
             }
         }
+        if (reverse) {
+            expected = expected.descendingMap();
+        }
         Iterator<Map.Entry<byte[], byte[]>> model1 = expected.entrySet().iterator();
-        try (ScanIterator scan = (snapshot == null)
-                ? engine.scan(start, end) : engine.scan(start, end, snapshot)) {
+        try (ScanIterator scan = reverse
+                ? (snapshot == null ? engine.scanReverse(start, end) : engine.scanReverse(start, end, snapshot))
+                : (snapshot == null ? engine.scan(start, end) : engine.scan(start, end, snapshot))) {
             int index = 0;
             for (; scan.valid(); scan.next(), index++) {
                 if (!model1.hasNext()) {

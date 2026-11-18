@@ -162,13 +162,7 @@ public final class ClientService implements NodeListener {
         switch (envelope.request()) {
             case ClientRequest.Execute execute -> execute(w, execute.command());
             case ClientRequest.Get get -> read(w, get.stale());
-            case ClientRequest.Scan scan -> {
-                if (scan.reverse()) {
-                    send(w, new Rejected(Reason.UNSUPPORTED));
-                } else {
-                    read(w, scan.stale());
-                }
-            }
+            case ClientRequest.Scan scan -> read(w, scan.stale());
         }
     }
 
@@ -221,7 +215,8 @@ public final class ClientService implements NodeListener {
             ClientRequest.Scan scan = (ClientRequest.Scan) request;
             List<Pair> pairs = new ArrayList<>();
             for (KvStateMachine.Pair pair : machine.scan(scan.start().length == 0 ? null : scan.start(),
-                    scan.end().length == 0 ? null : scan.end(), Math.min(scan.limit(), options.maxScanLimit()))) {
+                    scan.end().length == 0 ? null : scan.end(), Math.min(scan.limit(), options.maxScanLimit()),
+                    scan.reverse())) {
                 pairs.add(new Pair(pair.key(), pair.value(), pair.modIndex()));
             }
             return new Pairs(pairs, machine.appliedIndex());

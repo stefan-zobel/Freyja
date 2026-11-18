@@ -62,7 +62,7 @@ public final class MemTable {
 
     /**
      * Returns a cursor over the entries. It sees entries added after its creation if they
-     * lie ahead of its position.
+     * lie ahead of its position, in the direction it moves.
      */
     public InternalIterator iterator() {
         return new InternalIterator() {
@@ -87,8 +87,26 @@ public final class MemTable {
             }
 
             @Override
+            public void seekToLast() {
+                source = entries.descendingMap().entrySet().iterator();
+                next();
+            }
+
+            @Override
+            public void seekBefore(byte[] internalKey) {
+                source = entries.headMap(internalKey, false).descendingMap().entrySet().iterator();
+                next();
+            }
+
+            @Override
             public void next() {
                 current = source.hasNext() ? source.next() : null;
+            }
+
+            @Override
+            public void prev() {
+                // The source runs in the direction the cursor was positioned in.
+                next();
             }
 
             @Override

@@ -89,6 +89,32 @@ class BlockTest {
         if (it.valid()) {
             fail("scan returned extra entries: " + describe(keys, restartInterval));
         }
+        // The same entries from the end to the start.
+        it.seekToLast();
+        for (int i = keys.length - 1; i >= 0; i--) {
+            if (!it.valid() || !Arrays.equals(keys[i], it.key()) || !Arrays.equals(valueFor(i), it.value())) {
+                fail("backward scan mismatch at entry " + i + ": " + describe(keys, restartInterval));
+            }
+            it.prev();
+        }
+        if (it.valid()) {
+            fail("backward scan returned extra entries: " + describe(keys, restartInterval));
+        }
+        // A step back and a step forward from every entry.
+        for (int i = 0; i < keys.length; i++) {
+            it.seek(keys[i]);
+            it.prev();
+            boolean back = (i == 0) ? !it.valid() : it.valid() && Arrays.equals(keys[i - 1], it.key());
+            if (!back) {
+                fail("step back from entry " + i + " wrong: " + describe(keys, restartInterval));
+            }
+            if (i > 0) {
+                it.next();
+                if (!it.valid() || !Arrays.equals(keys[i], it.key()) || !Arrays.equals(valueFor(i), it.value())) {
+                    fail("step forward again to entry " + i + " wrong: " + describe(keys, restartInterval));
+                }
+            }
+        }
     }
 
     /** Builds a block and checks a seek to every target against a linear search. */
@@ -106,6 +132,16 @@ class BlockTest {
                             && Arrays.equals(valueFor(expected), it.value());
             if (!ok) {
                 fail("seek to [" + HexFormat.of().formatHex(target) + "] wrong: "
+                        + describe(keys, restartInterval));
+            }
+            // The last entry before the target is the one before the first at or after it.
+            it.seekBefore(target);
+            boolean before = (expected == 0)
+                    ? !it.valid()
+                    : it.valid() && Arrays.equals(keys[expected - 1], it.key())
+                            && Arrays.equals(valueFor(expected - 1), it.value());
+            if (!before) {
+                fail("seek before [" + HexFormat.of().formatHex(target) + "] wrong: "
                         + describe(keys, restartInterval));
             }
         }

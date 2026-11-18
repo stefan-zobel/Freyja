@@ -351,12 +351,17 @@ directory as the old manifest describes it.
     is the bound below which compaction may drop shadowed versions.
   - A snapshot ends when it is closed or when the engine is closed. It does not survive a
     reopen.
-- **Scan:** a forward iterator over a key range `[start, end)` at one sequence number, the
-  current one or a snapshot's. Either bound may be absent.
+- **Scan:** an iterator over a key range `[start, end)` at one sequence number, the current
+  one or a snapshot's. Either bound may be absent. A scan is opened forward (ascending keys)
+  or backward (descending keys, the same range) and keeps its direction.
   - It merges the MemTable, a MemTable that is being flushed, and every table whose key
     range intersects the scan range, in internal-key order.
   - Per user key it returns the newest value at or below its sequence number and skips keys
     whose newest such entry is a tombstone.
+  - Backward, the versions of a user key come oldest first; the scan passes all of them and
+    takes the last one at or below its sequence number. The keys of a block are stored as
+    differences to their predecessors, so a step back within a block starts again at the
+    restart point before the entry.
   - A scan keeps the sources it started with. Later writes and flushes do not change what it
     returns.
   - A scan holds table readers and one pinned block per table. It must be closed, and closed

@@ -583,7 +583,10 @@ The types and their codec live in `kv-common`; the client needs nothing else.
 - The number of requests that wait on a node is bounded (default 10,000); beyond it a
   request is refused as overloaded. A scan returns at most a bounded number of pairs
   (default 1,000) and never more than its limit.
-- Reverse scans are refused as unsupported until the open decision of the roadmap is taken.
+- A reverse scan covers the same range `[start, end)` as a forward one and returns its keys
+  in descending order; with a limit it returns the largest keys of the range.
+- No request is refused as unsupported at present. The reason stays in the protocol for
+  requests that a later release adds and a cluster version does not allow yet.
 
 ## 9. Client Library (`kv-client`)
 

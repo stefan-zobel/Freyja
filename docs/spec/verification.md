@@ -23,7 +23,7 @@ No milestone is complete without its oracles passing.
 - Deterministic mode with tiny thresholds (MemTable of a few KiB, small level targets) so
   that flushes and compactions happen constantly.
 - Every `get` and `scan`, on the live state, on every open snapshot, and on every opened
-  checkpoint, must match the model.
+  checkpoint, must match the model. Every scan is made forward and backward.
 
 ### 2.2 Storage Fault Model and Crash Tests
 

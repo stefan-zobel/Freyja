@@ -205,7 +205,22 @@ public final class FreyjaClient implements Closeable {
      * @param end   an empty array for no upper bound
      */
     public List<Entry> scan(byte[] start, byte[] end, int limit) {
-        Pairs pairs = (Pairs) read(new ClientRequest.Scan(start, end, limit, false, false));
+        return scan(start, end, limit, false);
+    }
+
+    /**
+     * Reads the keys from {@code start} (inclusive) to {@code end} (exclusive) in descending
+     * order, at most {@code limit} of them: the largest keys of the range.
+     *
+     * @param start an empty array for no lower bound
+     * @param end   an empty array for no upper bound
+     */
+    public List<Entry> scanReverse(byte[] start, byte[] end, int limit) {
+        return scan(start, end, limit, true);
+    }
+
+    private List<Entry> scan(byte[] start, byte[] end, int limit, boolean reverse) {
+        Pairs pairs = (Pairs) read(new ClientRequest.Scan(start, end, limit, reverse, false));
         List<Entry> entries = new ArrayList<>(pairs.pairs().size());
         for (ClientResponse.Pair pair : pairs.pairs()) {
             entries.add(new Entry(pair.key(), pair.value(), pair.modIndex()));

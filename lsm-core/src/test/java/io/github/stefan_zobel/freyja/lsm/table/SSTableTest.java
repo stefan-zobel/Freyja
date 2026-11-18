@@ -104,6 +104,31 @@ class SSTableTest {
             for (it.seekToFirst(); it.valid(); it.next()) {
                 entries.add(new Entry(it.key(), it.value()));
             }
+            // Backward, the table holds the same entries.
+            List<Entry> backward = new ArrayList<>();
+            for (it.seekToLast(); it.valid(); it.prev()) {
+                backward.add(new Entry(it.key(), it.value()));
+            }
+            assertSameEntries(entries, backward.reversed());
+            // Before an entry lies the entry before it, also across the border of a block.
+            int step = Math.max(1, entries.size() / 64);
+            for (int i = 0; i < entries.size(); i += step) {
+                it.seekBefore(entries.get(i).key());
+                if (i == 0) {
+                    assertFalse(it.valid(), "nothing is before the first entry");
+                } else {
+                    assertTrue(it.valid(), "before entry " + i);
+                    assertArrayEquals(entries.get(i - 1).key(), it.key(), "before entry " + i);
+                    assertArrayEquals(entries.get(i - 1).value(), it.value(), "before entry " + i);
+                }
+            }
+            if (!entries.isEmpty()) {
+                byte[] beyond = InternalKey.encode(new byte[] {(byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF,
+                        (byte) 0xFF, (byte) 0xFF}, 0, InternalKey.TYPE_VALUE);
+                it.seekBefore(beyond);
+                assertTrue(it.valid());
+                assertArrayEquals(entries.getLast().key(), it.key(), "before a key beyond the table");
+            }
         }
         return entries;
     }

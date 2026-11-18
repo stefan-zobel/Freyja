@@ -578,10 +578,22 @@ public final class KvStateMachine implements StateMachine, Closeable {
      * @param end   {@code null} for no upper bound
      */
     public List<Pair> scan(byte[] start, byte[] end, int limit) throws IOException {
+        return scan(start, end, limit, false);
+    }
+
+    /**
+     * The user keys of the range from {@code start} (inclusive) to {@code end} (exclusive), at
+     * most {@code limit} of them: the smallest ones in ascending order, or, for a reverse
+     * scan, the largest ones in descending order.
+     *
+     * @param start {@code null} for the first key
+     * @param end   {@code null} for no upper bound
+     */
+    public List<Pair> scan(byte[] start, byte[] end, int limit, boolean reverse) throws IOException {
         List<Pair> pairs = new ArrayList<>();
         byte[] from = start == null ? new byte[] {USER} : userKey(start);
         byte[] to = end == null ? new byte[] {USER + 1} : userKey(end);
-        try (ScanIterator scan = engine.scan(from, to)) {
+        try (ScanIterator scan = reverse ? engine.scanReverse(from, to) : engine.scan(from, to)) {
             for (; scan.valid() && pairs.size() < limit; scan.next()) {
                 byte[] key = scan.key();
                 byte[] stored = scan.value();

@@ -1841,15 +1841,28 @@ public final class LsmEngine implements Closeable {
      * @param end   the key to stop before, or {@code null} to scan to the largest key
      */
     public ScanIterator scan(byte[] start, byte[] end) throws IOException {
-        return scan(start, end, lastSequence);
+        return scan(start, end, lastSequence, false);
+    }
+
+    /**
+     * Scans the same range as {@link #scan(byte[], byte[])} from its end to its start: the
+     * largest key below {@code end} comes first.
+     */
+    public ScanIterator scanReverse(byte[] start, byte[] end) throws IOException {
+        return scan(start, end, lastSequence, true);
     }
 
     /** Scans a range as it was when {@code snapshot} was taken. */
     public ScanIterator scan(byte[] start, byte[] end, Snapshot snapshot) throws IOException {
-        return scan(start, end, snapshot.sequenceFor(this));
+        return scan(start, end, snapshot.sequenceFor(this), false);
     }
 
-    private ScanIterator scan(byte[] start, byte[] end, long snapshot) throws IOException {
+    /** Scans a range as it was when {@code snapshot} was taken, from its end to its start. */
+    public ScanIterator scanReverse(byte[] start, byte[] end, Snapshot snapshot) throws IOException {
+        return scan(start, end, snapshot.sequenceFor(this), true);
+    }
+
+    private ScanIterator scan(byte[] start, byte[] end, long snapshot, boolean reverse) throws IOException {
         if ((start != null && start.length == 0) || (end != null && end.length == 0)) {
             throw new IllegalArgumentException("range bounds must not be empty; use null for no bound");
         }
@@ -1874,7 +1887,7 @@ public final class LsmEngine implements Closeable {
         }
         openScans.incrementAndGet();
         // The scan keeps the state pinned, so its tables stay in place until it is closed.
-        return new ScanIterator(new MergingIterator(sources), snapshot, start, end, () -> {
+        return new ScanIterator(new MergingIterator(sources), snapshot, start, end, reverse, () -> {
             openScans.decrementAndGet();
             current.unpin();
         });

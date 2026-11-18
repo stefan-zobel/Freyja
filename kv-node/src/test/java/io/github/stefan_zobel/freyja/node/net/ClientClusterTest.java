@@ -72,6 +72,8 @@ class ClientClusterTest {
                 assertEquals(List.of(prefix + "a", prefix + "c", prefix + "d"),
                         entries.stream().map(e -> s(e.key())).toList());
                 assertEquals(2, client.scan(b(prefix), b(prefix + "~"), 2).size());
+                assertEquals(List.of(prefix + "d", prefix + "c"),
+                        client.scanReverse(b(prefix), b(prefix + "~"), 2).stream().map(e -> s(e.key())).toList());
 
                 assertFalse(client.putIfAbsent(b(prefix + "a"), b("again")));
                 assertTrue(client.putIfAbsent(b(prefix + "e"), b("five")));
