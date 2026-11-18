@@ -37,6 +37,10 @@ public sealed interface RaftEvent {
         }
     }
 
+    /** An administrator asks the leader to hand leadership to another voter. */
+    record TransferLeadership(long requestId, int toNode) implements RaftEvent {
+    }
+
     /** A client asks to append a command to the log. */
     record ClientPropose(long requestId, byte[] command) implements RaftEvent {
         public ClientPropose {

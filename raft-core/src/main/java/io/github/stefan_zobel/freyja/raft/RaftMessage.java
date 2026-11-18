@@ -18,9 +18,17 @@ public sealed interface RaftMessage {
      * @param lastLogIndex index of the last log entry of the sender
      * @param lastLogTerm  term of that entry
      * @param preVote      whether this only asks if a vote would be granted
+     * @param transfer     whether the election is part of a leadership transfer: the leader
+     *                     itself asked the sender to start it, so the vote is to be granted
+     *                     although a leader was heard from recently
      */
-    record RequestVote(long term, long lastLogIndex, long lastLogTerm, boolean preVote)
-            implements RaftMessage {
+    record RequestVote(long term, long lastLogIndex, long lastLogTerm, boolean preVote,
+                       boolean transfer) implements RaftMessage {
+
+        /** A request that is not part of a leadership transfer. */
+        public RequestVote(long term, long lastLogIndex, long lastLogTerm, boolean preVote) {
+            this(term, lastLogIndex, lastLogTerm, preVote, false);
+        }
     }
 
     /**
@@ -69,6 +77,13 @@ public sealed interface RaftMessage {
      * @param round  number of the heartbeat round; echoed in the response
      */
     record Heartbeat(long term, long commit, long round) implements RaftMessage {
+    }
+
+    /**
+     * Leadership transfer: the leader tells an up-to-date voter to start an election at
+     * once, without a pre-vote.
+     */
+    record TimeoutNow(long term) implements RaftMessage {
     }
 
     /** Answers a {@link Heartbeat}. */

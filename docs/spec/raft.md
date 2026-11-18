@@ -232,6 +232,16 @@ election at once. That election skips PreVote and is marked so that other nodes 
 despite having a live leader. If the target has not taken over within one election timeout,
 the transfer is aborted and the leader resumes.
 
+- The target must be another voter. While a transfer is under way the leader rejects
+  proposals, membership changes, and further transfers.
+- The order to start the election (`TimeoutNow`) is sent when the match index of the target
+  equals the last index of the leader, at once or after the missing entries were
+  acknowledged. Only a voter that follows the sender in the term of the order acts on it.
+- The mark on the requests for votes only lifts the rule that a node in contact with a
+  leader grants no vote. Everything else about the election is unchanged: the term and the
+  vote of the target are durable before the requests leave, and the logs are compared.
+- An aborted transfer is reported to the runtime. A successful one shows as a change of role.
+
 ## 8. Log-Recovering Mode
 
 A node whose runtime reports `LogDamaged` (see `node.md`) has lost entries it may have

@@ -89,6 +89,8 @@ deleted. This test must pass on Windows.
     for a while (it tries to start elections) and is then shut down for good, but only when
     no other node has it in its configuration any more. Liveness is demanded of the members
     of the final configuration.
+  - Leadership transfers are requested in the same seed set, also to targets that are down
+    or cut off. The seed set must reach both changes of leader and aborted transfers.
   - The settings of a run (cluster size, delays, flow-control limits, load) are drawn from
     its seed, so that the seed set covers many shapes of a cluster.
 - **Safety invariants, checked after every step:**

@@ -94,6 +94,8 @@ public final class Simulation {
         public long configRejections;
         public long joined;
         public long retired;
+        public long transfers;
+        public long transfersAborted;
 
         @Override
         public String toString() {
@@ -107,7 +109,8 @@ public final class Simulation {
                     + " partitions=" + partitions + " checkedOperations=" + checkedOperations
                     + " readsServed=" + readsServed + " readsRejected=" + readsRejected
                     + " staleLeaderReads=" + staleLeaderReads + " configChanges=" + configChanges
-                    + " configRejections=" + configRejections + " joined=" + joined + " retired=" + retired;
+                    + " configRejections=" + configRejections + " joined=" + joined + " retired=" + retired
+                    + " transfers=" + transfers + " transfersAborted=" + transfersAborted;
         }
     }
 
@@ -510,6 +513,7 @@ public final class Simulation {
                     case RoleChanged _ -> {
                     }
                     case Notification.ConfigChanged changed -> node.configIndex = changed.index();
+                    case Notification.TransferAborted _ -> stats.transfersAborted++;
                 }
             }
         }
@@ -540,6 +544,7 @@ public final class Simulation {
                         m.index()), m.hintIndex()), m.hintTerm());
                 case RaftMessage.Heartbeat m -> mix(mix(mix(h, 5), m.commit()), m.round());
                 case RaftMessage.HeartbeatResponse m -> mix(mix(h, 6), m.round());
+                case RaftMessage.TimeoutNow _ -> mix(h, 7);
             };
         }
         h = mix(mix(h, ready.applyFrom()), ready.applyTo());
@@ -549,6 +554,7 @@ public final class Simulation {
                 case ProposalRejected n ->
                         mix(mix(mix(mix(h, 12), n.requestId()), n.reason().ordinal()), n.leaderHint());
                 case ReadIndexReady n -> mix(mix(mix(h, 13), n.requestId()), n.index());
+                case Notification.TransferAborted n -> mix(mix(mix(h, 17), n.requestId()), n.toNode());
                 case ReadIndexRejected n ->
                         mix(mix(mix(mix(h, 14), n.requestId()), n.reason().ordinal()), n.leaderHint());
                 case RoleChanged n -> mix(mix(mix(mix(h, 15), n.role().ordinal()), n.term()), n.leaderId());
@@ -643,6 +649,9 @@ public final class Simulation {
         }
         if (options.partitions() && options.maxPause() > 0) {
             kinds.add(this::freezeLeader);
+        }
+        if (options.spareNodes() > 0) {
+            kinds.add(this::transferLeadership);
         }
         if (!kinds.isEmpty()) {
             kinds.get(random.nextInt(kinds.size())).run();
@@ -879,6 +888,22 @@ public final class Simulation {
             }
         }
         return false;
+    }
+
+    /** Asks the leader to hand leadership to another voter, which may be down or cut off. */
+    private void transferLeadership() {
+        if (knownLeader == RaftNode.NO_NODE) {
+            return;
+        }
+        SimNode leader = nodes.get(knownLeader);
+        List<Integer> others = new ArrayList<>(leader.view().config().voters());
+        others.remove(Integer.valueOf(leader.id));
+        if (!leader.up || others.isEmpty()) {
+            return;
+        }
+        stats.transfers++;
+        deliver(leader, new RaftEvent.TransferLeadership(CONFIG_BASE + (1L << 40) + stats.transfers,
+                others.get(random.nextInt(others.size()))));
     }
 
     /** Shuts a node down for good. */

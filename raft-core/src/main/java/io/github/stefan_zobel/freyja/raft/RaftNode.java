@@ -21,11 +21,13 @@ import io.github.stefan_zobel.freyja.raft.RaftEvent.MessageReceived;
 import io.github.stefan_zobel.freyja.raft.RaftEvent.Persisted;
 import io.github.stefan_zobel.freyja.raft.RaftEvent.ProposeConfigChange;
 import io.github.stefan_zobel.freyja.raft.RaftEvent.Tick;
+import io.github.stefan_zobel.freyja.raft.RaftEvent.TransferLeadership;
 import io.github.stefan_zobel.freyja.raft.RaftMessage.AppendEntries;
 import io.github.stefan_zobel.freyja.raft.RaftMessage.AppendResponse;
 import io.github.stefan_zobel.freyja.raft.RaftMessage.Heartbeat;
 import io.github.stefan_zobel.freyja.raft.RaftMessage.HeartbeatResponse;
 import io.github.stefan_zobel.freyja.raft.RaftMessage.RequestVote;
+import io.github.stefan_zobel.freyja.raft.RaftMessage.TimeoutNow;
 import io.github.stefan_zobel.freyja.raft.RaftMessage.VoteResponse;
 
 /**
@@ -126,6 +128,12 @@ public final class RaftNode {
      */
     private final ArrayDeque<long[]> pendingReads = new ArrayDeque<>();
     private long uncommittedBytes;
+    /** Leadership transfer under way: the target, or {@link #NO_NODE}. */
+    private int transferTarget = NO_NODE;
+    private long transferRequestId;
+    private int transferElapsed;
+    /** Whether the target was already told to start its election. */
+    private boolean transferSignalled;
     /** Sizes of the entries appended in this leadership and not yet committed: {index, size}. */
     private final ArrayDeque<long[]> uncommitted = new ArrayDeque<>();
 
@@ -227,6 +235,7 @@ public final class RaftNode {
             case ClientPropose p -> propose(p.requestId(), p.command());
             case ClientReadIndex r -> readIndex(r.requestId());
             case ProposeConfigChange c -> proposeConfigChange(c.requestId(), c.change());
+            case TransferLeadership t -> transferLeadership(t.requestId(), t.toNode());
         }
         RoleChanged now = new RoleChanged(role, term, leaderId);
         if (!now.equals(lastRoleNotice)) {
@@ -514,6 +523,11 @@ public final class RaftNode {
         if (role == Role.LEADER) {
             electionElapsed++;
             heartbeatElapsed++;
+            if (transferTarget != NO_NODE && ++transferElapsed >= config.electionTicks()) {
+                // The target has not taken over. Resume.
+                notifications.add(new Notification.TransferAborted(transferRequestId, transferTarget));
+                transferTarget = NO_NODE;
+            }
             if (electionElapsed >= config.electionTicks()) {
                 electionElapsed = 0;
                 if (!quorumActive()) {
@@ -603,6 +617,10 @@ public final class RaftNode {
             notifications.add(new ProposalRejected(requestId, Reason.NOT_LEADER, leaderId));
             return;
         }
+        if (transferTarget != NO_NODE) {
+            notifications.add(new ProposalRejected(requestId, Reason.TRANSFER_IN_PROGRESS, transferTarget));
+            return;
+        }
         if (uncommittedBytes > 0 && uncommittedBytes + command.length > config.maxUncommittedBytes()) {
             notifications.add(new ProposalRejected(requestId, Reason.OVERLOADED, id));
             return;
@@ -631,7 +649,8 @@ public final class RaftNode {
         long messageTerm = message.term();
         if (messageTerm > term) {
             if (message instanceof RequestVote request) {
-                if (leaderId != NO_NODE && electionElapsed < config.electionTicks()) {
+                if (!request.transfer() && leaderId != NO_NODE
+                        && electionElapsed < config.electionTicks()) {
                     // A leader was heard from within the minimum election timeout. The
                     // request comes from a node that lost contact; it must not disturb.
                     return;
@@ -643,7 +662,8 @@ public final class RaftNode {
                     && response.granted()) {
                 // Carries the term of the election asked about; the term of this node stays.
             } else {
-                boolean fromLeader = message instanceof AppendEntries || message instanceof Heartbeat;
+                boolean fromLeader = message instanceof AppendEntries || message instanceof Heartbeat
+                        || message instanceof TimeoutNow;
                 becomeFollower(messageTerm, fromLeader ? from : NO_NODE);
             }
         } else if (messageTerm < term) {
@@ -663,6 +683,7 @@ public final class RaftNode {
             case AppendResponse m -> handleAppendResponse(from, m);
             case Heartbeat m -> handleHeartbeat(from, m);
             case HeartbeatResponse m -> handleHeartbeatResponse(from, m);
+            case TimeoutNow m -> handleTimeoutNow(from, m);
         }
     }
 
@@ -723,7 +744,7 @@ public final class RaftNode {
         }
         if (granted >= cluster.quorum()) {
             if (role == Role.PRE_CANDIDATE) {
-                becomeCandidate();
+                becomeCandidate(false);
             } else {
                 becomeLeader();
             }
@@ -813,6 +834,9 @@ public final class RaftNode {
             }
             maybeCommit();
             sendAppend(from, false);
+            if (from == transferTarget) {
+                signalTransferTarget();
+            }
             return;
         }
 
@@ -932,6 +956,48 @@ public final class RaftNode {
     }
 
     /**
+     * Leadership transfer: the leader stops accepting proposals, brings the target up to
+     * date, and tells it to start an election at once. If the target has not taken over
+     * within one election timeout, the leader resumes.
+     */
+    private void transferLeadership(long requestId, int toNode) {
+        if (role != Role.LEADER) {
+            notifications.add(new ProposalRejected(requestId, Reason.NOT_LEADER, leaderId));
+            return;
+        }
+        if (transferTarget != NO_NODE) {
+            notifications.add(new ProposalRejected(requestId, Reason.TRANSFER_IN_PROGRESS, transferTarget));
+            return;
+        }
+        if (toNode == id || !cluster.voters().contains(toNode)) {
+            notifications.add(new ProposalRejected(requestId, Reason.INVALID_CHANGE, id));
+            return;
+        }
+        transferTarget = toNode;
+        transferRequestId = requestId;
+        transferElapsed = 0;
+        transferSignalled = false;
+        signalTransferTarget();
+        sendAppend(toNode, false);
+    }
+
+    /** Tells the target to start its election as soon as it holds the complete log. */
+    private void signalTransferTarget() {
+        Progress pr = progress.get(transferTarget);
+        if (pr != null && !transferSignalled && pr.match == lastIndex()) {
+            transferSignalled = true;
+            send(transferTarget, new TimeoutNow(term));
+        }
+    }
+
+    private void handleTimeoutNow(int from, TimeoutNow message) {
+        // Only a voter that follows the sender in this term acts on it.
+        if (role == Role.FOLLOWER && voter && leaderId == from) {
+            becomeCandidate(true);
+        }
+    }
+
+    /**
      * A membership change: one node at a time, as a CONFIG entry that carries the complete
      * new configuration. The new configuration is in force on every node from the moment
      * the entry is in its log.
@@ -948,6 +1014,10 @@ public final class RaftNode {
         }
         if (configIndex() > commitIndex) {
             notifications.add(new ProposalRejected(requestId, Reason.CONFIG_IN_PROGRESS, id));
+            return;
+        }
+        if (transferTarget != NO_NODE) {
+            notifications.add(new ProposalRejected(requestId, Reason.TRANSFER_IN_PROGRESS, transferTarget));
             return;
         }
         ClusterConfig next = cluster.with(change);
@@ -998,6 +1068,7 @@ public final class RaftNode {
         progress.clear();
         uncommitted.clear();
         uncommittedBytes = 0;
+        transferTarget = NO_NODE;
         heartbeatElapsed = 0;
     }
 
@@ -1026,7 +1097,11 @@ public final class RaftNode {
         checkElection();
     }
 
-    private void becomeCandidate() {
+    /**
+     * @param transfer whether the leader asked for this election (leadership transfer); the
+     *                 requests then say so, and the others vote although they have a leader
+     */
+    private void becomeCandidate(boolean transfer) {
         role = Role.CANDIDATE;
         leaderId = NO_NODE;
         clearRoleState();
@@ -1038,7 +1113,7 @@ public final class RaftNode {
         // durable. A candidate that forgot its candidacy in a crash could otherwise collect
         // votes that were granted for a log it no longer has.
         selfVoteSequence = durabilityPoint();
-        RequestVote request = new RequestVote(term, lastIndex(), lastTerm(), false);
+        RequestVote request = new RequestVote(term, lastIndex(), lastTerm(), false, transfer);
         for (int peer : peers) {
             sendWhenDurable(peer, request);
         }

@@ -115,6 +115,9 @@ public final class TraceRecorder implements Simulation.StepListener {
                     s.append("{\"type\":\"ClientPropose\",\"requestId\":").append(p.requestId()).append('}');
             case RaftEvent.ClientReadIndex r ->
                     s.append("{\"type\":\"ClientReadIndex\",\"requestId\":").append(r.requestId()).append('}');
+            case RaftEvent.TransferLeadership t ->
+                    s.append("{\"type\":\"TransferLeadership\",\"requestId\":").append(t.requestId())
+                            .append(",\"to\":").append(t.toNode()).append('}');
             case RaftEvent.ProposeConfigChange c ->
                     s.append("{\"type\":\"ProposeConfigChange\",\"requestId\":").append(c.requestId())
                             .append(",\"change\":\"").append(c.change().getClass().getSimpleName())
@@ -177,7 +180,10 @@ public final class TraceRecorder implements Simulation.StepListener {
             case RaftMessage.RequestVote m -> s.append("{\"type\":\"RequestVote\",\"term\":").append(m.term())
                     .append(",\"lastLogIndex\":").append(m.lastLogIndex())
                     .append(",\"lastLogTerm\":").append(m.lastLogTerm())
-                    .append(",\"preVote\":").append(m.preVote()).append('}');
+                    .append(",\"preVote\":").append(m.preVote())
+                    .append(",\"transfer\":").append(m.transfer()).append('}');
+            case RaftMessage.TimeoutNow m ->
+                    s.append("{\"type\":\"TimeoutNow\",\"term\":").append(m.term()).append('}');
             case RaftMessage.VoteResponse m -> s.append("{\"type\":\"VoteResponse\",\"term\":").append(m.term())
                     .append(",\"preVote\":").append(m.preVote())
                     .append(",\"granted\":").append(m.granted()).append('}');

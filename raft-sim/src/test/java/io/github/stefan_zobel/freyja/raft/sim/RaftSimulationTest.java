@@ -105,6 +105,8 @@ class RaftSimulationTest {
         long configChanges;
         long joined;
         long retired;
+        long transfers;
+        long transfersAborted;
 
         void add(Simulation sim) {
             Simulation.Stats stats = sim.stats();
@@ -125,6 +127,8 @@ class RaftSimulationTest {
             configChanges += stats.configChanges;
             joined += stats.joined;
             retired += stats.retired;
+            transfers += stats.transfers;
+            transfersAborted += stats.transfersAborted;
         }
 
         @Override
@@ -134,7 +138,8 @@ class RaftSimulationTest {
                     + " notLeader=" + notLeader + " applied=" + applied + " crashes=" + crashes
                     + " partitions=" + partitions + " dropped=" + dropped + " duplicated=" + duplicated
                     + " readsServed=" + readsServed + " historyOperations=" + historyOperations
-                    + " configChanges=" + configChanges + " joined=" + joined + " retired=" + retired;
+                    + " configChanges=" + configChanges + " joined=" + joined + " retired=" + retired
+                    + " transfers=" + transfers + " transfersAborted=" + transfersAborted;
         }
     }
 
@@ -191,6 +196,8 @@ class RaftSimulationTest {
             assertTrue(totals.configChanges > 4 * totals.runs, summary);
             assertTrue(totals.joined > 2 * totals.runs, summary);
             assertTrue(totals.retired > totals.runs / 2, summary);
+            assertTrue(totals.transfers > totals.runs / 2, summary);
+            assertTrue(totals.transfersAborted > 0, summary);
             assertTrue(totals.elections > 3 * totals.runs, summary);
             assertTrue(totals.truncations > 0, summary);
             assertTrue(totals.crashes > totals.runs / 2, summary);

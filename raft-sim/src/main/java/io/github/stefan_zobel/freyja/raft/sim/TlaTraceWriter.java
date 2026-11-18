@@ -87,6 +87,7 @@ public final class TlaTraceWriter implements Simulation.StepListener {
             case RaftEvent.ClientPropose _ -> step.event = "Propose";
             case RaftEvent.ClientReadIndex _ -> step.event = "Read";
             case RaftEvent.ProposeConfigChange _ -> step.event = "Config";
+            case RaftEvent.TransferLeadership _ -> step.event = "Transfer";
         }
         for (Ready ready : readies) {
             if (ready.hasPersistentWork()) {
@@ -152,6 +153,7 @@ public final class TlaTraceWriter implements Simulation.StepListener {
                     + ", idx |-> " + m.index() + "]";
             case RaftMessage.Heartbeat m -> "[type |-> \"HB\", " + head + ", commit |-> " + m.commit() + "]";
             case RaftMessage.HeartbeatResponse _ -> "[type |-> \"HBR\", " + head + "]";
+            case RaftMessage.TimeoutNow _ -> "[type |-> \"TN\", " + head + "]";
         };
     }
 
