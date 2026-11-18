@@ -3,6 +3,8 @@ name: build
 # Started by hand only: Actions tab, workflow "build", "Run workflow".
 on:
   workflow_dispatch:
+  # For the moment only, so that the workflow gets known: to be removed again.
+  push:
 
 permissions:
   contents: read
