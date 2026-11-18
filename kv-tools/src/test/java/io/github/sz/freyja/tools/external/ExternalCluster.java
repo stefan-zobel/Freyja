@@ -178,14 +178,29 @@ final class ExternalCluster implements Closeable {
             voters.append(id == 0 ? "" : ",").append(id);
         }
         Files.createDirectories(logs);
+        // The ports of the nodes stay taken until every proxy has a port of its own: a proxy
+        // that got a port a node was promised would keep that node from ever starting.
+        List<ServerSocket> promised = new ArrayList<>();
+        try {
+            prepare(directories, logs, voters.toString(), promised);
+        } finally {
+            for (ServerSocket socket : promised) {
+                socket.close();
+            }
+        }
+    }
+
+    private void prepare(List<Path> directories, Path logs, String voters, List<ServerSocket> promised)
+            throws IOException {
+        int n = directories.size();
         for (int id = 0; id < n; id++) {
             PrintStream quiet = new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8);
             Path data = directories.get(id);
             if (FreyjaNode.run(new String[] {"init", "--data", data.toString(), "--cluster", CLUSTER_ID, "--node",
-                    Integer.toString(id), "--voters", voters.toString()}, quiet, quiet, false) != 0) {
+                    Integer.toString(id), "--voters", voters}, quiet, quiet, false) != 0) {
                 throw new IOException("cannot prepare " + data);
             }
-            nodes.add(new NodeProcess(id, data, logs.resolve("node-" + id + ".log"), freePorts(3)));
+            nodes.add(new NodeProcess(id, data, logs.resolve("node-" + id + ".log"), freePorts(3, promised)));
         }
         for (int from = 0; from < n; from++) {
             for (int to = 0; to < n; to++) {
@@ -307,20 +322,13 @@ final class ExternalCluster implements Closeable {
         }
     }
 
-    private static int[] freePorts(int count) throws IOException {
-        ServerSocket[] sockets = new ServerSocket[count];
+    /** Finds ports that are free and keeps them taken with sockets that the caller closes. */
+    private static int[] freePorts(int count, List<ServerSocket> taken) throws IOException {
         int[] ports = new int[count];
-        try {
-            for (int i = 0; i < count; i++) {
-                sockets[i] = new ServerSocket(0, 1, InetAddress.getLoopbackAddress());
-                ports[i] = sockets[i].getLocalPort();
-            }
-        } finally {
-            for (ServerSocket socket : sockets) {
-                if (socket != null) {
-                    socket.close();
-                }
-            }
+        for (int i = 0; i < count; i++) {
+            ServerSocket socket = new ServerSocket(0, 1, InetAddress.getLoopbackAddress());
+            taken.add(socket);
+            ports[i] = socket.getLocalPort();
         }
         return ports;
     }
