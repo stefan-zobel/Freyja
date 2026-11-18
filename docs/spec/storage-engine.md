@@ -375,6 +375,12 @@ directory as the old manifest describes it.
   - A failed checkpoint may leave a directory without `CURRENT`. It cannot be opened and is
     to be removed.
 
+**Errors in the middle of a change.** An `Error` that ends a write or a flush (an
+allocation that fails, a simulated crash in a test) puts the engine into the failed state
+like any other failure, and the request gives its turn in the write queue back before the
+error goes on. Nobody waits forever behind a request that will never finish: later writes
+are rejected, and `close` returns.
+
 ## 10. Observability Hooks
 
 The engine exposes counters and gauges through a small metrics interface from `kv-common`

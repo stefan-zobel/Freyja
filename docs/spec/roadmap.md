@@ -68,6 +68,11 @@ Rules:
     decided before the client API of C4.
 - **C3.** Whole-system simulation with all faults and the reachability probes. Protected
   `SystemInvariants` file. Trace validation of whole-system traces.
+  - Done so far: the step-down of a leader with a slow disk; the simulation with clients,
+    network faults, and crashes; `SystemInvariants` with its negative tests and its
+    checksum; the mutation checks of `verification.md` §3.
+  - Open: storage damage and repair, full and slow disks, membership changes, leadership
+    transfers, lost identity, the Raft invariants over complete nodes, the probes, traces.
 - **C4.** Real transport with virtual threads. Wire protocol with handshake. `kv-client`.
   Admin API and command-line tool. End-to-end test with real processes.
 

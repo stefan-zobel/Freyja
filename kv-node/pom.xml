@@ -28,6 +28,13 @@
             <artifactId>raft-core</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <!-- The whole-system simulation checks client histories with the checker of raft-sim. -->
+        <dependency>
+            <groupId>io.github.stefan-zobel</groupId>
+            <artifactId>raft-sim</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>

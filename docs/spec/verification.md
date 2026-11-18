@@ -343,6 +343,56 @@ Checked: all invariants of §2.4, linearizability of the client history (§2.5),
 equality across nodes at equal applied index, no acknowledged write lost, convergence after
 healing, and that every repair path ends in a healthy node.
 
+**How it is built.** The simulation is a queue of events ordered by simulated time: ticks
+of nodes, deliveries of messages, turns of clients, faults, restarts. One event is one step;
+after every step the invariants of `SystemInvariants` are checked.
+
+- **Clients** talk to a node as the layer that receives requests will: they hand it
+  proposals with a deadline and requests for a read index, and take the answers from what
+  the node reports. A client has a session and one operation at a time. It sends a command
+  again, with the same sequence number, until it is answered, and gives up after waiting in
+  vain many times. An answer that a node refuses at once (not the leader, queue full) does
+  not count as waiting in vain.
+- **Operations:** write, compare-and-set (a conditional batch), and linearizable read, on a
+  few keys with a few values, so that conditions hold and fail. The value 0 stands for a
+  key that is not there: writing it is a delete.
+- **History:** every answered operation enters the history with its invocation and response
+  time. An operation with an unknown outcome (given up, or the session expired after the
+  client had waited in vain) stays open: it may have taken effect or not, now or later. An
+  operation that no node ever took is left out. Clients stop when too many operations are
+  open, because the checker pays for each.
+- **Late duplicates:** a copy of an answered command arrives again much later, when its
+  client has moved on. Nobody waits for that answer.
+- **Observation:** every applied entry of every node (index, term, hash of the command,
+  session and sequence number, result), the digest of the state machine after every batch,
+  and every answer given to a client.
+- **End of a run:** faults stop, every node is started, clients finish what they have in
+  hand. The run must converge within a bound: every node running and out of log-recovering
+  mode, all at the same applied index with the same digest, nothing acknowledged beyond it,
+  no file handle left open, and the history linearizable.
+
+**The invariants** (`SystemInvariants`):
+
+- *State-machine equality:* whatever node applies the entry with a given index applies the
+  same entry and gets the same result; two state machines that have applied everything up to
+  the same index have the same digest.
+- *No acknowledged write lost:* an answer names an entry that was applied, with the result
+  the client was told; no node ever applies another entry at that index.
+- *Exactly-once:* along the log, the applications of one command of a session give first
+  any number of `NO_SPACE`, then at most one result of taking effect, after it only that
+  result again or `SEQUENCE_TOO_OLD`; once the session is gone, only `NO_SUCH_SESSION`. A
+  client is told the result of the one time the command took effect.
+
+**State of the work.** Injected so far: lost, delayed, and repeated messages; partitions;
+crashes between operations and in the middle of a file operation; restarts. Still to come
+in this milestone: damage to stored data and the repairs it triggers, full and slow disks,
+membership changes, leadership transfers, lost identity, the invariants of §2.4 over
+complete nodes, the probes of §3.1, and traces for the model.
+
+Mutations that the simulation catches: a repeated command applied again; an older command
+of a session applied; the log shortened without a flush before; the applied index not
+stored with its batch; a delete of a batch not written.
+
 ### 3.1 Reachability Checks
 
 Fault injection only proves something for situations that actually occur. The code contains

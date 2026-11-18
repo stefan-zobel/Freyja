@@ -1,6 +1,8 @@
 package io.github.stefan_zobel.freyja.lsm;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -196,6 +198,29 @@ class LsmEngineCrashTest {
         assertEquals(0, memory.openHandleCount(), "handles left open after " + where);
         try (LsmEngine again = LsmEngine.open(memory, DIR, options)) {
             assertTrue(Arrays.equals(marker, again.get(marker)), "a write after " + where + " was lost");
+        }
+    }
+
+    @Test
+    void anErrorInTheMiddleOfAWriteFailsTheEngineAndBlocksNobody() throws IOException {
+        MemoryFileSystem memory = new MemoryFileSystem();
+        FaultyFileSystem faulty = new FaultyFileSystem(memory);
+        LsmEngine engine = LsmEngine.open(faulty, DIR, options());
+        engine.put(new byte[] {1}, new byte[] {1});
+        Random random = new Random(7);
+        faulty.crashAt(faulty.operationCount(), random, () -> memory.crash(random));
+        assertThrows(SimulatedCrash.class, () -> engine.put(new byte[] {2}, new byte[] {2}));
+        // The request that died gave its turn back: the next one is rejected, not left waiting.
+        org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(java.time.Duration.ofSeconds(20), () -> {
+            assertThrows(EngineFailedException.class, () -> engine.put(new byte[] {3}, new byte[] {3}));
+            try {
+                engine.close();
+            } catch (IOException | SimulatedCrash expected) {
+                // its files died with the crash; what matters is that closing returns
+            }
+        });
+        try (LsmEngine again = LsmEngine.open(memory, DIR, options())) {
+            assertNull(again.get(new byte[] {3}));
         }
     }
 

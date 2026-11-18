@@ -3,3 +3,4 @@
 # these files are changed only on the explicit instruction of the project owner.
 # The checksum is taken over the file with LF line ends (sha256sum on such a checkout).
 b05bfb9f12773c876af55ddfcfe2de994a429e934ad94e4407858dd06ace4d2e  raft-sim/src/main/java/io/github/stefan_zobel/freyja/raft/sim/SafetyInvariants.java
+6854179136a9854bd02b9bc65d6b0e85328c737919e1c6589c11dd80b6acf090  kv-node/src/test/java/io/github/stefan_zobel/freyja/node/sim/SystemInvariants.java

@@ -606,6 +606,7 @@ public final class LsmEngine implements Closeable {
                 });
             }
             finishTurn();
+            rethrowCrash();
             if (error != null) {
                 throw error;
             }
@@ -614,6 +615,9 @@ public final class LsmEngine implements Closeable {
         }
         wakeBackground(); // level 0 has grown
     }
+
+    /** An error that ended unlocked work; set and taken by the thread at the head of the queue. */
+    private Error crash;
 
     /** Queues {@code self} and waits until it is at the head or a group leader completed it. */
     private void awaitTurn(Pending self) {
@@ -666,6 +670,12 @@ public final class LsmEngine implements Closeable {
             error = new EngineFailedException("a write to storage failed", e);
         } catch (RuntimeException e) {
             error = new EngineFailedException("unexpected failure while changing the engine", e);
+        } catch (Error e) {
+            // Nobody knows how far the change went. The engine fails; the caller gives its
+            // turn in the queue back before the error goes on, so that nobody waits forever
+            // behind a request that will never finish.
+            error = new EngineFailedException("an error while changing the engine", e);
+            crash = e;
         } finally {
             lock.lock();
         }
@@ -674,6 +684,15 @@ public final class LsmEngine implements Closeable {
             progress.signalAll();
         }
         return error;
+    }
+
+    /** Throws the error that ended the last unlocked work of this thread, if there was one. */
+    private void rethrowCrash() {
+        Error error = crash;
+        if (error != null) {
+            crash = null;
+            throw error;
+        }
     }
 
     /** Puts the engine into the failed state, from a thread that does not hold {@code lock}. */
@@ -762,6 +781,7 @@ public final class LsmEngine implements Closeable {
         if (next != null) {
             next.turn.signal();
         }
+        rethrowCrash();
     }
 
     // ---- backpressure ----------------------------------------------------------------------
