@@ -79,11 +79,13 @@ Rules:
     before the damage, as the log store of a node does.
 - **C4.** Real transport with virtual threads. Wire protocol with handshake. `kv-client`.
   Admin API and command-line tool. End-to-end test with real processes.
-  - Done so far: the client protocol with its codec (`kv-common`), and the service that
-    serves requests on a node, stepped like the node and tested with complete nodes.
-  - Open: the runtime thread with the clock, the TCP transport with the handshake and the
-    three listeners, `kv-client`, the admin API with its tool, the end-to-end test. The
-    whole-system simulation is to send its client requests as bytes through the service.
+  - Done so far: the client protocol with its codec (`kv-common`); the service that serves
+    requests on a node, stepped like the node and tested with complete nodes; the runtime
+    thread with the clock; frames and the handshake; the TCP transport between nodes; the
+    listener for clients. Tested with three nodes in one process over loopback sockets.
+  - Open: `kv-client`, the admin API with its listener and its tool, a main program for a
+    node, the end-to-end test with real processes. The whole-system simulation is to send
+    its client requests as bytes through the service.
 
 ## Phase D — Hardening
 

@@ -18,6 +18,22 @@ two releases against one implementation of them.
 
 Timing defaults: tick 100 ms, heartbeat every tick, election timeout 10–20 ticks.
 
+The runtime:
+
+- One thread per node steps the event loop in real time. It reports ticks as the clock
+  moves, hands over what the network delivers, lets the node work until it is idle, and
+  lets the service answer the clients.
+- Frames of peers, requests of clients, and calls of an administrator reach that thread
+  through one bounded queue (default 4,096). A producer never waits; what does not fit is
+  refused: a frame is dropped, a request is answered as overloaded.
+- Ticks that were missed while the thread was busy are not made up beyond a few.
+- A node that stops (a failure of storage, a damaged state machine) is closed and started
+  again from what is on disk after a pause. Requests that waited are answered as
+  unavailable. A node that has lost its identity ends the runtime for good.
+- Structured concurrency, a preview feature of the JDK, is used in one class only
+  (`node.concurrent.Scopes`): an accept loop whose connections never outlive the listener,
+  and the two halves of a connection that end together.
+
 The event loop:
 
 - The node has no thread and no clock of its own. Whoever runs it reports that a tick has
@@ -472,8 +488,31 @@ repair on the one path that is verified for a node that has lost what it acknowl
 ## 8. Wire Protocol
 
 - Length-prefixed binary frames over TCP, one virtual thread per connection.
+  - A frame is its length (`uint32`, little-endian) and its bytes. A frame longer than the
+    limit of its listener (16 MiB between nodes, 8 MiB from clients) ends the connection.
 - A connection starts with a handshake: protocol version, cluster id, node id (peers), and
   the software version. A node rejects peers of another cluster.
+  - The handshake is the first frame in both directions; the side that connects speaks
+    first: magic `FRYA` (`uint32`), protocol (`uint8`, 1), role (`uint8`: 1 peer, 2 client,
+    3 administrator), cluster id (`uint64`), node id (`uint32`; all bits set from a client
+    or an administrator), software version (length `uint8`, UTF-8), CRC32C (`uint32`).
+  - A listener answers only a handshake of its own role and protocol. A peer must name this
+    cluster and another node than the one it talks to. A client or an administrator may
+    name cluster 0 for "not known"; one that names a cluster must name this one. A
+    connection that fails the check is closed without an answer.
+  - The node that connects to a peer checks the answer too: it must come from the node it
+    meant to reach.
+  - A handshake must arrive within a time limit (default 5 s).
+- Between nodes: each node keeps one connection to every peer it sends to and accepts one
+  from every peer that sends to it. Sending never waits: a frame goes into a bounded queue
+  of its peer (default 1,024 frames); a frame that does not fit, or that is on its way when
+  the connection breaks, is lost, and the protocols above send again what matters. A broken
+  connection is opened again after a pause.
+  - Every message between nodes names its sender in the same place. A frame that names
+    another node than the one that shook hands is dropped.
+- From clients: two virtual threads serve a connection, one reads requests, one writes
+  answers. Answers come from the thread of the node through a bounded queue; a client that
+  does not read its answers loses its connection, and the node never waits for it.
 - Every encoded message starts with a message-format version byte and ends with a checksum.
   - A message between Raft cores: version (`uint8`, 1), type (`uint8`), sender (`uint32`),
     addressee (`uint32`), term (`uint64`), the remaining fields of the message in a fixed
