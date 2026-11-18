@@ -347,9 +347,9 @@ healing, and that every repair path ends in a healthy node.
 of nodes, deliveries of messages, turns of clients, faults, restarts. One event is one step;
 after every step the invariants of `SystemInvariants` are checked.
 
-- **Clients** talk to a node as the layer that receives requests will: they hand it
-  proposals with a deadline and requests for a read index, and take the answers from what
-  the node reports. A client has a session and one operation at a time. It sends a command
+- **Clients** send their requests as bytes to the service of a node, the same service that
+  the listener for clients feeds, and take its answers as bytes. A client has a session and
+  one operation at a time. It sends a command
   again, with the same sequence number, until it is answered, and gives up after waiting in
   vain many times. An answer that a node refuses at once (not the leader, queue full) does
   not count as waiting in vain.
@@ -361,6 +361,10 @@ after every step the invariants of `SystemInvariants` are checked.
   client had waited in vain) stays open: it may have taken effect or not, now or later. An
   operation that no node ever took is left out. Clients stop when too many operations are
   open, because the checker pays for each.
+  - A command that was handed to a node may be in a log, whatever that node answers: also if
+    it says at once that it is not the leader any more, or stops. If such a command is then
+    told that its session is gone, its outcome is unknown unless it was handed over only
+    that one time.
 - **Late duplicates:** a copy of an answered command arrives again much later, when its
   client has moved on. Nobody waits for that answer.
 - **Observation:** every applied entry of every node (index, term, hash of the command,

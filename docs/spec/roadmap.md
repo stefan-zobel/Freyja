@@ -89,8 +89,7 @@ Rules:
     real processes on real files: clients are served, the leader is killed and comes back, a
     fourth node joins and is promoted.
   - Open: in the status, the match index and the repair state of every member; the check
-    for a healthy majority before a membership change. The whole-system simulation is to
-    send its client requests as bytes through the service.
+    for a healthy majority before a membership change.
 
 ## Phase D — Hardening
 

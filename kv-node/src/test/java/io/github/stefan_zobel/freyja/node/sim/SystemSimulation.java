@@ -6,7 +6,6 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.PriorityQueue;
 import java.util.Random;
@@ -16,6 +15,9 @@ import java.util.TreeMap;
 import io.github.stefan_zobel.freyja.common.Checksums;
 import io.github.stefan_zobel.freyja.common.DecodeException;
 import io.github.stefan_zobel.freyja.common.LittleEndian;
+import io.github.stefan_zobel.freyja.common.kv.ClientCodec;
+import io.github.stefan_zobel.freyja.common.kv.ClientRequest;
+import io.github.stefan_zobel.freyja.common.kv.ClientResponse;
 import io.github.stefan_zobel.freyja.common.kv.Command;
 import io.github.stefan_zobel.freyja.common.kv.Command.Condition;
 import io.github.stefan_zobel.freyja.common.kv.Command.Delete;
@@ -34,7 +36,7 @@ import io.github.stefan_zobel.freyja.lsm.fs.FaultyFileSystem;
 import io.github.stefan_zobel.freyja.lsm.fs.MemoryFileSystem;
 import io.github.stefan_zobel.freyja.node.Node;
 import io.github.stefan_zobel.freyja.node.NodeListener;
-import io.github.stefan_zobel.freyja.node.sm.KvStateMachine;
+import io.github.stefan_zobel.freyja.node.service.ClientService;
 import io.github.stefan_zobel.freyja.node.sm.StateMachineStore;
 import io.github.stefan_zobel.freyja.node.snapshot.SnapshotTransfers;
 import io.github.stefan_zobel.freyja.node.store.LostIdentityException;
@@ -252,10 +254,6 @@ public final class SystemSimulation {
         }
     }
 
-    /** A read that has its read index and waits for the node to have applied that far. */
-    private record PendingRead(long requestId, long index) {
-    }
-
     /** One node with everything that survives a crash, and what does not. */
     private final class Host implements NodeListener {
         final int id;
@@ -263,12 +261,11 @@ public final class SystemSimulation {
         FaultyFileSystem fs;
         Node node;
         final List<byte[]> outbox = new ArrayList<>();
-        /** Proposals the core has taken, by the index it gave them: request id and term. */
-        final TreeMap<Long, long[]> accepted = new TreeMap<>();
-        final List<PendingRead> reads = new ArrayList<>();
         long digestedAt = -1;
         boolean crashArmed;
         Role role = Role.FOLLOWER;
+        /** Serves the requests of clients on this node. */
+        ClientService service;
         /** A file of this node was damaged and the node has not been found whole since. */
         boolean damaged;
         boolean diskShort;
@@ -295,10 +292,9 @@ public final class SystemSimulation {
             if (node != null) {
                 Node last = node;
                 node = null;
+                service.detach();
                 stats.snapshotsCreated += last.snapshotsCreated();
                 stats.slowDiskStepDowns += last.slowSyncStepDowns();
-                accepted.clear();
-                reads.clear();
                 outbox.clear();
                 try {
                     last.close();
@@ -329,9 +325,14 @@ public final class SystemSimulation {
             Node.Options own = new Node.Options(nodeOptions.raft(), nodeOptions.segmentSize(),
                     nodeOptions.queueCapacity(), nodeOptions.snapshotLogBytes(), nodeOptions.snapshotRetainEntries(),
                     nodeOptions.transfers(), nodeOptions.limits(), () -> time + clockSkew);
+            // Requests of clients go through the service of the node, as bytes; a tick of the
+            // node is TICK units, so the service counts the time of a request in units.
+            service = new ClientService(new ClientService.Options(TICK, 100, 1024), () -> time,
+                    node -> "node-" + node, this);
             node = Node.open(fs, DATA, own, new StateMachineStore.Options(new EngineOptions()
                     .deterministic(true).reserveSize(0).minFreeSpace(0).memTableSize(32 * 1024)
-                    .blockCacheCapacity(1024 * 1024), SESSION_TIMEOUT), (to, frame) -> outbox.add(frame), this);
+                    .blockCacheCapacity(1024 * 1024), SESSION_TIMEOUT), (to, frame) -> outbox.add(frame), service);
+            service.attach(node);
             if (node.repairedAtStart()) {
                 stats.repairs++;
             }
@@ -364,12 +365,11 @@ public final class SystemSimulation {
         void down(boolean crashFirst) {
             Node dead = node;
             node = null;
+            service.detach(); // whoever waits is told to ask again
             // The state machine of a node that died in an installation is not to be asked.
             log("node " + id + " down" + (crashFirst ? "" : " (crash in an operation)") + ": " + dead.view());
             stats.snapshotsCreated += dead.snapshotsCreated();
             stats.slowDiskStepDowns += dead.slowSyncStepDowns();
-            accepted.clear();
-            reads.clear();
             outbox.clear();
             if (crashFirst) {
                 memory.crash(random);
@@ -387,11 +387,6 @@ public final class SystemSimulation {
         @Override
         public void notification(Notification notification) {
             switch (notification) {
-                case Notification.ProposalAccepted a ->
-                        accepted.put(a.index(), new long[] {a.requestId(), a.term()});
-                case Notification.ProposalRejected r -> rejected(r.requestId(), r.leaderHint());
-                case Notification.ReadIndexReady r -> reads.add(new PendingRead(r.requestId(), r.index()));
-                case Notification.ReadIndexRejected r -> rejected(r.requestId(), r.leaderHint());
                 case Notification.RoleChanged change -> {
                     if (change.role() == Role.LEADER && role != Role.LEADER) {
                         stats.leaderChanges++;
@@ -442,15 +437,6 @@ public final class SystemSimulation {
             protocol.applied(id, entry);
             observation.applied(new SystemObservation.Applied(id, entry.index(), entry.term(), hash, session,
                     sequence, result));
-            long[] proposal = accepted.remove(entry.index());
-            if (proposal != null && proposal[1] == entry.term()) {
-                answered(proposal[0], result, entry.index(), hash, session, sequence);
-            }
-        }
-
-        @Override
-        public void proposalExpired(long requestId) {
-            rejected(requestId, -1);
         }
 
         // ---- the protocol as the invariants of the Raft simulator see it
@@ -509,8 +495,6 @@ public final class SystemSimulation {
                 stats.installsAroundALeaderChange++;
             }
             log("node " + id + " installed the snapshot " + meta.lastIncludedIndex() + "@" + meta.lastIncludedTerm());
-            // Proposals this node took may lie below the snapshot; their answers never come.
-            accepted.headMap(meta.lastIncludedIndex(), true).clear();
         }
     }
 
@@ -535,6 +519,8 @@ public final class SystemSimulation {
         int timeouts;
         /** Whether a node has taken a request of this operation: it may be applied. */
         boolean taken;
+        /** How often the command in hand was handed to a node. */
+        int sends;
         /** Whether the last request was refused at once; the next turn sends it again. */
         boolean refused;
         long sentAt;
@@ -559,6 +545,7 @@ public final class SystemSimulation {
                 attempts.clear();
                 timeouts = 0;
                 taken = false;
+                sends = 0;
                 refused = false;
                 if (session == 0) {
                     kind = Kind.REGISTER;
@@ -606,25 +593,30 @@ public final class SystemSimulation {
             long requestId = ++requests;
             attempts.add(requestId);
             clientOf.put(requestId, this);
+            ClientRequest request;
             if (kind == Kind.READ) {
-                host.node.submit(new RaftEvent.ClientReadIndex(requestId));
+                request = new ClientRequest.Get(key(key), false);
             } else {
-                Command command = switch (kind) {
+                request = new ClientRequest.Execute(switch (kind) {
                     case REGISTER -> new Command.RegisterSession();
                     case WRITE -> new Command.Write(session, sequence, List.of(mutation(key, a)));
                     default -> new Command.Conditional(session, sequence,
                             List.of(a == 0 ? Condition.notExists(key(key)) : Condition.valueEquals(key(key), value(a))),
                             List.of(mutation(key, b)), List.of());
-                };
-                // The receiving node stamps the command with its clock.
-                sent = CommandCodec.encode(time, command);
-                Node.Admission admission = host.node.propose(requestId, sent,
-                        host.node.now() + 3L * PATIENCE / TICK);
-                if (admission != Node.Admission.ACCEPTED) {
-                    refused = true;
-                } else {
-                    taken = true;
-                }
+                });
+                // From here on a node may have the command, whatever it answers: also a node
+                // that says at once that it is not the leader any more, or that stops.
+                taken = true;
+                sends++;
+            }
+            // The request travels as bytes, and so does its answer. The node that takes a
+            // command stamps it with its clock.
+            sent = ClientCodec.encode(requestId, 3 * PATIENCE, request);
+            try {
+                host.service.request(sent, replies::add);
+            } catch (IOException e) {
+                stopped(host, e);
+                return;
             }
             pump(host);
         }
@@ -636,14 +628,20 @@ public final class SystemSimulation {
             }
         }
 
-        void answered(long requestId, CommandResult result, long index, long hash, long session, long sequence) {
+        void answered(long requestId, CommandResult result, long index) {
             if (!waiting || !attempts.contains(requestId)) {
                 return; // the answer to an operation that is over
             }
             if (kind != Kind.REGISTER) {
+                // The answer names the entry at which the command was applied.
+                SystemObservation.Applied entry = observation.firstApplied(index);
+                if (entry == null || entry.sessionId() != session || entry.sequence() != sequence) {
+                    throw new AssertionError("client " + id + " was answered for command " + sequence
+                            + " of session " + session + " with entry " + index + ", which is " + entry);
+                }
                 stats.acknowledged++;
-                observation.acknowledged(new SystemObservation.Acknowledged(id, session, sequence, index, hash,
-                        result));
+                observation.acknowledged(new SystemObservation.Acknowledged(id, session, sequence, index,
+                        entry.commandHash(), result));
             }
             switch (result) {
                 case SessionRegistered registered -> {
@@ -661,12 +659,13 @@ public final class SystemSimulation {
                     complete(applied.conditionsHeld() ? 1 : 0);
                 }
                 case Failed failed when failed.failure() == Failure.NO_SUCH_SESSION -> {
-                    // The session has expired. If the client waited in vain before, an
-                    // earlier request may have taken effect before that: the outcome is
-                    // not known. Otherwise this was the only request and it did nothing.
+                    // The session has expired. If the command was handed to a node before,
+                    // that earlier request may have taken effect before the session ended:
+                    // the outcome is not known. Otherwise this was the only request and it
+                    // did nothing.
                     stats.sessionsLost++;
                     this.session = 0;
-                    if (timeouts > 0) {
+                    if (sends > 1) {
                         stats.sessionsLostInRetry++;
                         unknown();
                     } else {
@@ -737,6 +736,8 @@ public final class SystemSimulation {
     private final List<Client> clients = new ArrayList<>();
     private final PriorityQueue<Event> events = new PriorityQueue<>();
     private final TreeMap<Long, Client> clientOf = new TreeMap<>();
+    /** Answers of nodes to clients, as bytes, that the clients have not looked at yet. */
+    private final java.util.ArrayDeque<byte[]> replies = new java.util.ArrayDeque<>();
     private final Set<Integer> isolated = new HashSet<>();
     private final SystemObservation observation = new SystemObservation();
     /** What the invariants of the Raft simulator are stated over, fed from complete nodes. */
@@ -748,6 +749,11 @@ public final class SystemSimulation {
     private long lastLeaderChange = Long.MIN_VALUE / 2;
     private long logicalTime;
     private long requests;
+    /**
+     * Request ids of what the simulation itself proposes to a core, as administrator. The
+     * service of a node numbers the requests of clients from 1 on; these stay clear of them.
+     */
+    private long ownRequests = 1L << 50;
     private boolean clientsMayStart = true;
     private boolean faults = true;
     /** Set the environment variable FREYJA_SIM_DEBUG to see what a run does. */
@@ -799,17 +805,32 @@ public final class SystemSimulation {
         events.add(new Event(at, order++, kind, target, from, frame));
     }
 
-    private void rejected(long requestId, int leaderHint) {
-        Client client = clientOf.get(requestId);
-        if (client != null) {
-            client.rejected(requestId, leaderHint);
-        }
-    }
-
-    private void answered(long requestId, CommandResult result, long index, long hash, long session, long sequence) {
-        Client client = clientOf.remove(requestId);
-        if (client != null) {
-            client.answered(requestId, result, index, hash, session, sequence);
+    /**
+     * Hands the answers of the nodes to the clients. An answer is looked at only after the
+     * node has finished its step: by then the simulation has seen what the node applied.
+     */
+    private void deliverReplies() {
+        while (!replies.isEmpty()) {
+            ClientCodec.ResponseEnvelope envelope = ClientCodec.decodeResponse(replies.pollFirst());
+            Client client = clientOf.remove(envelope.requestId());
+            if (client == null) {
+                continue; // nobody waits for it: a late duplicate
+            }
+            switch (envelope.response()) {
+                case ClientResponse.Result result -> client.answered(envelope.requestId(), result.result(),
+                        result.index());
+                case ClientResponse.Value value -> client.readAnswered(envelope.requestId(),
+                        value.found() ? LittleEndian.getUint64(value.value(), 0) : 0);
+                case ClientResponse.NotLeader redirect -> client.rejected(envelope.requestId(), redirect.leaderId());
+                case ClientResponse.Rejected rejected -> {
+                    if (rejected.reason() == ClientResponse.Reason.INVALID
+                            || rejected.reason() == ClientResponse.Reason.UNSUPPORTED) {
+                        throw new AssertionError("client " + client.id + " was refused: " + rejected.reason());
+                    }
+                    client.rejected(envelope.requestId(), -1);
+                }
+                default -> throw new AssertionError("client " + client.id + " got " + envelope.response());
+            }
         }
     }
 
@@ -831,18 +852,8 @@ public final class SystemSimulation {
                 observation.digest(new SystemObservation.Digest(host.id, applied,
                         host.node.store().machine().digest()));
             }
-            for (Iterator<PendingRead> it = host.reads.iterator(); it.hasNext();) {
-                PendingRead read = it.next();
-                if (read.index() <= applied) {
-                    it.remove();
-                    Client client = clientOf.remove(read.requestId());
-                    if (client != null && client.waiting && client.kind == Kind.READ) {
-                        KvStateMachine.Versioned stored = host.node.store().machine().get(key(client.key));
-                        client.readAnswered(read.requestId(),
-                                stored == null ? 0 : LittleEndian.getUint64(stored.value(), 0));
-                    }
-                }
-            }
+            host.service.afterStep();
+            deliverReplies();
         } catch (FaultyFileSystem.SimulatedCrash crash) {
             stats.crashes++;
             stats.crashesInAnOperation++;
@@ -1042,7 +1053,7 @@ public final class SystemSimulation {
     }
 
     private void change(Host leader, ConfigChange change) {
-        leader.node.submit(new RaftEvent.ProposeConfigChange(++requests, change));
+        leader.node.submit(new RaftEvent.ProposeConfigChange(++ownRequests, change));
         pump(leader);
     }
 
@@ -1102,7 +1113,7 @@ public final class SystemSimulation {
                     if (host != null && victim != host) {
                         log("node " + host.id + " is asked to hand over to node " + victim.id);
                         stats.transfers++;
-                        host.node.submit(new RaftEvent.TransferLeadership(++requests, victim.id));
+                        host.node.submit(new RaftEvent.TransferLeadership(++ownRequests, victim.id));
                         pump(host);
                     }
                 }
@@ -1196,7 +1207,7 @@ public final class SystemSimulation {
             if (host.running() && host.role == Role.LEADER
                     && host.node.store().machine().alarms().contains(Command.Alarm.NOSPACE)) {
                 stats.alarmsCleared++;
-                host.node.propose(++requests, CommandCodec.encode(0, new Command.ClearAlarm(Command.Alarm.NOSPACE)),
+                host.node.propose(++ownRequests, CommandCodec.encode(0, new Command.ClearAlarm(Command.Alarm.NOSPACE)),
                         host.node.now() + 3L * PATIENCE / TICK);
                 pump(host);
                 return;
@@ -1277,7 +1288,12 @@ public final class SystemSimulation {
                 Host host = hosts.get(event.target());
                 if (host.running()) {
                     // Nobody waits for the answer.
-                    host.node.propose(++requests, event.frame(), host.node.now() + 3L * PATIENCE / TICK);
+                    try {
+                        host.service.request(event.frame(), replies::add);
+                    } catch (IOException e) {
+                        stopped(host, e);
+                        return;
+                    }
                     pump(host);
                 }
             }
@@ -1291,6 +1307,7 @@ public final class SystemSimulation {
         observation.beginStep();
         protocol.beginStep();
         handle(event);
+        deliverReplies(); // also what a node that went down told those who waited
         SystemInvariants.checkAll(observation);
         SafetyInvariants.checkAll(protocol);
         stats.steps++;
