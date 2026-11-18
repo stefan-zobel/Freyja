@@ -68,6 +68,7 @@ class SystemSimulationTest {
         Seeds.forEach(SystemSimulationTest.class, "system-changing", 12, seed ->
                 total.add(new SystemSimulation(seed, SystemSimulation.Options.changing()).run()));
         assertTrue(total.configurationsReverted > 0, total.toString());
+        assertTrue(total.installsAroundALeaderChange > 0, total.toString());
         assertTrue(total.acknowledged > 500, total.toString());
         assertTrue(total.replacements > 12, total.toString());
         assertTrue(total.identitiesLost > 3, total.toString());

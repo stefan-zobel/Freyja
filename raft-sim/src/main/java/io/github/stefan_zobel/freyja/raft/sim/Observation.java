@@ -138,53 +138,56 @@ public final class Observation {
     }
 
     // ------------------------------------------------------------------ recording
+    //
+    // Public for the simulators that feed an observation: the one of this module and the
+    // whole-system simulation of kv-node.
 
     /** Forgets what the previous step did. The history stays. */
-    void beginStep() {
+    public void beginStep() {
         elections.clear();
         appended.clear();
         applied.clear();
         released.clear();
     }
 
-    void elected(int node, long term) {
+    public void elected(int node, long term) {
         leadersOfTerm.computeIfAbsent(term, _ -> new TreeSet<>()).add(node);
         elections.add(new Election(node, term));
     }
 
     /** The log of {@code node} was cut off from {@code fromIndex} on. */
-    void truncated(int node, long fromIndex) {
+    public void truncated(int node, long fromIndex) {
         List<LogEntry> log = logs.get(node);
         if (fromIndex <= log.size()) {
             log.subList((int) fromIndex - 1, log.size()).clear();
         }
     }
 
-    void appended(int node, LogEntry entry) {
+    public void appended(int node, LogEntry entry) {
         logs.get(node).add(entry);
         appended.add(new Appended(node, entry));
     }
 
     /** Replaces the log of a node, as after a restart. Nothing counts as appended. */
-    void resetLog(int node, List<LogEntry> entries) {
+    public void resetLog(int node, List<LogEntry> entries) {
         List<LogEntry> log = logs.get(node);
         log.clear();
         log.addAll(entries);
     }
 
-    void applied(int node, LogEntry entry) {
+    public void applied(int node, LogEntry entry) {
         if (entry.index() == appliedLog.size() + 1) {
             appliedLog.add(entry);
         }
         applied.add(new Applied(node, entry));
     }
 
-    void released(int node, Outbound message, HardState durableHardState, long durableLastIndex) {
+    public void released(int node, Outbound message, HardState durableHardState, long durableLastIndex) {
         released.add(new Released(node, message, durableHardState, durableLastIndex));
     }
 
     /** A node sees everything through {@code commitIndex} as committed while in {@code term}. */
-    void sawCommitted(long commitIndex, long term) {
+    public void sawCommitted(long commitIndex, long term) {
         while (commitTerms.size() < commitIndex) {
             commitTerms.add(term);
         }

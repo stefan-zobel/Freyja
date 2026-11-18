@@ -415,14 +415,47 @@ retired when no node that stays counts on it any more; its id is never used agai
   their victims among them, and the run must converge for them, with no replacement left
   unfinished.
 
-**State of the work.** Injected so far: lost, delayed, and repeated messages; partitions;
-crashes between operations and in the middle of a file operation; restarts; damaged logs
-and tables; short and slow disks; hand-overs; replaced members; lost identities. Still to
-come in this milestone: the invariants of §2.4 over complete nodes, the remaining probes of
-§3.1, and traces for the model.
+**The invariants of §2.4 over complete nodes.** A node shows every step of its core to a
+listener that asks for it: the event, and each `Ready` at the moment its messages leave,
+with the hard state and the last log index that are in stable storage then. The simulation
+feeds the observation of the Raft simulator from that and calls `SafetyInvariants` after
+every step; log matching over the complete logs runs at intervals and at the end.
+
+- The log of a node in the observation is its log from index 1: what its snapshot covers,
+  taken from what was applied anywhere, then what it stores. It is set anew at every start
+  and after every installation of a snapshot.
+- Mutations that these invariants catch here, on real storage: a log that is not always
+  synced before it is acknowledged (leader completeness); a hard state that is not always
+  stored (durability before visibility); messages sent before the work is durable.
+- Two faults that the simulation met once and does not find reliably are held by tests of
+  their own instead: a heartbeat that moves the commit index of a node in log-recovering
+  mode (a test of the core), and a lost log tail that the state machine must witness (a test
+  of the node). A seed in the corpus keeps running, but it reaches the same situation only
+  as long as the simulation itself is unchanged.
+
+**State of the work.** Injected: lost, delayed, and repeated messages; partitions; crashes
+between operations and in the middle of a file operation; restarts; damaged logs and
+tables; short and slow disks; hand-overs; replaced members; lost identities. Checked: the
+invariants of `SystemInvariants` and of `SafetyInvariants`, linearizability, convergence.
+
+Open in this milestone:
+
+- Traces of whole-system runs for the model (§2.7). The model has no snapshots, so only
+  runs without shortened logs can be validated, and validating needs runs of TLC.
+- The model and the Raft simulator both let a damaged log keep a true prefix. Neither knows
+  entries that come back after the record of their removal is lost (`node.md` §3.3); the
+  whole-system simulation does.
+- Probes of §3.1 that are not counted yet: torn tail truncated, damage detected through a
+  sync point, write stalled by backpressure (they happen below the node and are covered by
+  the storage tests), upgrade finalized and downgrade before finalization (milestone D1).
 
 Seed sets, each run on every build: `system-calm`, `system-faulty` (network and crashes),
-`system-hostile` (plus storage faults), `system-changing` (plus replaced members).
+`system-hostile` (plus storage faults), `system-changing` (plus replaced members). Each set
+must reach what it is there for; counted are among others: crashes in the middle of an
+operation, installed snapshots, snapshots installed around a leader change, log-recovering
+mode entered and left, rebuilt state machines, commands rejected for lack of space,
+step-downs for slow disks, aborted hand-overs, sessions lost while a retry was on its way,
+replaced members, lost identities, reverted configurations.
 
 What the simulation found while it was built:
 

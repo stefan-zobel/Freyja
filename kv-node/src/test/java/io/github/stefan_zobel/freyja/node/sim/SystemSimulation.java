@@ -44,13 +44,19 @@ import io.github.stefan_zobel.freyja.node.wire.MessageCodec;
 import io.github.stefan_zobel.freyja.raft.ClusterConfig;
 import io.github.stefan_zobel.freyja.raft.ConfigChange;
 import io.github.stefan_zobel.freyja.raft.EntryType;
+import io.github.stefan_zobel.freyja.raft.HardState;
 import io.github.stefan_zobel.freyja.raft.LogEntry;
 import io.github.stefan_zobel.freyja.raft.Notification;
+import io.github.stefan_zobel.freyja.raft.Outbound;
+import io.github.stefan_zobel.freyja.raft.ProtocolState;
 import io.github.stefan_zobel.freyja.raft.RaftConfig;
 import io.github.stefan_zobel.freyja.raft.RaftEvent;
+import io.github.stefan_zobel.freyja.raft.Ready;
 import io.github.stefan_zobel.freyja.raft.Role;
 import io.github.stefan_zobel.freyja.raft.SnapshotMeta;
 import io.github.stefan_zobel.freyja.raft.sim.LinearizabilityChecker;
+import io.github.stefan_zobel.freyja.raft.sim.Observation;
+import io.github.stefan_zobel.freyja.raft.sim.SafetyInvariants;
 
 /**
  * The whole-system simulation (docs/spec/verification.md, section 3): complete nodes and
@@ -130,6 +136,7 @@ public final class SystemSimulation {
         public long duplicated;
         public long snapshotsCreated;
         public long snapshotsInstalled;
+        public long installsAroundALeaderChange;
         public long highestApplied;
         public long damagedLogs;
         public long damagedTables;
@@ -168,6 +175,7 @@ public final class SystemSimulation {
             duplicated += other.duplicated;
             snapshotsCreated += other.snapshotsCreated;
             snapshotsInstalled += other.snapshotsInstalled;
+            installsAroundALeaderChange += other.installsAroundALeaderChange;
             highestApplied += other.highestApplied;
             damagedLogs += other.damagedLogs;
             damagedTables += other.damagedTables;
@@ -197,7 +205,8 @@ public final class SystemSimulation {
                     + leaderChanges + ", crashes "
                     + crashes + " (" + crashesInAnOperation + " in an operation), partitions " + partitions
                     + ", dropped " + dropped + ", duplicated " + duplicated + ", snapshots created/installed "
-                    + snapshotsCreated + "/" + snapshotsInstalled + ", applied " + highestApplied
+                    + snapshotsCreated + "/" + snapshotsInstalled + " (" + installsAroundALeaderChange
+                    + " around a leader change), applied " + highestApplied
                     + ", damaged logs/tables " + damagedLogs + "/" + damagedTables + ", recovering entered/left "
                     + recoveringEntered + "/" + recoveringLeft + ", repairs " + repairs + " (" + damageFoundByScrub
                     + " after a scrub), disks short " + disksShort + " (" + diskFullStops + " stops, "
@@ -326,6 +335,8 @@ public final class SystemSimulation {
             if (node.repairedAtStart()) {
                 stats.repairs++;
             }
+            // What the node holds after its start is its log; what it held in memory is gone.
+            protocol.resetLog(id, fullLog());
             log("node " + id + " started" + (node.repairedAtStart() ? ", state machine rebuilt" : "")
                     + (node.lostTailWitnessed() ? ", lost log tail witnessed" : "") + ": " + node.view()
                     + " applied " + node.store().appliedIndex() + " snapshot " + node.snapshot().lastIncludedIndex());
@@ -384,6 +395,7 @@ public final class SystemSimulation {
                 case Notification.RoleChanged change -> {
                     if (change.role() == Role.LEADER && role != Role.LEADER) {
                         stats.leaderChanges++;
+                        lastLeaderChange = time;
                     }
                     if (change.role() != role) {
                         log("node " + id + " is " + change.role() + " of term " + change.term() + ": "
@@ -427,6 +439,7 @@ public final class SystemSimulation {
             if (debug && entry.index() % 50 == 0) {
                 log("node " + id + " applied " + entry.index() + "@" + entry.term());
             }
+            protocol.applied(id, entry);
             observation.applied(new SystemObservation.Applied(id, entry.index(), entry.term(), hash, session,
                     sequence, result));
             long[] proposal = accepted.remove(entry.index());
@@ -440,9 +453,61 @@ public final class SystemSimulation {
             rejected(requestId, -1);
         }
 
+        // ---- the protocol as the invariants of the Raft simulator see it
+
+        @Override
+        public boolean observesCore() {
+            return true;
+        }
+
+        @Override
+        public void stepped(RaftEvent event, ProtocolState state) {
+            protocol.sawCommitted(state.commitIndex(), state.term());
+            if (event instanceof RaftEvent.SnapshotInstalled && node != null) {
+                // The stored log starts after the snapshot now, with or without what followed.
+                protocol.resetLog(id, fullLog());
+            }
+        }
+
+        @Override
+        public void ready(Ready ready, HardState durableHardState, long durableLastIndex) {
+            if (ready.truncateSuffixFrom() != -1) {
+                protocol.truncated(id, ready.truncateSuffixFrom());
+            }
+            for (LogEntry entry : ready.entries()) {
+                protocol.appended(id, entry);
+            }
+            // Roles first: the election of a leader is on record before its messages.
+            for (Notification note : ready.notifications()) {
+                if (note instanceof Notification.RoleChanged change && change.role() == Role.LEADER) {
+                    protocol.elected(id, change.term());
+                }
+            }
+            for (Outbound outbound : ready.messages()) {
+                protocol.released(id, outbound, durableHardState, durableLastIndex);
+            }
+        }
+
+        /** The log of the node from index 1: what its snapshot covers, then what it stores. */
+        List<LogEntry> fullLog() {
+            long covered = node.snapshot().lastIncludedIndex();
+            List<LogEntry> applied = protocol.appliedLog();
+            if (covered > applied.size()) {
+                throw new AssertionError("node " + id + " has a snapshot at " + covered + ", applied anywhere are "
+                        + applied.size());
+            }
+            List<LogEntry> log = new ArrayList<>(applied.subList(0, (int) covered));
+            log.addAll(node.storedEntries(covered + 1, Integer.MAX_VALUE));
+            return log;
+        }
+
         @Override
         public void snapshotInstalled(SnapshotMeta meta) {
             stats.snapshotsInstalled++;
+            if (time - lastLeaderChange < 40L * TICK) {
+                // The leader changed while the snapshot was on its way or being installed.
+                stats.installsAroundALeaderChange++;
+            }
             log("node " + id + " installed the snapshot " + meta.lastIncludedIndex() + "@" + meta.lastIncludedTerm());
             // Proposals this node took may lie below the snapshot; their answers never come.
             accepted.headMap(meta.lastIncludedIndex(), true).clear();
@@ -674,10 +739,13 @@ public final class SystemSimulation {
     private final TreeMap<Long, Client> clientOf = new TreeMap<>();
     private final Set<Integer> isolated = new HashSet<>();
     private final SystemObservation observation = new SystemObservation();
+    /** What the invariants of the Raft simulator are stated over, fed from complete nodes. */
+    private Observation protocol;
     private final List<LinearizabilityChecker.Operation> history = new ArrayList<>();
     private final Stats stats = new Stats();
     private long time;
     private long order;
+    private long lastLeaderChange = Long.MIN_VALUE / 2;
     private long logicalTime;
     private long requests;
     private boolean clientsMayStart = true;
@@ -1221,9 +1289,22 @@ public final class SystemSimulation {
         Event event = events.poll();
         time = Math.max(time, event.time());
         observation.beginStep();
+        protocol.beginStep();
         handle(event);
         SystemInvariants.checkAll(observation);
+        SafetyInvariants.checkAll(protocol);
         stats.steps++;
+        if (stats.steps % 5_000 == 0) {
+            checkCompleteLogs();
+        }
+    }
+
+    /** Log matching over the complete logs of all nodes; too costly for every step. */
+    private void checkCompleteLogs() {
+        String violation = SafetyInvariants.logMatchingComplete(protocol);
+        if (violation != null) {
+            throw new AssertionError("LogMatching violated: " + violation);
+        }
     }
 
     // ------------------------------------------------------------------ the run
@@ -1263,6 +1344,7 @@ public final class SystemSimulation {
             ids[i] = i;
         }
         ClusterConfig config = ClusterConfig.ofVoters(ids);
+        protocol = new Observation(options.nodes() + options.spares(), config);
         for (int i = 0; i < options.nodes(); i++) {
             Host host = new Host(i, config);
             hosts.add(host);
@@ -1384,6 +1466,7 @@ public final class SystemSimulation {
             }
         }
         stats.highestApplied = applied;
+        checkCompleteLogs();
         String violation = LinearizabilityChecker.check(history);
         if (violation != null) {
             throw new AssertionError("the history is not linearizable: " + violation);

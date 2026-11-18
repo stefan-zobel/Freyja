@@ -71,8 +71,12 @@ Rules:
   - Done so far: the step-down of a leader with a slow disk; the simulation with clients,
     network faults, and crashes; `SystemInvariants` with its negative tests and its
     checksum; the mutation checks of `verification.md` §3; damaged logs and tables with
-    their repairs, short and slow disks, hand-overs; replaced members and lost identities.
-  - Open: the Raft invariants over complete nodes, the remaining probes, traces.
+    their repairs, short and slow disks, hand-overs; replaced members and lost identities;
+    the Raft invariants over complete nodes.
+  - Open: traces of whole-system runs for the model, which needs runs of TLC; the probes
+    that are counted below the node (`verification.md` §3).
+  - To strengthen the Raft simulator: let a damaged log hand back entries that were cut off
+    before the damage, as the log store of a node does.
 - **C4.** Real transport with virtual threads. Wire protocol with handshake. `kv-client`.
   Admin API and command-line tool. End-to-end test with real processes.
 

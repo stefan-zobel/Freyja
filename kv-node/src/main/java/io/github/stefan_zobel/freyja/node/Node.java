@@ -170,6 +170,7 @@ public final class Node implements Closeable {
     private final StateMachineStore store;
     private final Transport transport;
     private final NodeListener listener;
+    private final boolean observed;
     private final ArrayDeque<Object> queue = new ArrayDeque<>();
     private SnapshotTransfers transfers;
     /** What the stored log starts after. */
@@ -205,6 +206,7 @@ public final class Node implements Closeable {
         this.transport = transport;
         this.listener = listener;
         this.snapshot = snapshot;
+        this.observed = listener.observesCore();
     }
 
     // ------------------------------------------------------------------ start
@@ -369,7 +371,7 @@ public final class Node implements Closeable {
                         }, notification -> {
                         });
                 try {
-                    node.raft.step(new RaftEvent.LogDamaged(index + 1));
+                    node.feed(new RaftEvent.LogDamaged(index + 1));
                     node.drain();
                 } finally {
                     node.log.close();
@@ -423,7 +425,7 @@ public final class Node implements Closeable {
                     transport, listener, snapshot);
             if (damagedFrom != -1) {
                 // Entries that the snapshot covers are not missed, wherever the damage begins.
-                raft.step(new RaftEvent.LogDamaged(Math.max(damagedFrom, snapshotIndex + 1)));
+                node.feed(new RaftEvent.LogDamaged(Math.max(damagedFrom, snapshotIndex + 1)));
                 node.drain();
                 if (!witnessed) {
                     log.quarantineDamaged();
@@ -445,6 +447,14 @@ public final class Node implements Closeable {
             if (!opened) {
                 log.close();
             }
+        }
+    }
+
+    /** Hands an event to the core, and shows the step to a listener that wants to see it. */
+    private void feed(RaftEvent event) {
+        raft.step(event);
+        if (observed) {
+            listener.stepped(event, raft.view());
         }
     }
 
@@ -565,7 +575,7 @@ public final class Node implements Closeable {
                         checkSpace();
                     }
                 }
-                raft.step(event);
+                feed(event);
             } else if (item instanceof TransferCodec.Envelope envelope) {
                 transfers.handle(envelope.from(), envelope.message());
             } else if (item instanceof Proposal proposal) {
@@ -573,7 +583,7 @@ public final class Node implements Closeable {
                     expiredProposals++;
                     listener.proposalExpired(proposal.requestId());
                 } else {
-                    raft.step(new RaftEvent.ClientPropose(proposal.requestId(), proposal.command()));
+                    feed(new RaftEvent.ClientPropose(proposal.requestId(), proposal.command()));
                 }
             } else if (item instanceof AlarmCodec.Request request) {
                 raiseAlarm(request.alarm());
@@ -638,12 +648,15 @@ public final class Node implements Closeable {
                     log.sync();
                 }
                 long took = options.clock().nanoTime() - started;
-                raft.step(new RaftEvent.Persisted(ready.sequence()));
+                feed(new RaftEvent.Persisted(ready.sequence()));
                 if (took > options.limits().slowSyncNanos() && raft.view().role() == Role.LEADER) {
                     // A node with a healthy disk should lead (section 7).
                     slowSyncStepDowns++;
-                    raft.step(new RaftEvent.StepDown());
+                    feed(new RaftEvent.StepDown());
                 }
+            }
+            if (observed) {
+                listener.ready(ready, hardState.get(), log.lastIndex());
             }
             for (Outbound outbound : ready.messages()) {
                 transport.send(outbound.toNode(),
@@ -673,7 +686,7 @@ public final class Node implements Closeable {
                 switch (directive) {
                     case SnapshotDirective.Send send -> {
                         if (transfers == null) {
-                            raft.step(new RaftEvent.SnapshotSendFinished(send.toNode(), false));
+                            feed(new RaftEvent.SnapshotSendFinished(send.toNode(), false));
                         } else {
                             transfers.send(send.toNode(), send.term());
                         }
@@ -715,7 +728,7 @@ public final class Node implements Closeable {
         if (state.role() == Role.LEADER) {
             alarmsRaised++;
             // Time stamp 0: the command of a node does not move the time of the state machine.
-            raft.step(new RaftEvent.ClientPropose(ownRequestId--,
+            feed(new RaftEvent.ClientPropose(ownRequestId--,
                     CommandCodec.encode(0, new Command.SetAlarm(alarm))));
         } else if (state.leaderId() >= 0 && state.leaderId() != identity.nodeId()) {
             transport.send(state.leaderId(), AlarmCodec.encode(identity.nodeId(), state.leaderId(), alarm));
@@ -755,7 +768,7 @@ public final class Node implements Closeable {
         SnapshotMetaFile.write(fs, dataDirectory, meta);
         snapshot = meta;
         snapshotsCreated++;
-        raft.step(new RaftEvent.SnapshotCreated(meta));
+        feed(new RaftEvent.SnapshotCreated(meta));
         work();
     }
 
@@ -788,7 +801,7 @@ public final class Node implements Closeable {
         InstallIntent.clear(fs, dataDirectory);
         snapshot = meta;
         snapshotsInstalled++;
-        raft.step(new RaftEvent.SnapshotInstalled(meta));
+        feed(new RaftEvent.SnapshotInstalled(meta));
         if (install.replaceStateMachine()) {
             listener.snapshotInstalled(meta);
         }
@@ -812,12 +825,12 @@ public final class Node implements Closeable {
         @Override
         public void received(int fromNode, TransferMessage.Offer offer, long generation) {
             staged = new Staged(offer, generation);
-            raft.step(new RaftEvent.SnapshotOffered(fromNode, offer.leaderTerm(), offer.meta()));
+            feed(new RaftEvent.SnapshotOffered(fromNode, offer.leaderTerm(), offer.meta()));
         }
 
         @Override
         public void sendFinished(int toNode, boolean success) {
-            raft.step(new RaftEvent.SnapshotSendFinished(toNode, success));
+            feed(new RaftEvent.SnapshotSendFinished(toNode, success));
         }
     }
 
@@ -888,6 +901,14 @@ public final class Node implements Closeable {
     /** Whether this start replaced a damaged state machine by an empty one. */
     public boolean repairedAtStart() {
         return repairedAtStart;
+    }
+
+    /**
+     * The stored entries from {@code fromIndex} on, at most {@code maxBytes} of them. For
+     * simulations and tools; the node itself reads its log through the core.
+     */
+    public List<LogEntry> storedEntries(long fromIndex, int maxBytes) {
+        return log.entries(Math.max(fromIndex, log.firstIndex()), log.lastIndex() + 1, maxBytes);
     }
 
     /** The first index the log store holds. */
