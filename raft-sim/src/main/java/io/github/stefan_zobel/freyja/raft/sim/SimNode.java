@@ -11,6 +11,7 @@ import io.github.stefan_zobel.freyja.raft.ProtocolState;
 import io.github.stefan_zobel.freyja.raft.RaftConfig;
 import io.github.stefan_zobel.freyja.raft.RaftNode;
 import io.github.stefan_zobel.freyja.raft.Ready;
+import io.github.stefan_zobel.freyja.raft.SnapshotMeta;
 
 /** One node of a simulated cluster with its storage and its state machine. */
 public final class SimNode {
@@ -38,6 +39,22 @@ public final class SimNode {
     long damagedFrom;
     /** Whether the node was in log-recovering mode after its latest step. */
     boolean recovering;
+
+    /** A snapshot of the state machine. */
+    record Snapshot(SnapshotMeta meta, long[] registers) {
+    }
+
+    /** The newest snapshot this node has written or installed; it is durable. */
+    Snapshot snapshot;
+    /** A snapshot received from a leader and not yet installed or discarded. */
+    Snapshot staged;
+    /** An installation that waits for the writes before it: {@code {sequence}} and what to install. */
+    long installAfterSequence = -1;
+    Snapshot installing;
+    boolean installKeepsSuffix;
+    boolean installReplacesStateMachine;
+    /** The state machine writes a snapshot when it has applied this many entries more. */
+    int snapshotEvery = 50;
     /** Counts the starts of the process. Work scheduled for an earlier start is void. */
     long incarnation;
     /** The node processes nothing before this virtual time. */

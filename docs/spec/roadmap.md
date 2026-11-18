@@ -44,7 +44,7 @@ Rules:
   - Open: the trace validation of runs with these parts, and an exhaustive check of a
     configuration with them (`docs/tla/README.md`).
 - **B4.** Log compaction and snapshot directives, verified in the simulator with an in-memory
-  state machine.
+  state machine. Snapshots are not part of the TLA+ model.
 
 ## Phase C — Node
 

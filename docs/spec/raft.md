@@ -44,8 +44,8 @@ public interface LogView {               // read-only access to durably stored e
 
 public record LogEntry(long index, long term, EntryType type, byte[] payload) {}
 public enum EntryType { COMMAND, NOOP, CONFIG }
-public record HardState(long term, int votedFor, boolean logRecovering, long logEpoch) {}
-                                                                             // -1 = no vote
+public record HardState(long term, int votedFor, boolean logRecovering, long logEpoch,
+                        long lostLogIndex, long lostLogTerm) {}              // -1 = no vote
 public record ClusterConfig(Set<Integer> voters, Set<Integer> learners) {}
 public record SnapshotMeta(long lastIncludedIndex, long lastIncludedTerm, ClusterConfig config) {}
 public record PersistedState(HardState hardState, SnapshotMeta snapshot) {}
@@ -129,6 +129,33 @@ public record Ready(
      leader with a normal message.
    - Compaction: after the state machine has written a snapshot, the runtime feeds
      `SnapshotCreated`; the core answers with `truncatePrefixThrough`.
+
+   Details:
+
+   - **Meta data:** the runtime asks the core for the meta data of a snapshot at an applied
+     index (`snapshotMeta`): the term of that entry and the configuration as of it. The
+     state machine stores them with the snapshot.
+   - **The log starts after the snapshot** from the moment `SnapshotCreated` is processed.
+     The runtime may remove the covered entries later; the core never reads them.
+   - **Sending:** a leader sends a snapshot to a follower whose next entry is no longer in
+     its log. Until the runtime reports the end of the stream, the follower gets no appends.
+     After a successful stream the leader continues after the snapshot; after a failed one
+     it probes again, which leads to another snapshot if the follower still needs one.
+   - **Offer:** the core rejects a staged snapshot if it comes from an earlier term, if
+     another one is being installed, or if the log already holds everything it includes
+     (its last index is at or below the commit index).
+   - **Install directive:** says whether the stored entries after the snapshot stay (the
+     log holds the last entry of the snapshot with the same term) or the stored log is
+     emptied, and whether the state machine is replaced. The state machine never goes back:
+     a node whose log was damaged can have applied more than the snapshot includes, and
+     then only its log starts anew after the snapshot.
+   - **Order:** the installation takes its place in the order of the `Ready`s: after
+     everything that `Ready` and earlier ones ask to persist, before anything later.
+   - **While a snapshot is being installed** the node accepts no entries and does not
+     advance its commit index, so that the state machine does not move under the snapshot.
+   - **After the installation** the node acknowledges the last index of the snapshot to the
+     leader with a normal append answer.
+   - A `Ready` can carry several snapshot directives.
 
 ## 4. Flow Control
 
@@ -224,7 +251,13 @@ Details:
 - **Rejections** of a requested change: not the leader; no entry of the own term committed
   yet; an earlier change uncommitted; the change does not fit the configuration (the node is
   already a member, is no learner or no voter, or is the last voter); the learner to promote
-  is too far behind.
+  is too far behind; a leadership transfer is under way; after the change a majority would
+  need a voter that the leader knows to be in log-recovering mode.
+- **Why the last rule:** a node in log-recovering mode votes only for candidates that cover
+  the log it has lost, and it leaves the mode only with the help of a leader. A
+  configuration whose majority depends on such a node can end without a leader for good.
+  The leader learns of the mode from heartbeat answers, so the rule cannot rule out a
+  change that races with the damage; that case is a lost majority (see §8).
 
 ## 7. Leadership Transfer
 
@@ -252,9 +285,13 @@ acknowledged. The core then:
    both before anything else happens. A leader or candidate becomes a follower.
 2. Discards its log from the first damaged index. Its commit index falls back with the log;
    what its state machine has applied stays applied and is not applied again.
-3. Grants no votes and no pre-votes and starts no elections, but accepts entries and
-   snapshots from a leader of its current or a later term and acknowledges what it has
-   durably stored.
+3. Starts no elections. It grants a vote or a pre-vote only to a candidate whose log is at
+   least as up to date as the log the node has lost: it votes as it would have before the
+   damage. For that the hard state holds the last index and term of the log before the
+   damage. If they are not known (the runtime found the damage when it opened the log, so
+   the node never saw the lost entries), the node grants no vote at all. It accepts
+   entries and snapshots from a leader of its current or a later term and acknowledges what
+   it has durably stored.
 4. Clears `logRecovering` on an append of a leader that (a) names the present log epoch of
    the node, (b) leaves the log of the node equal to the log of the leader through the commit
    index the append carries, and (c) carries a commit index whose entry is of the leader's
@@ -279,9 +316,20 @@ about the lost log. Its commit index covers every entry that was committed with 
 an acknowledgment of the lost log, at this leader or at an earlier one (condition c: a
 leader that has committed an entry of its own term knows every earlier commit).
 
-Reasoning: while the node abstains, any leader is elected by a majority that excludes it. That
-majority intersects every earlier commit quorum in a node other than the recovering one, so
-the leader holds every committed entry, including those the recovering node had acknowledged.
+Reasoning: the election rule of Raft only asks that a voter does not vote for a candidate
+whose log is behind its own. A node that compares the candidate with the log it has lost
+gives exactly the votes it would have given with that log, so every leader holds every
+committed entry, including those the recovering node had acknowledged. A node that does not
+know what it has lost abstains: then any leader is elected by a majority that excludes it,
+and that majority intersects every earlier commit quorum in another node.
+
+A report of damage always starts the mode, also if the damage lies beyond the log the node
+holds: entries the node may have acknowledged are gone either way.
+
+**Lost majority.** The protocol repairs a minority. If so many voters are in the mode
+without knowing what they lost that no candidate can get a majority, the cluster has no
+leader, and without a leader no node leaves the mode. That is a case for the procedure for a
+lost majority (`operations.md`), not for the protocol.
 
 The term and the vote are not covered by this mode. They must never be lost; `node.md`
 specifies how they are stored and what happens if they are lost anyway.

@@ -21,6 +21,9 @@ import java.util.List;
  * @param applyTo            last such entry; the range is empty if it is below
  *                           {@code applyFrom}
  * @param notifications      answers to proposals, and role changes
+ * @param truncatePrefixThrough stored entries up to this index (inclusive) are covered by a
+ *                           snapshot and may be removed, now or later; -1 if none
+ * @param snapshots          snapshots to send, install, or discard
  */
 public record Ready(
         long sequence,
@@ -30,7 +33,9 @@ public record Ready(
         List<Outbound> messages,
         long applyFrom,
         long applyTo,
-        List<Notification> notifications) {
+        List<Notification> notifications,
+        long truncatePrefixThrough,
+        List<SnapshotDirective> snapshots) {
 
     /** Whether this {@code Ready} asks to persist anything. */
     public boolean hasPersistentWork() {

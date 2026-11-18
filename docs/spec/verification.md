@@ -83,7 +83,13 @@ deleted. This test must pass on Windows.
     was done on state that is lost), and a leader that freezes while everything sent to it
     is lost (it wakes up believing that it still leads).
   - There is one seed set for a reliable network (delays, pauses, flow control), one for
-    the full fault model, and one for the full fault model with membership changes.
+    the full fault model, one for the full fault model with membership changes, leadership
+    transfers, and log damage, and one that adds snapshots to all of that.
+  - Snapshots: every node writes a snapshot of its state machine after a number of applied
+    entries that differs per node, and its log is cut. A leader streams the snapshot to a
+    follower that needs entries the log no longer holds; the stream can fail. A restarted
+    node whose state machine did not survive starts from its snapshot. The seed set must
+    reach created and installed snapshots.
   - Membership changes: spare nodes join as learners, learners are promoted or removed,
     voters are removed, now and then the leader itself. A node that has left keeps running
     for a while (it tries to start elections) and is then shut down for good, but only when
@@ -97,11 +103,19 @@ deleted. This test must pass on Windows.
     is injected only while a majority of the voters holds an intact log: the protocol
     repairs a minority, not a lost majority. The seed set must reach nodes that enter the
     log-recovering mode and nodes that leave it.
-  - Mutations of the mode that the simulator catches: a recovering node that votes or
-    starts an election, one that leaves the mode at once, a leader that keeps the match
-    index of a follower of a new epoch, an acknowledgment that outlives its entries. Leaving
-    the mode on an append that does not name the present epoch is caught only by a unit
-    test of the core; the simulator has not reached that interleaving.
+  - Mutations of the mode that the simulator catches: a recovering node that votes with
+    the log it holds now or starts an election, one that leaves the mode at once, a leader
+    that keeps the match index of a follower of a new epoch, an acknowledgment that outlives
+    its entries. Leaving the mode on an append that does not name the present epoch is
+    caught only by a unit test of the core; the simulator has not reached that interleaving.
+  - Mutations of snapshots that the simulator catches: a commit index that moves during an
+    installation, a snapshot installed behind the commit index, a state machine that goes
+    back, entries accepted during an installation. Keeping a suffix that disagrees with
+    the snapshot is caught only by a unit test.
+  - Two liveness problems the simulator found are now rules of the protocol: a node whose
+    state machine is ahead of its damaged log takes a snapshot for its log only, and a
+    leader refuses a membership change that would make a majority depend on a node in
+    log-recovering mode.
   - The settings of a run (cluster size, delays, flow-control limits, load) are drawn from
     its seed, so that the seed set covers many shapes of a cluster.
 - **Safety invariants, checked after every step:**

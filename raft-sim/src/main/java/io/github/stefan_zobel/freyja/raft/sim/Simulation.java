@@ -36,6 +36,7 @@ import io.github.stefan_zobel.freyja.raft.RaftEvent.Tick;
 import io.github.stefan_zobel.freyja.raft.RaftNode;
 import io.github.stefan_zobel.freyja.raft.Ready;
 import io.github.stefan_zobel.freyja.raft.Role;
+import io.github.stefan_zobel.freyja.raft.SnapshotDirective;
 import io.github.stefan_zobel.freyja.raft.SnapshotMeta;
 import io.github.stefan_zobel.freyja.raft.sim.LinearizabilityChecker.Kind;
 import io.github.stefan_zobel.freyja.raft.sim.LinearizabilityChecker.Operation;
@@ -96,6 +97,10 @@ public final class Simulation {
         public long retired;
         public long transfers;
         public long transfersAborted;
+        public long snapshotsCreated;
+        public long snapshotsSent;
+        public long snapshotsInstalled;
+        public long snapshotsRejected;
         public long logDamages;
         /** Times a node left log-recovering mode. */
         public long logRecoveries;
@@ -114,7 +119,9 @@ public final class Simulation {
                     + " staleLeaderReads=" + staleLeaderReads + " configChanges=" + configChanges
                     + " configRejections=" + configRejections + " joined=" + joined + " retired=" + retired
                     + " transfers=" + transfers + " transfersAborted=" + transfersAborted
-                    + " logDamages=" + logDamages + " logRecoveries=" + logRecoveries;
+                    + " logDamages=" + logDamages + " logRecoveries=" + logRecoveries
+                    + " snapshotsCreated=" + snapshotsCreated + " snapshotsSent=" + snapshotsSent
+                    + " snapshotsInstalled=" + snapshotsInstalled + " snapshotsRejected=" + snapshotsRejected;
         }
     }
 
@@ -257,6 +264,7 @@ public final class Simulation {
             node.started = i < options.nodes();
             node.up = node.started;
             node.raft = RaftNode.create(config, PersistedState.initial(node.initialConfig), node.store, 0);
+            node.snapshotEvery = 20 + random.nextInt(150);
             nodes.add(node);
             schedule(random.nextInt(interval) + 1, () -> tick(node));
         }
@@ -511,6 +519,31 @@ public final class Simulation {
                     apply(node, node.store.get(i));
                 }
                 serveReads(node);
+                maybeWriteSnapshot(node);
+            }
+            if (ready.truncatePrefixThrough() != -1) {
+                node.store.truncatePrefix(ready.truncatePrefixThrough());
+            }
+            for (SnapshotDirective directive : ready.snapshots()) {
+                switch (directive) {
+                    case SnapshotDirective.Send send -> sendSnapshot(node, send);
+                    case SnapshotDirective.Install install -> {
+                        check(node.staged != null && node.staged.meta().equals(install.meta()),
+                                "node " + node.id + " is to install " + install.meta() + ", staged is "
+                                        + (node.staged == null ? null : node.staged.meta()));
+                        node.installing = node.staged;
+                        node.staged = null;
+                        node.installKeepsSuffix = install.keepSuffix();
+                        node.installReplacesStateMachine = install.replaceStateMachine();
+                        node.installAfterSequence = ready.sequence();
+                        long incarnation = node.incarnation;
+                        schedule(0, () -> installIfDue(node, incarnation));
+                    }
+                    case SnapshotDirective.Reject _ -> {
+                        stats.snapshotsRejected++;
+                        node.staged = null;
+                    }
+                }
             }
             for (Notification note : ready.notifications()) {
                 switch (note) {
@@ -644,6 +677,103 @@ public final class Simulation {
         }
         node.persistedSequence = through;
         step(node, new Persisted(through));
+        installIfDue(node, node.incarnation);
+    }
+
+    // ------------------------------------------------------------------ snapshots
+
+    /** The state machine writes a snapshot now and then; the core is told and cuts the log. */
+    private void maybeWriteSnapshot(SimNode node) {
+        long have = node.snapshot == null ? 0 : node.snapshot.meta().lastIncludedIndex();
+        if (!options.snapshots() || node.applied - have < node.snapshotEvery
+                || node.applied > node.view().lastLogIndex()) {
+            return;
+        }
+        SnapshotMeta meta = node.raft.snapshotMeta(node.applied);
+        node.snapshot = new SimNode.Snapshot(meta, node.registers.clone());
+        stats.snapshotsCreated++;
+        long incarnation = node.incarnation;
+        schedule(0, () -> {
+            if (node.up && node.incarnation == incarnation) {
+                step(node, new RaftEvent.SnapshotCreated(meta));
+            }
+        });
+    }
+
+    /** Streams a snapshot to another node. The stream fails if the node cannot be reached. */
+    private void sendSnapshot(SimNode from, SnapshotDirective.Send send) {
+        stats.snapshotsSent++;
+        SimNode.Snapshot data = from.snapshot;
+        check(data != null && data.meta().lastIncludedIndex() >= send.meta().lastIncludedIndex(),
+                "node " + from.id + " is to send " + send.meta() + " but has "
+                        + (data == null ? null : data.meta()));
+        SimNode target = nodes.get(send.toNode());
+        long incarnation = from.incarnation;
+        boolean lost = random.nextInt(100) < dropPercent;
+        schedule(minDelay + random.nextInt(4 * maxDelay + 1), () -> {
+            boolean arrived = !lost && target.up && !blocked[from.id][target.id] && target.staged == null
+                    && target.installing == null;
+            if (arrived) {
+                target.staged = data;
+                deliver(target, new RaftEvent.SnapshotOffered(from.id, send.term(), data.meta()));
+            }
+            schedule(1 + random.nextInt(maxDelay + 1), () -> {
+                if (from.up && from.incarnation == incarnation) {
+                    deliver(from, new RaftEvent.SnapshotSendFinished(target.id, arrived));
+                }
+            });
+        });
+    }
+
+    /**
+     * Installs the snapshot a node was told to install, once every write before it is
+     * durable: the state machine is replaced, the stored log starts after the snapshot.
+     */
+    private void installIfDue(SimNode node, long incarnation) {
+        if (!node.up || node.incarnation != incarnation || node.installing == null
+                || now < node.pausedUntil
+                || (!node.pendingWrites.isEmpty()
+                        && node.pendingWrites.peekFirst().sequence() <= node.installAfterSequence)) {
+            if (node.up && node.incarnation == incarnation && node.installing != null && now < node.pausedUntil) {
+                schedule(node.pausedUntil - now, () -> installIfDue(node, incarnation));
+            }
+            return;
+        }
+        SimNode.Snapshot data = node.installing;
+        node.installing = null;
+        long index = data.meta().lastIncludedIndex();
+        if (node.installReplacesStateMachine) {
+            System.arraycopy(data.registers(), 0, node.registers, 0, node.registers.length);
+            node.applied = index;
+        } else {
+            check(node.applied >= index, "node " + node.id + " keeps a state machine at " + node.applied
+                    + " that is behind the snapshot at " + index);
+        }
+        ProtocolState before = node.view();
+        String stored = node.store.firstIndex() + ".." + node.store.lastIndex();
+        node.store.startAfter(index, node.installKeepsSuffix);
+        check(!node.installKeepsSuffix || node.store.lastIndex() >= before.durableIndex(),
+                "node " + node.id + " installs the snapshot at " + index + " and keeps its suffix; stored were "
+                        + stored + ", are " + node.store.firstIndex() + ".." + node.store.lastIndex()
+                        + ", pending writes " + node.pendingWrites.size() + ", " + before);
+        if (node.snapshot == null || node.snapshot.meta().lastIncludedIndex() < index) {
+            node.snapshot = data;
+        }
+        stats.snapshotsInstalled++;
+        observation.beginStep();
+        observation.resetLog(node.id, fullLog(node));
+        step(node, new RaftEvent.SnapshotInstalled(data.meta()));
+        serveReads(node);
+    }
+
+    /** The log of a node from index 1: what its snapshot covers, then what it stores. */
+    private List<LogEntry> fullLog(SimNode node) {
+        long covered = node.store.firstIndex() - 1;
+        check(covered <= observation.appliedLog().size(), "node " + node.id + " has a snapshot at "
+                + covered + ", applied anywhere are " + observation.appliedLog().size());
+        List<LogEntry> log = new ArrayList<>(observation.appliedLog().subList(0, (int) covered));
+        log.addAll(node.store.entries());
+        return log;
     }
 
     // ------------------------------------------------------------------ faults
@@ -734,6 +864,8 @@ public final class Simulation {
         node.awaitingApply.clear();
         node.awaitingRead.clear();
         node.pausedUntil = 0;
+        node.staged = null;
+        node.installing = null;
         long incarnation = node.incarnation;
         schedule(50 + random.nextInt(1500), () -> {
             if (!node.up && !node.retired && node.incarnation == incarnation) {
@@ -751,17 +883,23 @@ public final class Simulation {
         node.lastSeenTerm = node.store.hardState().term();
         node.configIndex = 0;
         if (random.nextBoolean()) {
-            // The state machine did not survive; it is rebuilt from the log.
-            node.applied = 0;
-            Arrays.fill(node.registers, 0);
+            // The state machine did not survive; it is rebuilt from the snapshot and the log.
+            if (node.snapshot == null) {
+                node.applied = 0;
+                Arrays.fill(node.registers, 0);
+            } else {
+                node.applied = node.snapshot.meta().lastIncludedIndex();
+                System.arraycopy(node.snapshot.registers(), 0, node.registers, 0, node.registers.length);
+            }
         }
         check(node.applied <= node.store.lastIndex() || node.store.hardState().logRecovering(),
                 "node " + node.id + " had applied " + node.applied + " entries, but only "
                         + node.store.lastIndex() + " are stored");
         observation.beginStep();
-        observation.resetLog(node.id, node.store.entries());
+        observation.resetLog(node.id, fullLog(node));
         node.raft = RaftNode.create(node.config,
-                new PersistedState(node.store.hardState(), SnapshotMeta.none(node.initialConfig)),
+                new PersistedState(node.store.hardState(),
+                        node.snapshot == null ? SnapshotMeta.none(node.initialConfig) : node.snapshot.meta()),
                 node.store, node.applied);
         checkComplete();
         if (listener != null) {
@@ -923,24 +1061,34 @@ public final class Simulation {
         if (knownLeader == RaftNode.NO_NODE) {
             return;
         }
-        ClusterConfig config = nodes.get(knownLeader).view().config();
         SimNode victim = someNode();
-        if (!victim.up || victim.store.lastIndex() == 0 || victim.damagedFrom != 0) {
+        long first = victim.store.firstIndex();
+        long last = victim.store.lastIndex();
+        if (!victim.up || last < first || victim.damagedFrom != 0) {
             return;
         }
-        int intact = 0;
-        for (int voter : config.voters()) {
-            SimNode node = nodes.get(voter);
-            if (node != victim && node.started && !node.retired && node.damagedFrom == 0
-                    && !node.view().logRecovering() && !node.store.hardState().logRecovering()) {
-                intact++;
+        // Every configuration in force on some node must keep a majority of intact logs.
+        // (A configuration change that is not committed yet is in force on some nodes only.)
+        for (SimNode observer : nodes) {
+            if (!observer.started || observer.retired) {
+                continue;
+            }
+            ClusterConfig config = observer.view().config();
+            int intact = 0;
+            for (int voter : config.voters()) {
+                SimNode node = nodes.get(voter);
+                if (node != victim && node.started && !node.retired && node.damagedFrom == 0
+                        && !node.view().logRecovering() && !node.store.hardState().logRecovering()) {
+                    intact++;
+                }
+            }
+            if (!config.voters().isEmpty() && intact < config.quorum()) {
+                return;
             }
         }
-        if (intact < config.quorum()) {
-            return;
-        }
-        long last = victim.store.lastIndex();
-        long from = random.nextBoolean() ? Math.max(1, last - random.nextInt(10)) : 1 + random.nextInt((int) last);
+        // Only stored entries can be damaged, not what a snapshot covers.
+        long from = random.nextBoolean() ? Math.max(first, last - random.nextInt(10))
+                : first + random.nextInt((int) (last - first + 1));
         stats.logDamages++;
         victim.damagedFrom = from;
         deliver(victim, new RaftEvent.LogDamaged(from));
@@ -1008,7 +1156,10 @@ public final class Simulation {
 
     private void apply(SimNode node, LogEntry entry) {
         check(entry.index() == node.applied + 1,
-                "node " + node.id + " applies " + entry + " after index " + node.applied);
+                "node " + node.id + " applies " + entry + " after index " + node.applied + " (snapshot "
+                        + (node.snapshot == null ? null : node.snapshot.meta().lastIncludedIndex())
+                        + ", stored " + node.store.firstIndex() + ".." + node.store.lastIndex()
+                        + ", restarts " + node.incarnation + ", " + node.view() + ")");
         boolean first = entry.index() == observation.appliedLog().size() + 1;
         observation.applied(node.id, entry);
         node.applied = entry.index();

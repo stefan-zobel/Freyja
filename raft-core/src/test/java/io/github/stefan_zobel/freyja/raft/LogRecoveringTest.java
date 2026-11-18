@@ -45,14 +45,14 @@ class LogRecoveringTest {
     }
 
     @Test
-    void aDamagedLogIsCutOffAndTheNodeAbstains() {
+    void aDamagedLogIsCutOffAndTheNodeVotesAsWithTheLogItHasLost() {
         TestNode node = followerWithFiveEntries();
         node.autoPersist = false;
         node.step(new LogDamaged(3));
 
         Ready write = node.pending.getFirst();
-        assertEquals(new HardState(1, HardState.NO_VOTE, true, 1), write.hardState(),
-                "the flag and the new epoch are persisted with the truncation");
+        assertEquals(new HardState(1, HardState.NO_VOTE, true, 1, 5, 1), write.hardState(),
+                "the flag, the new epoch, and the end of the lost log are persisted with the truncation");
         assertEquals(3, write.truncateSuffixFrom());
         assertTrue(node.view().logRecovering());
         assertEquals(2, node.view().lastLogIndex());
@@ -60,20 +60,41 @@ class LogRecoveringTest {
         assertEquals(4, node.applied.size(), "what was applied stays applied");
         node.persistAll();
 
-        // No vote, real or pre-vote, whatever the log of the candidate.
+        // A candidate that is ahead of the log this node holds now, but behind the log it has
+        // lost, gets no vote and no pre-vote: it may lack entries this node has acknowledged.
         node.tick(10);
-        node.receive(2, new RequestVote(2, 100, 1, false));
+        node.receive(2, new RequestVote(2, 4, 1, false));
         assertEquals(new VoteResponse(2, false, false), node.outbox.getLast().message());
-        node.receive(2, new RequestVote(3, 100, 1, true));
+        node.receive(2, new RequestVote(3, 4, 1, true));
         assertEquals(new VoteResponse(2, true, false), node.outbox.getLast().message());
         // No election of its own.
         node.tick(200);
         assertEquals(Role.FOLLOWER, node.view().role());
         assertEquals(2, node.view().term());
+        // A candidate that covers the lost log gets the vote, as it would have before.
+        node.receive(2, new RequestVote(3, 5, 1, true));
+        assertEquals(new VoteResponse(3, true, true), node.outbox.getLast().message());
+        node.receive(2, new RequestVote(3, 5, 1, false));
+        node.persistAll();
+        assertEquals(new VoteResponse(3, false, true), node.outbox.getLast().message());
 
-        node.step(new LogDamaged(9));
-        assertEquals(1, node.raft.view().durableIndex() - 1, "damage beyond the log changes nothing");
         assertThrows(IllegalArgumentException.class, () -> node.raft.step(new LogDamaged(0)));
+    }
+
+    @Test
+    void damageBeyondTheLogTheNodeWasStartedWithLeavesItWithoutAVote() {
+        // The runtime found the damage when it opened the log: the node never saw the lost
+        // entries and cannot know how far they went.
+        TestNode node = followerWithFiveEntries();
+        node.step(new LogDamaged(6));
+        assertTrue(node.view().logRecovering());
+        assertEquals(5, node.view().lastLogIndex(), "the log it holds is not affected");
+        assertEquals(new HardState(1, HardState.NO_VOTE, true, 1, 5, HardState.UNKNOWN_TERM), node.hardState);
+        node.tick(10);
+        node.receive(2, new RequestVote(2, 1000, 1, false));
+        assertEquals(new VoteResponse(2, false, false), node.outbox.getLast().message());
+        node.tick(200);
+        assertEquals(Role.FOLLOWER, node.view().role());
     }
 
     @Test

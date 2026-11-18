@@ -1,0 +1,4 @@
+# Seeds that failed at some time. Each runs on every build.
+1   # log damage was injected into what a snapshot covers
+56  # a snapshot was installed behind entries the node had applied in the meantime
+77  # a node whose state machine was ahead of its damaged log rejected every snapshot

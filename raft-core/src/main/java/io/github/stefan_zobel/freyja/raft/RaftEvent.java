@@ -48,6 +48,27 @@ public sealed interface RaftEvent {
     record LogDamaged(long firstDamagedIndex) implements RaftEvent {
     }
 
+    /**
+     * The state machine has written a snapshot. The log up to its last included index is no
+     * longer needed; the next {@link Ready} says so ({@code truncatePrefixThrough}).
+     *
+     * @param meta as {@link RaftNode#snapshotMeta} gave it for the index of the snapshot
+     */
+    record SnapshotCreated(SnapshotMeta meta) implements RaftEvent {
+    }
+
+    /** The runtime has received a complete snapshot from a leader and holds it staged. */
+    record SnapshotOffered(int fromNode, long leaderTerm, SnapshotMeta meta) implements RaftEvent {
+    }
+
+    /** The snapshot an {@link SnapshotDirective.Install} named is installed and durable. */
+    record SnapshotInstalled(SnapshotMeta meta) implements RaftEvent {
+    }
+
+    /** The stream a {@link SnapshotDirective.Send} asked for has ended. */
+    record SnapshotSendFinished(int toNode, boolean success) implements RaftEvent {
+    }
+
     /** A client asks to append a command to the log. */
     record ClientPropose(long requestId, byte[] command) implements RaftEvent {
         public ClientPropose {

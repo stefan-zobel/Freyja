@@ -69,6 +69,11 @@ public sealed interface Notification {
         /** The learner to promote is too far behind the log of the leader. */
         LEARNER_BEHIND,
         /** The leader is handing leadership to another node and accepts nothing meanwhile. */
-        TRANSFER_IN_PROGRESS
+        TRANSFER_IN_PROGRESS,
+        /**
+         * After the change, a majority would need a voter that is in log-recovering mode. Such
+         * a voter grants no vote, so the cluster could not elect a leader.
+         */
+        RECOVERING_NODES
     }
 }

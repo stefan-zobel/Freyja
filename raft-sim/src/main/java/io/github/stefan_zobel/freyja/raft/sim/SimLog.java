@@ -10,26 +10,29 @@ import io.github.stefan_zobel.freyja.raft.Ready;
 
 /**
  * The stable storage of a simulated node: what survives a crash. A write reaches it at the
- * moment the simulation declares the write durable, not before.
+ * moment the simulation declares the write durable, not before. Entries that a snapshot
+ * covers are removed from its start.
  */
 public final class SimLog implements LogView {
 
+    /** The stored entries: the indexes {@code offset + 1} and following. */
     private final List<LogEntry> entries = new ArrayList<>();
+    private long offset;
     private HardState hardState = HardState.INITIAL;
 
     @Override
     public long firstIndex() {
-        return 1;
+        return offset + 1;
     }
 
     @Override
     public long lastIndex() {
-        return entries.size();
+        return offset + entries.size();
     }
 
     @Override
     public long termAt(long index) {
-        return index == 0 ? 0 : get(index).term();
+        return get(index).term();
     }
 
     @Override
@@ -48,7 +51,10 @@ public final class SimLog implements LogView {
     }
 
     public LogEntry get(long index) {
-        return entries.get((int) index - 1);
+        if (index <= offset || index > lastIndex()) {
+            throw new AssertionError("entry " + index + " is not stored: " + firstIndex() + ".." + lastIndex());
+        }
+        return entries.get((int) (index - offset - 1));
     }
 
     public HardState hardState() {
@@ -71,30 +77,55 @@ public final class SimLog implements LogView {
                     && next.votedFor() != hardState.votedFor()) {
                 throw new AssertionError("the vote changed within a term: " + hardState + " -> " + next);
             }
+            if (next.logEpoch() < hardState.logEpoch()) {
+                throw new AssertionError("the log epoch went back: " + hardState + " -> " + next);
+            }
             hardState = next;
         }
-        applyTo(entries, ready);
-    }
-
-    /** Applies the log changes of {@code ready} to {@code log} and checks their shape. */
-    static void applyTo(List<LogEntry> log, Ready ready) {
         long truncate = ready.truncateSuffixFrom();
         if (truncate != -1) {
-            if (truncate < 1) {
-                throw new AssertionError("truncation at " + truncate);
+            if (truncate <= offset) {
+                throw new AssertionError("truncation at " + truncate + " reaches into the snapshot at " + offset);
             }
-            if (truncate <= log.size()) {
-                log.subList((int) truncate - 1, log.size()).clear();
+            if (truncate <= lastIndex()) {
+                entries.subList((int) (truncate - offset - 1), entries.size()).clear();
             }
         }
         for (LogEntry entry : ready.entries()) {
-            if (entry.index() != log.size() + 1) {
-                throw new AssertionError("entry " + entry + " does not follow index " + log.size());
+            if (entry.index() != lastIndex() + 1) {
+                throw new AssertionError("entry " + entry + " does not follow index " + lastIndex());
             }
-            if (!log.isEmpty() && log.getLast().term() > entry.term()) {
-                throw new AssertionError("entry " + entry + " follows a later term");
-            }
-            log.add(entry);
+            entries.add(entry);
         }
+    }
+
+    /** Removes the entries up to {@code through}: a snapshot covers them. */
+    void truncatePrefix(long through) {
+        if (through <= offset) {
+            return;
+        }
+        if (through >= lastIndex()) {
+            entries.clear();
+        } else {
+            entries.subList(0, (int) (through - offset)).clear();
+        }
+        offset = through;
+    }
+
+    /**
+     * A snapshot was installed: the log starts after {@code index}.
+     *
+     * @param keepSuffix whether the entries after {@code index} stay
+     */
+    void startAfter(long index, boolean keepSuffix) {
+        if (index < offset) {
+            throw new AssertionError("a snapshot at " + index + " behind the stored log, which starts after " + offset);
+        }
+        if (keepSuffix) {
+            truncatePrefix(index);
+        } else {
+            entries.clear();
+        }
+        offset = index;
     }
 }

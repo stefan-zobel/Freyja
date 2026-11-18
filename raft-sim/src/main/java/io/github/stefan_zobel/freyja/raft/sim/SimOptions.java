@@ -29,6 +29,8 @@ import java.util.Random;
  * @param crashes             whether nodes crash and restart
  * @param spareNodes          number of nodes that may join the cluster during the run; 0
  *                            for a cluster whose membership never changes
+ * @param snapshots           whether nodes write snapshots of their state machine and cut
+ *                            their logs
  */
 public record SimOptions(
         int nodes,
@@ -51,7 +53,8 @@ public record SimOptions(
         int duplicatePercent,
         boolean partitions,
         boolean crashes,
-        int spareNodes) {
+        int spareNodes,
+        boolean snapshots) {
 
     public SimOptions {
         if (nodes < 1 || tickMillis < 1 || tickSpread < 0 || tickSpread >= tickMillis
@@ -66,7 +69,7 @@ public record SimOptions(
     /** A quiet cluster: fast network, fast disks, default flow control, no faults. */
     public static SimOptions calm(int nodes, long seed) {
         return new SimOptions(nodes, seed, 10, 0, 1, 3, 2, 10, 1, 256, 1 << 20, 64L << 20, 10, 16,
-                100, 0, 0, 0, false, false, 0);
+                100, 0, 0, 0, false, false, 0, false);
     }
 
     /**
@@ -91,6 +94,19 @@ public record SimOptions(
      */
     public static SimOptions reconfiguring(long seed) {
         return draw(seed, true, 3, 4);
+    }
+
+    /**
+     * Everything of {@link #reconfiguring}, and nodes write snapshots and cut their logs, so
+     * that nodes that are behind or new receive a snapshot instead of the log.
+     */
+    public static SimOptions compacting(long seed) {
+        SimOptions o = draw(seed, true, 4, 4);
+        return new SimOptions(o.nodes, o.seed, o.tickMillis, o.tickSpread, o.minDelay, o.maxDelay,
+                o.maxPersistDelay, o.electionTicks, o.heartbeatTicks, o.maxInflightAppends,
+                o.maxAppendBytes, o.maxUncommittedBytes, o.proposalInterval, o.maxPayload,
+                o.checkedOperations, o.maxPause, o.dropPercent, o.duplicatePercent, o.partitions,
+                o.crashes, o.spareNodes, true);
     }
 
     private static SimOptions draw(long seed, boolean faults) {
@@ -127,6 +143,6 @@ public record SimOptions(
         return new SimOptions(nodes, seed, 10, faults ? spread : 0, 1, maxDelay, maxPersistDelay,
                 10, heartbeatTicks, window, appendSize, backlog, interval, payload, 150, pause,
                 faults ? drop : 0, faults ? duplicate : 0, faults && partitions, faults && crashes,
-                spareNodes);
+                spareNodes, false);
     }
 }

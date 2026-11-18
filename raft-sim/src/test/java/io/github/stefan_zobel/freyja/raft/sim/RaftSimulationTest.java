@@ -109,6 +109,9 @@ class RaftSimulationTest {
         long transfersAborted;
         long logDamages;
         long logRecoveries;
+        long snapshotsCreated;
+        long snapshotsInstalled;
+        long snapshotsRejected;
 
         void add(Simulation sim) {
             Simulation.Stats stats = sim.stats();
@@ -133,6 +136,9 @@ class RaftSimulationTest {
             transfersAborted += stats.transfersAborted;
             logDamages += stats.logDamages;
             logRecoveries += stats.logRecoveries;
+            snapshotsCreated += stats.snapshotsCreated;
+            snapshotsInstalled += stats.snapshotsInstalled;
+            snapshotsRejected += stats.snapshotsRejected;
         }
 
         @Override
@@ -144,7 +150,9 @@ class RaftSimulationTest {
                     + " readsServed=" + readsServed + " historyOperations=" + historyOperations
                     + " configChanges=" + configChanges + " joined=" + joined + " retired=" + retired
                     + " transfers=" + transfers + " transfersAborted=" + transfersAborted
-                    + " logDamages=" + logDamages + " logRecoveries=" + logRecoveries;
+                    + " logDamages=" + logDamages + " logRecoveries=" + logRecoveries
+                    + " snapshotsCreated=" + snapshotsCreated + " snapshotsInstalled=" + snapshotsInstalled
+                    + " snapshotsRejected=" + snapshotsRejected;
         }
     }
 
@@ -208,6 +216,23 @@ class RaftSimulationTest {
             assertTrue(totals.elections > 3 * totals.runs, summary);
             assertTrue(totals.truncations > 0, summary);
             assertTrue(totals.crashes > totals.runs / 2, summary);
+            assertTrue(totals.historyOperations > 20 * totals.runs, summary);
+        }
+    }
+
+    @Test
+    void clustersThatCutTheirLogsAndSendSnapshotsStaySafeAndConverge() {
+        Totals totals = new Totals();
+        Seeds.forEach(RaftSimulationTest.class, "raft-sim-snapshots", 150,
+                seed -> totals.add(runSeed(SimOptions.compacting(seed))));
+        System.out.println("snapshots: " + totals);
+        if (totals.runs >= 100) {
+            String summary = totals.toString();
+            assertTrue(totals.snapshotsCreated > 5 * totals.runs, summary);
+            assertTrue(totals.snapshotsInstalled > totals.runs, summary);
+            assertTrue(totals.configChanges > 2 * totals.runs, summary);
+            assertTrue(totals.crashes > totals.runs / 2, summary);
+            assertTrue(totals.logRecoveries > 0, summary);
             assertTrue(totals.historyOperations > 20 * totals.runs, summary);
         }
     }

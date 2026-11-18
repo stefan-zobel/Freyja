@@ -82,6 +82,12 @@ public final class RaftNode {
     private boolean logRecovering;
     /** Counts the losses of log entries. It is part of the hard state. */
     private long logEpoch;
+    /**
+     * In log-recovering mode: the end of the log before the damage. A candidate gets the vote
+     * of this node only if its log is at least as up to date as that.
+     */
+    private long lostLogIndex;
+    private long lostLogTerm;
     private boolean hardStateDirty;
 
     // ---- log
@@ -94,6 +100,16 @@ public final class RaftNode {
     /** Pending suffix truncation of the stored log, or -1. */
     private long truncateFrom = -1;
     private long commitIndex;
+    /** The log starts after this index: the last one the newest snapshot includes. */
+    private long snapshotIndex;
+    private long snapshotTerm;
+    /** A prefix truncation to announce in the next {@code Ready}, or -1. */
+    private long prefixTruncation = -1;
+    private final ArrayList<SnapshotDirective> directives = new ArrayList<>();
+    /** The snapshot being installed, or {@code null}. Until it is in, no entries are accepted. */
+    private SnapshotMeta installing;
+    private boolean installKeepsSuffix;
+    private int installFrom;
     /** Entries up to this index were handed to the state machine. */
     private long applyOffered;
 
@@ -167,6 +183,12 @@ public final class RaftNode {
         long ackedRound;
         /** The highest log epoch seen from the follower; -1 before its first answer. */
         long epoch = -1;
+        /** A snapshot is on its way to the follower; nothing else is sent meanwhile. */
+        boolean snapshotting;
+        /** Whether the follower is in log-recovering mode, as far as its answers have told. */
+        boolean recovering;
+        /** The last included index of that snapshot. */
+        long snapshotSent;
         /** Last index of every append in flight, ascending. */
         final ArrayDeque<Long> inflight = new ArrayDeque<>();
 
@@ -186,13 +208,16 @@ public final class RaftNode {
         this.votedFor = state.hardState().votedFor();
         this.logRecovering = state.hardState().logRecovering();
         this.logEpoch = state.hardState().logEpoch();
-        this.durableIndex = log.lastIndex();
-        this.handedOutIndex = durableIndex;
-        long snapshotIndex = state.snapshot().lastIncludedIndex();
-        if (log.firstIndex() != snapshotIndex + 1) {
+        this.lostLogIndex = state.hardState().lostLogIndex();
+        this.lostLogTerm = state.hardState().lostLogTerm();
+        this.snapshotIndex = state.snapshot().lastIncludedIndex();
+        this.snapshotTerm = state.snapshot().lastIncludedTerm();
+        if (log.firstIndex() > snapshotIndex + 1) {
             throw new IllegalArgumentException("the log starts at " + log.firstIndex()
                     + " but the snapshot ends at " + snapshotIndex);
         }
+        this.durableIndex = Math.max(log.lastIndex(), snapshotIndex);
+        this.handedOutIndex = durableIndex;
         // A node in log-recovering mode may have applied entries that its log has lost.
         if (appliedIndex < snapshotIndex || (appliedIndex > durableIndex && !logRecovering)) {
             throw new IllegalArgumentException("applied index " + appliedIndex + " outside "
@@ -207,7 +232,7 @@ public final class RaftNode {
         // The configuration in force is the newest one in the log, committed or not.
         configIndexes.add(snapshotIndex);
         configValues.add(state.snapshot().config());
-        for (long next = log.firstIndex(); next <= durableIndex;) {
+        for (long next = snapshotIndex + 1; next <= durableIndex;) {
             List<LogEntry> chunk = log.entries(next, durableIndex + 1, 1 << 20);
             if (chunk.isEmpty()) {
                 throw new IllegalArgumentException("the log view has no entry " + next);
@@ -250,6 +275,10 @@ public final class RaftNode {
             case ProposeConfigChange c -> proposeConfigChange(c.requestId(), c.change());
             case TransferLeadership t -> transferLeadership(t.requestId(), t.toNode());
             case RaftEvent.LogDamaged d -> logDamaged(d.firstDamagedIndex());
+            case RaftEvent.SnapshotCreated c -> snapshotCreated(c.meta());
+            case RaftEvent.SnapshotOffered o -> snapshotOffered(o.fromNode(), o.leaderTerm(), o.meta());
+            case RaftEvent.SnapshotInstalled i -> snapshotInstalled(i.meta());
+            case RaftEvent.SnapshotSendFinished f -> snapshotSendFinished(f.toNode(), f.success());
         }
         RoleChanged now = new RoleChanged(role, term, leaderId);
         if (!now.equals(lastRoleNotice)) {
@@ -266,7 +295,9 @@ public final class RaftNode {
                 || !released.isEmpty()
                 || (!gated.isEmpty() && gated.peekFirst().sequence() <= persistedSequence)
                 || applyOffered < Math.min(commitIndex, durableIndex)
-                || !notifications.isEmpty();
+                || !notifications.isEmpty()
+                || prefixTruncation != -1
+                || !directives.isEmpty();
     }
 
     /** Returns the work the runtime must do next. See {@link Ready} for the contract. */
@@ -275,7 +306,7 @@ public final class RaftNode {
 
         HardState hardState = null;
         if (hardStateDirty) {
-            hardState = new HardState(term, votedFor, logRecovering, logEpoch);
+            hardState = new HardState(term, votedFor, logRecovering, logEpoch, lostLogIndex, lostLogTerm);
             hardStateDirty = false;
         }
         long truncate = truncateFrom;
@@ -308,8 +339,28 @@ public final class RaftNode {
 
         List<Notification> notes = List.copyOf(notifications);
         notifications.clear();
+        long prefix = prefixTruncation;
+        prefixTruncation = -1;
+        List<SnapshotDirective> snapshots = List.copyOf(directives);
+        directives.clear();
         return new Ready(sequence, hardState, truncate, entries, List.copyOf(messages), applyFrom,
-                applyTo, notes);
+                applyTo, notes, prefix, snapshots);
+    }
+
+    /**
+     * The meta data of a snapshot of the state machine at {@code index}: the term of that
+     * entry and the configuration as of it. The index must be applied and still in the log.
+     */
+    public SnapshotMeta snapshotMeta(long index) {
+        if (index < snapshotIndex || index > Math.min(applyOffered, lastIndex())) {
+            throw new IllegalArgumentException("no snapshot possible at " + index + ": the log starts after "
+                    + snapshotIndex + ", applied are " + applyOffered + " of " + lastIndex() + " entries");
+        }
+        ClusterConfig at = configValues.getFirst();
+        for (int i = 0; i < configIndexes.size() && configIndexes.get(i) <= index; i++) {
+            at = configValues.get(i);
+        }
+        return new SnapshotMeta(index, termAt(index), at);
     }
 
     /** A read-only view of the protocol state. */
@@ -332,12 +383,18 @@ public final class RaftNode {
         if (index > durableIndex) {
             return unstable.get((int) (index - durableIndex - 1)).term();
         }
+        if (index == snapshotIndex) {
+            return snapshotTerm;
+        }
+        if (index < snapshotIndex) {
+            throw new IllegalStateException("entry " + index + " is covered by the snapshot at " + snapshotIndex);
+        }
         return stable.termAt(index);
     }
 
-    /** The lowest index whose term is known: the one before the first stored entry. */
+    /** The lowest index whose term is known: the last one the snapshot includes. */
     private long floorIndex() {
-        return stable.firstIndex() - 1;
+        return snapshotIndex;
     }
 
     /** At least one entry starting at {@code from}, limited by {@code maxBytes}. */
@@ -447,6 +504,108 @@ public final class RaftNode {
         removeSuffix(from);
     }
 
+    // ------------------------------------------------------------------ snapshots
+
+    /** Log compaction: the state machine has a snapshot, the log before it is not needed. */
+    private void snapshotCreated(SnapshotMeta meta) {
+        long index = meta.lastIncludedIndex();
+        if (index <= snapshotIndex) {
+            return; // an older snapshot than the one the log already starts after
+        }
+        if (!meta.equals(snapshotMeta(index))) {
+            throw new IllegalArgumentException("the snapshot " + meta + " does not fit the log: "
+                    + snapshotMeta(index));
+        }
+        startLogAfter(meta);
+        prefixTruncation = index;
+    }
+
+    /** Makes {@code meta} the snapshot the log starts after. The log holds its last entry. */
+    private void startLogAfter(SnapshotMeta meta) {
+        long index = meta.lastIncludedIndex();
+        snapshotIndex = index;
+        snapshotTerm = meta.lastIncludedTerm();
+        while (configIndexes.size() > 1 && configIndexes.get(1) <= index) {
+            configIndexes.removeFirst();
+            configValues.removeFirst();
+        }
+        configIndexes.set(0, index);
+        configValues.set(0, meta.config());
+    }
+
+    /** A leader has sent a snapshot and the runtime holds it staged. */
+    private void snapshotOffered(int from, long leaderTerm, SnapshotMeta meta) {
+        if (leaderTerm < term || (leaderTerm == term && role == Role.LEADER) || from == id) {
+            directives.add(new SnapshotDirective.Reject(from, meta));
+            return;
+        }
+        if (leaderTerm > term || role != Role.FOLLOWER) {
+            becomeFollower(leaderTerm, from);
+        }
+        leaderId = from;
+        electionElapsed = 0;
+        long index = meta.lastIncludedIndex();
+        if (installing != null || index <= commitIndex) {
+            // One at a time, and only if the log does not hold what the snapshot includes.
+            directives.add(new SnapshotDirective.Reject(from, meta));
+            return;
+        }
+        installing = meta;
+        installFrom = from;
+        // Entries after the snapshot stay if the log agrees with the snapshot at its end.
+        installKeepsSuffix = index <= lastIndex() && termAt(index) == meta.lastIncludedTerm();
+        // The state machine never goes back: if it is already past the snapshot (its log
+        // was damaged behind it), only the log starts anew.
+        directives.add(new SnapshotDirective.Install(from, meta, installKeepsSuffix, index > applyOffered));
+    }
+
+    /** The runtime has installed the snapshot; the stored log starts after it now. */
+    private void snapshotInstalled(SnapshotMeta meta) {
+        if (installing == null || !installing.equals(meta)) {
+            throw new IllegalArgumentException("no installation of " + meta + " was asked for");
+        }
+        long index = meta.lastIncludedIndex();
+        if (installKeepsSuffix) {
+            if (index > durableIndex) {
+                unstable.subList(0, (int) (index - durableIndex)).clear();
+                durableIndex = index;
+            }
+            handedOutIndex = Math.max(handedOutIndex, index);
+            for (long[] write : writes) {
+                write[1] = Math.max(write[1], index);
+            }
+        } else {
+            unstable.clear();
+            durableIndex = index;
+            handedOutIndex = index;
+            truncateFrom = -1;
+            for (long[] write : writes) {
+                write[1] = index;
+            }
+            while (configIndexes.size() > 1) {
+                configIndexes.removeLast();
+                configValues.removeLast();
+            }
+        }
+        startLogAfter(meta);
+        useNewestConfig();
+        commitIndex = Math.max(commitIndex, index);
+        applyOffered = Math.max(applyOffered, index);
+        installing = null;
+        // The snapshot is durable, so this tells the leader what the node holds.
+        sendWhenDurable(installFrom, new AppendResponse(term, true, index, 0, 0, logEpoch));
+    }
+
+    private void snapshotSendFinished(int to, boolean success) {
+        Progress pr = role == Role.LEADER ? progress.get(to) : null;
+        if (pr == null || !pr.snapshotting) {
+            return;
+        }
+        pr.snapshotting = false;
+        pr.probeFrom(success ? Math.max(pr.next, pr.snapshotSent + 1) : pr.next);
+        sendAppend(to, true);
+    }
+
     /**
      * Log-recovering mode (docs/spec/raft.md, section 8). The hard state with the flag is
      * part of the same {@code Ready} as the truncation and is persisted before it.
@@ -456,16 +615,24 @@ public final class RaftNode {
             throw new IllegalArgumentException("damage at " + firstDamagedIndex
                     + " reaches into the snapshot, which ends at " + floorIndex());
         }
-        if (firstDamagedIndex > lastIndex()) {
-            return; // nothing of the log is affected
-        }
         if (role != Role.FOLLOWER) {
             becomeFollower(term, NO_NODE);
         }
         leaderId = NO_NODE;
+        // What the log held before the damage. If the damage lies beyond the log this node
+        // was started with, entries were lost that it never saw: their terms are unknown.
+        long lostIndex = lastIndex();
+        long lostTerm = firstDamagedIndex > lostIndex ? HardState.UNKNOWN_TERM : lastTerm();
+        if (!logRecovering || lostTerm > lostLogTerm || (lostTerm == lostLogTerm && lostIndex > lostLogIndex)) {
+            lostLogIndex = lostIndex;
+            lostLogTerm = lostTerm;
+        }
         logRecovering = true;
         logEpoch++;
         hardStateDirty = true;
+        if (firstDamagedIndex > lastIndex()) {
+            return; // nothing of the log this node holds is affected
+        }
         // An acknowledgment that still waits for its entries to become durable would promise
         // entries that are gone.
         gated.removeIf(g -> g.message().message() instanceof AppendResponse response && response.success());
@@ -738,10 +905,10 @@ public final class RaftNode {
         boolean upToDate = request.lastLogTerm() > lastTerm
                 || (request.lastLogTerm() == lastTerm && request.lastLogIndex() >= lastIndex());
         if (logRecovering) {
-            // This node may lack entries it has acknowledged. Its vote could elect a leader
-            // that lacks them too.
-            send(from, new VoteResponse(term, request.preVote(), false));
-            return;
+            // This node may lack entries it has acknowledged. It votes as it would have with
+            // the log it has lost: only for a candidate that is at least as up to date as that.
+            upToDate = request.lastLogTerm() > lostLogTerm
+                    || (request.lastLogTerm() == lostLogTerm && request.lastLogIndex() >= lostLogIndex);
         }
         if (request.preVote()) {
             boolean grant = request.term() > term && upToDate;
@@ -814,6 +981,9 @@ public final class RaftNode {
         }
         leaderId = from;
         electionElapsed = 0;
+        if (installing != null) {
+            return; // the log is about to be replaced; the leader sends again
+        }
 
         long prev = request.prevLogIndex();
         List<LogEntry> entries = request.entries();
@@ -843,12 +1013,14 @@ public final class RaftNode {
         long match = prev + entries.size();
         commitIndex = Math.max(commitIndex, Math.min(request.leaderCommit(), match));
         if (logRecovering && request.followerEpoch() == logEpoch && match >= request.leaderCommit()
-                && termAt(request.leaderCommit()) == term) {
+                && request.leaderCommit() >= snapshotIndex && termAt(request.leaderCommit()) == term) {
             // The leader sent this after it had dropped what it knew about the lost log, and
             // this log now holds everything the leader knew as committed at that time, up to
             // an entry of the leader's own term. Every entry that was or can still be
             // committed with the help of an acknowledgment of the lost log is among them.
             logRecovering = false;
+            lostLogIndex = 0;
+            lostLogTerm = 0;
             hardStateDirty = true;
         }
         sendWhenDurable(from, new AppendResponse(term, true, match, 0, 0, logEpoch));
@@ -863,7 +1035,11 @@ public final class RaftNode {
         }
         leaderId = from;
         electionElapsed = 0;
-        commitIndex = Math.max(commitIndex, Math.min(heartbeat.commit(), lastIndex()));
+        if (installing == null) {
+            // While a snapshot is being installed, the state machine must not move: the
+            // snapshot would set it back.
+            commitIndex = Math.max(commitIndex, Math.min(heartbeat.commit(), lastIndex()));
+        }
         send(from, new HeartbeatResponse(term, heartbeat.round(), logRecovering));
     }
 
@@ -883,6 +1059,7 @@ public final class RaftNode {
                 // The follower has lost entries it had acknowledged. Forget what it had; the
                 // answer at hand is of the new epoch and is processed as usual.
                 pr.match = 0;
+                pr.recovering = true;
                 pr.probeFrom(response.index() + 1);
             }
         }
@@ -945,6 +1122,7 @@ public final class RaftNode {
             pr.ackedRound = response.round();
             heartbeatAnswered();
         }
+        pr.recovering = response.recovering();
         if (response.recovering()) {
             sendAppend(from, true);
         }
@@ -984,8 +1162,15 @@ public final class RaftNode {
      */
     private void sendAppend(int to, boolean evenIfEmpty) {
         Progress pr = progress.get(to);
-        if (pr == null) {
-            return; // no longer a member, or this node is no longer the leader
+        if (pr == null || pr.snapshotting) {
+            return; // no longer a member, this node is no longer the leader, or a snapshot is under way
+        }
+        if (pr.next <= snapshotIndex) {
+            // The entries the follower needs are gone from the log. It gets the snapshot.
+            pr.snapshotting = true;
+            pr.snapshotSent = snapshotIndex;
+            directives.add(new SnapshotDirective.Send(to, term, snapshotMeta(snapshotIndex)));
+            return;
         }
         boolean force = evenIfEmpty;
         while (true) {
@@ -1102,6 +1287,19 @@ public final class RaftNode {
             notifications.add(new ProposalRejected(requestId, Reason.INVALID_CHANGE, id));
             return;
         }
+        // A voter in log-recovering mode grants no vote. If a majority needed one, the cluster
+        // could elect no leader, and without a leader the node could not leave the mode.
+        int intact = 0;
+        for (int node : next.voters()) {
+            Progress pr = progress.get(node);
+            if (node == id || (pr != null && !pr.recovering)) {
+                intact++;
+            }
+        }
+        if (intact < next.quorum()) {
+            notifications.add(new ProposalRejected(requestId, Reason.RECOVERING_NODES, id));
+            return;
+        }
         if (change instanceof ConfigChange.PromoteLearner promote) {
             Progress pr = progress.get(promote.node());
             if (pr == null || pr.match + config.promotionLag() < lastIndex()) {
@@ -1146,6 +1344,7 @@ public final class RaftNode {
         uncommitted.clear();
         uncommittedBytes = 0;
         transferTarget = NO_NODE;
+        directives.removeIf(d -> d instanceof SnapshotDirective.Send);
         heartbeatElapsed = 0;
     }
 

@@ -11,16 +11,17 @@ import java.util.List;
  */
 public interface LogView {
 
-    /** Index of the first entry still stored: the snapshot index plus one. */
+    /**
+     * Index of the first entry still stored. It is at most the snapshot index plus one;
+     * entries a snapshot covers may still be stored, because the runtime may remove them
+     * later. The core never reads them.
+     */
     long firstIndex();
 
     /** Index of the last stored entry; {@code firstIndex() - 1} if no entry is stored. */
     long lastIndex();
 
-    /**
-     * Term of the entry at {@code index}. Valid for {@code firstIndex() - 1} (the term the
-     * snapshot ends with; 0 if there is no snapshot) through {@code lastIndex()}.
-     */
+    /** Term of the entry at {@code index}. Valid for {@code firstIndex()} through {@code lastIndex()}. */
     long termAt(long index);
 
     /**

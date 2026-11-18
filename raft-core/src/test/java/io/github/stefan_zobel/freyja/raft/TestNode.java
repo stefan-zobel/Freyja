@@ -13,23 +13,29 @@ import io.github.stefan_zobel.freyja.raft.RaftEvent.Tick;
  */
 final class TestNode {
 
-    /** The durable log of a test node. */
+    /** The durable log of a test node. Entries a snapshot covers are removed from its start. */
     static final class MemoryLog implements LogView {
+        /** The entries with the indexes {@code offset + 1} and following. */
         final List<LogEntry> entries = new ArrayList<>();
+        long offset;
 
         @Override
         public long firstIndex() {
-            return 1;
+            return offset + 1;
         }
 
         @Override
         public long lastIndex() {
-            return entries.size();
+            return offset + entries.size();
+        }
+
+        LogEntry get(long index) {
+            return entries.get((int) (index - offset - 1));
         }
 
         @Override
         public long termAt(long index) {
-            return index == 0 ? 0 : entries.get((int) index - 1).term();
+            return get(index).term();
         }
 
         @Override
@@ -37,7 +43,7 @@ final class TestNode {
             List<LogEntry> result = new ArrayList<>();
             long bytes = 0;
             for (long i = fromInclusive; i < toExclusive; i++) {
-                LogEntry entry = entries.get((int) i - 1);
+                LogEntry entry = get(i);
                 if (!result.isEmpty() && bytes + entry.size() > maxBytes) {
                     break;
                 }
@@ -48,15 +54,26 @@ final class TestNode {
         }
 
         void apply(Ready ready) {
-            if (ready.truncateSuffixFrom() != -1 && ready.truncateSuffixFrom() <= entries.size()) {
-                entries.subList((int) ready.truncateSuffixFrom() - 1, entries.size()).clear();
+            long truncate = ready.truncateSuffixFrom();
+            if (truncate != -1 && truncate <= lastIndex()) {
+                entries.subList((int) (truncate - offset - 1), entries.size()).clear();
             }
             for (LogEntry entry : ready.entries()) {
-                if (entry.index() != entries.size() + 1) {
+                if (entry.index() != lastIndex() + 1) {
                     throw new AssertionError("gap in the stored log before " + entry);
                 }
                 entries.add(entry);
             }
+        }
+
+        /** Removes the entries up to {@code index}; the rest too unless {@code keepSuffix}. */
+        void startAfter(long index, boolean keepSuffix) {
+            if (!keepSuffix || index >= lastIndex()) {
+                entries.clear();
+            } else if (index > offset) {
+                entries.subList(0, (int) (index - offset)).clear();
+            }
+            offset = Math.max(offset, index);
         }
     }
 
@@ -72,6 +89,12 @@ final class TestNode {
     final List<Outbound> outbox = new ArrayList<>();
     final List<Notification> notes = new ArrayList<>();
     final List<LogEntry> applied = new ArrayList<>();
+    /** The index of the last entry the state machine holds; it may come from a snapshot. */
+    long appliedIndex;
+    final List<SnapshotDirective> directives = new ArrayList<>();
+    final List<Long> prefixTruncations = new ArrayList<>();
+    /** The snapshot the node starts from after a restart. */
+    SnapshotMeta snapshot;
     /** Persist every write at once. */
     boolean autoPersist;
 
@@ -86,7 +109,8 @@ final class TestNode {
         pending.clear();
         outbox.clear();
         raft = RaftNode.create(config,
-                new PersistedState(hardState, SnapshotMeta.none(cluster)), log, applied.size());
+                new PersistedState(hardState, snapshot == null ? SnapshotMeta.none(cluster) : snapshot), log,
+                appliedIndex);
     }
 
     void step(RaftEvent event) {
@@ -110,11 +134,16 @@ final class TestNode {
             readies.add(ready);
             outbox.addAll(ready.messages());
             notes.addAll(ready.notifications());
+            directives.addAll(ready.snapshots());
+            if (ready.truncatePrefixThrough() != -1) {
+                prefixTruncations.add(ready.truncatePrefixThrough());
+            }
             for (long i = ready.applyFrom(); i <= ready.applyTo(); i++) {
-                if (i != applied.size() + 1) {
-                    throw new AssertionError("apply out of order: " + i + " after " + applied.size());
+                if (i != appliedIndex + 1) {
+                    throw new AssertionError("apply out of order: " + i + " after " + appliedIndex);
                 }
-                applied.add(log.entries.get((int) i - 1));
+                applied.add(log.get(i));
+                appliedIndex = i;
             }
             if (ready.hasPersistentWork()) {
                 pending.add(ready);

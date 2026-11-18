@@ -115,6 +115,15 @@ public final class TraceRecorder implements Simulation.StepListener {
                     s.append("{\"type\":\"ClientPropose\",\"requestId\":").append(p.requestId()).append('}');
             case RaftEvent.ClientReadIndex r ->
                     s.append("{\"type\":\"ClientReadIndex\",\"requestId\":").append(r.requestId()).append('}');
+            case RaftEvent.SnapshotCreated c -> s.append("{\"type\":\"SnapshotCreated\",\"index\":")
+                    .append(c.meta().lastIncludedIndex()).append('}');
+            case RaftEvent.SnapshotOffered o -> s.append("{\"type\":\"SnapshotOffered\",\"from\":")
+                    .append(o.fromNode()).append(",\"leaderTerm\":").append(o.leaderTerm())
+                    .append(",\"index\":").append(o.meta().lastIncludedIndex()).append('}');
+            case RaftEvent.SnapshotInstalled i -> s.append("{\"type\":\"SnapshotInstalled\",\"index\":")
+                    .append(i.meta().lastIncludedIndex()).append('}');
+            case RaftEvent.SnapshotSendFinished f -> s.append("{\"type\":\"SnapshotSendFinished\",\"to\":")
+                    .append(f.toNode()).append(",\"success\":").append(f.success()).append('}');
             case RaftEvent.LogDamaged d ->
                     s.append("{\"type\":\"LogDamaged\",\"firstDamagedIndex\":").append(d.firstDamagedIndex())
                             .append('}');

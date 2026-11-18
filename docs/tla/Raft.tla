@@ -86,16 +86,22 @@ OneStep(c) ==
 \* What must be durable before a promise leaves: term, vote, log, through which index the
 \* log is known to equal the log of the leader of term acc.t, and the log-recovering state.
 Snap(n) == [term |-> n.term, vote |-> n.vote, log |-> n.log, acc |-> n.acc,
-            rec |-> n.rec, epoch |-> n.epoch]
+            rec |-> n.rec, epoch |-> n.epoch, lost |-> n.lost]
+
+\* The end of a log, as a candidate states it and a voter compares it.
+EndOf(log) == [i |-> Len(log), t |-> IF Len(log) = 0 THEN 0 ELSE log[Len(log)].term]
+NoLoss == [i |-> 0, t |-> 0]
 
 InitNode ==
     [term |-> 0, role |-> "F", vote |-> Nil, log |-> <<>>, commit |-> 0,
      votes |-> {}, pvotes |-> {}, denied |-> {},
      match |-> [k \in Nodes |-> 0],
      fep |-> [k \in Nodes |-> 0],  \* log epoch of each follower plus one; 0 for unknown
-     acc |-> [t |-> 0, i |-> 0], rec |-> FALSE, epoch |-> 0, pend |-> <<>>,
+     acc |-> [t |-> 0, i |-> 0], rec |-> FALSE, epoch |-> 0,
+     lost |-> NoLoss,              \* in log-recovering mode: the end of the log before the damage
+     pend |-> <<>>,
      d |-> [term |-> 0, vote |-> Nil, log |-> <<>>, acc |-> [t |-> 0, i |-> 0],
-            rec |-> FALSE, epoch |-> 0]]
+            rec |-> FALSE, epoch |-> 0, lost |-> NoLoss]]
 
 Init ==
     /\ st = [i \in Nodes |-> InitNode]
@@ -108,6 +114,7 @@ Init ==
 \* acc alone belongs to the state handed out last, or is durable at once if nothing is pending.
 Push(s, n) ==
     IF n.term # s.term \/ n.vote # s.vote \/ n.log # s.log \/ n.rec # s.rec \/ n.epoch # s.epoch
+       \/ n.lost # s.lost
     THEN [n EXCEPT !.pend = Append(s.pend, Snap(n))]
     ELSE IF n.acc = s.acc THEN n
     ELSE IF s.pend = <<>> THEN [n EXCEPT !.d.acc = n.acc]
@@ -154,9 +161,12 @@ Update(i, s, n) ==
 (* Messages. ValidSend(m, n) says whether the node with state n may send m.*)
 (***************************************************************************)
 
-UpToDate(lterm, lidx, log) ==
-    \/ lterm > LastTerm(log)
-    \/ lterm = LastTerm(log) /\ lidx >= Len(log)
+\* A candidate whose log ends at (lterm, lidx) is at least as up to date as a log that ends
+\* at e. A node in log-recovering mode compares with the end of the log it has lost: it votes
+\* as it would have before the damage.
+Covers(lterm, lidx, e) == lterm > e.t \/ (lterm = e.t /\ lidx >= e.i)
+VoterEnd(n) == IF n.rec THEN n.lost ELSE EndOf(n.log)
+UpToDate(lterm, lidx, log) == Covers(lterm, lidx, EndOf(log))
 
 ValidSend(m, n) ==
     CASE m.type = "RV" /\ m.pre ->
@@ -166,9 +176,9 @@ ValidSend(m, n) ==
             /\ n.d.term = m.term /\ n.d.vote = m.from
             /\ m.lidx = Len(n.d.log) /\ m.lterm = LastTerm(n.d.log)
       [] m.type = "RVR" /\ m.pre /\ m.granted ->
-            /\ m.term > n.term /\ ~n.rec
+            /\ m.term > n.term
             /\ \E r \in msgs : /\ r.type = "RV" /\ r.pre /\ r.from = m.to /\ r.to = m.from
-                               /\ r.term = m.term /\ UpToDate(r.lterm, r.lidx, n.log)
+                               /\ r.term = m.term /\ Covers(r.lterm, r.lidx, VoterEnd(n))
       [] m.type = "RVR" /\ ~m.pre /\ m.granted -> \* a promise: the vote is durable
             n.d.term = m.term /\ n.d.vote = m.to
       [] m.type = "RVR" /\ ~m.granted -> m.term = n.term
@@ -247,7 +257,8 @@ ProposeCfg(i) ==
 RestartNode(s, k, c) ==
     LET dd == IF k = 0 THEN s.d ELSE s.pend[k]
     IN [InitNode EXCEPT !.term = dd.term, !.vote = dd.vote, !.log = dd.log, !.acc = dd.acc,
-                        !.rec = dd.rec, !.epoch = dd.epoch, !.commit = c, !.d = dd]
+                        !.rec = dd.rec, !.epoch = dd.epoch, !.lost = dd.lost, !.commit = c,
+                        !.d = dd]
 
 Restart(i) ==
     LET s == st[i]
@@ -270,11 +281,14 @@ Cut(log, k) == SubSeq(log, 1, Min(Len(log), k - 1))
 CutAcc(acc, k) == [acc EXCEPT !.i = Min(acc.i, k - 1)]
 
 DamageNode(s, k) ==
-    LET cutSnap(x) == [x EXCEPT !.log = Cut(x.log, k), !.acc = CutAcc(x.acc, k),
-                                !.rec = TRUE, !.epoch = s.epoch + 1]
+    LET end == EndOf(s.log)
+        \* A second damage keeps the later of the two ends.
+        lost == IF s.rec /\ Covers(s.lost.t, s.lost.i, end) THEN s.lost ELSE end
+        cutSnap(x) == [x EXCEPT !.log = Cut(x.log, k), !.acc = CutAcc(x.acc, k),
+                                !.rec = TRUE, !.epoch = s.epoch + 1, !.lost = lost]
         n == [Idle(s) EXCEPT !.log = Cut(s.log, k), !.acc = CutAcc(s.acc, k),
                              !.commit = Min(s.commit, k - 1),
-                             !.rec = TRUE, !.epoch = s.epoch + 1,
+                             !.rec = TRUE, !.epoch = s.epoch + 1, !.lost = lost,
                              !.d = cutSnap(s.d),
                              !.pend = [x \in 1..Len(s.pend) |-> cutSnap(s.pend[x])]]
     IN [n EXCEPT !.pend = Append(n.pend, Snap(n))]
@@ -295,15 +309,15 @@ Damage(i) == \E k \in 1..Len(st[i].d.log) : DamageK(i, k)
 (***************************************************************************)
 
 \* A request for a real vote. Granting is never required. A node in log-recovering mode
-\* grants nothing: it may lack entries it has acknowledged.
+\* compares the candidate with the log it has lost: it may lack entries it has acknowledged.
 RecvRequestVote(m) ==
     LET i == m.to
         s == st[i]
         f == Follower(s, m.term)
     IN /\ m.type = "RV" /\ ~m.pre /\ m.term >= s.term
        /\ \/ Update(i, s, f)
-          \/ /\ f.vote \in {Nil, m.from} /\ ~f.rec
-             /\ UpToDate(m.lterm, m.lidx, f.log)
+          \/ /\ f.vote \in {Nil, m.from}
+             /\ Covers(m.lterm, m.lidx, VoterEnd(f))
              /\ Update(i, s, [f EXCEPT !.vote = m.from])
 
 \* An answer to a request for a vote or a pre-vote. Of several answers of one node in one
@@ -363,7 +377,8 @@ RecvAppendEntries(m) ==
                IN Update(i, s, [f EXCEPT !.log = newLog,
                                          !.commit = Max(f.commit, Min(m.commit, matched)),
                                          !.acc = accOf(matched),
-                                         !.rec = f.rec /\ ~repaired])
+                                         !.rec = f.rec /\ ~repaired,
+                                         !.lost = IF repaired THEN NoLoss ELSE f.lost])
 
 \* An answer to an append. An answer of an earlier log epoch than the leader has seen from
 \* the follower says nothing. With a later one the leader forgets what the follower had.

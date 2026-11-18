@@ -7,7 +7,8 @@
 | `RaftMembership.cfg` | One voter and two nodes that may join, with one log damage; a bounded search, not exhaustive |
 | `RaftTrace.tla`, `RaftTrace.cfg` | Trace validation: constrains `Raft` to one recorded run |
 
-ReadIndex and snapshots are not in the model yet.
+ReadIndex and snapshots are not in the model. A run with snapshots cannot be validated
+against it; trace validation uses the seed sets without them.
 
 **State of the checks (B3):**
 
@@ -44,6 +45,8 @@ control).
 
 - A log entry is a term and, for a `CONFIG` entry, the complete new configuration. The
   configuration in force is the newest one in the log.
+- A node in log-recovering mode votes only for a candidate that covers the log it has lost.
+  The case that the node does not know what it lost (it then grants no vote) is not modeled.
 - Log damage cuts the log of a node, also its durable log and the snapshots on their way.
   The damage marks itself (it is found again at every start), so the log-recovering state
   counts as durable from the moment of the damage. Damage is allowed only while a majority

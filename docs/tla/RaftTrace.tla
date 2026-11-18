@@ -82,6 +82,7 @@ StepOf(e) ==
          [] e.ev = "Read"    -> Stutter
          [] e.ev = "Config"  -> ProposeCfg(i) \/ Stutter
          [] e.ev = "Transfer" -> Stutter
+         \* Snapshots are not in the model. A run with snapshots cannot be validated.
          \* Damage beyond the log changes nothing. Whether a majority is intact is the
          \* business of whoever injects the damage, not of the node.
          [] e.ev = "Damage"  -> IF e.k > Len(st[i].log) THEN Stutter
