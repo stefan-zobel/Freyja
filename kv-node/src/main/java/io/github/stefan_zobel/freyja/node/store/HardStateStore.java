@@ -41,7 +41,21 @@ public final class HardStateStore {
     private long counter;
     private boolean failed;
 
-    private record Stored(long counter, HardState state) {
+    /** One stored record: the hard state and its version counter. */
+    public record Stored(long counter, HardState state) {
+    }
+
+    /**
+     * Reads the record of one of the two files without changing anything, for tools.
+     *
+     * @param fileName {@link #FILE_A} or {@link #FILE_B}
+     * @return the record, or {@code null} if the file is missing or does not hold a valid one
+     */
+    public static Stored inspect(StorageFileSystem fs, Path dataDirectory, String fileName) throws IOException {
+        if (!fileName.equals(FILE_A) && !fileName.equals(FILE_B)) {
+            throw new IllegalArgumentException(fileName);
+        }
+        return read(fs, dataDirectory.resolve(fileName), fileName.equals(FILE_A) ? NUMBER_A : NUMBER_B);
     }
 
     private HardStateStore(StorageFileSystem fs, Path directory, Stored stored) {

@@ -51,8 +51,9 @@ Rules:
 - **C1.** Node skeleton on the clock, transport, and file-system interfaces with a steppable
   event loop. Raft log store with segments. Double hard-state files. Damage and lost-identity
   handling. Log store tested with the faulty file system. Log dump.
-  - Done so far: the module `kv-node` with the identity file, the hard-state files, and
-    the Raft log store. Open: the node skeleton with its event loop, and the log dump.
+  - The skeleton has the transport interface and the event loop; it is stepped by its
+    caller and needs no clock yet. The clock enters with the runtime thread and with the
+    time stamps of commands (C2, C4).
 - **C2.** State machine on `lsm-core`: namespaces, applied index, sessions, conditional
   batches, quota and alarms, cluster version. Checkpoint snapshots with chunked, resumable
   transfer. Replica repair. Overload rules.

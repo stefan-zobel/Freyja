@@ -18,6 +18,31 @@ two releases against one implementation of them.
 
 Timing defaults: tick 100 ms, heartbeat every tick, election timeout 10–20 ticks.
 
+The event loop:
+
+- The node has no thread and no clock of its own. Whoever runs it reports that a tick has
+  passed, hands over the messages that arrive, and tells it to process the next event. The
+  real runtime does that from one thread driven by the clock; a simulation does it in any
+  order it likes.
+- The queue of waiting events is bounded (default 4,096). An event that does not fit is
+  rejected at once.
+- The work of a `Ready` is done in the order of the contract of the core: hard state,
+  suffix truncation, entries, then one sync of the log. Only then the core is told that the
+  work is durable; messages are sent and entries applied after that. Persisting is
+  synchronous in the loop for now; the contract of the core allows to move it to its own
+  thread later without changing the core.
+- A failure of storage stops the node: it rejects every further event. It is started again
+  from what is on disk.
+- A message that fails its checksum, has an unknown format, or is meant for another node is
+  dropped and counted.
+- Each node derives the seed of its election jitter from its node id, so that the election
+  timers of different nodes do not fire together.
+- Start: identity, hard state, log. If the log is damaged, the core is started in
+  log-recovering mode and told of the damage; its hard state is stored; then the damaged
+  segments are set aside (§3.3).
+- Until the state machine stores the configuration of its snapshot (milestone C2), the
+  runtime passes the configuration the cluster started with at every start.
+
 ## 2. Data Directory
 
 ```
@@ -242,6 +267,12 @@ A node that is repairing reports that state through the admin API and the metric
 - A connection starts with a handshake: protocol version, cluster id, node id (peers), and
   the software version. A node rejects peers of another cluster.
 - Every encoded message starts with a message-format version byte and ends with a checksum.
+  - A message between Raft cores: version (`uint8`, 1), type (`uint8`), sender (`uint32`),
+    addressee (`uint32`), term (`uint64`), the remaining fields of the message in a fixed
+    order, CRC32C over everything before it (`uint32`). Integers are little-endian, a
+    boolean is one byte.
+  - A receiver rejects what it does not know: another version, an unknown type, a length
+    that does not fit the type, a wrong checksum.
 - Separate listeners for peers, clients, and administration.
 - Not-leader responses carry the leader's client address if known.
 
