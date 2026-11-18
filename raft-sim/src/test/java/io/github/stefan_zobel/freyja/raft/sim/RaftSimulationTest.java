@@ -2,16 +2,20 @@ package io.github.stefan_zobel.freyja.raft.sim;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
 import io.github.stefan_zobel.freyja.common.testing.Seeds;
+import io.github.stefan_zobel.freyja.raft.sim.LinearizabilityChecker.Operation;
 
 /**
- * Clusters on a reliable network with delayed persistence (docs/spec/verification.md,
- * section 2.4). The safety properties are checked by the simulation after every step; the
- * tests add liveness after the network has become calm.
+ * Simulated clusters (docs/spec/verification.md, sections 2.4 and 2.5). The safety invariants
+ * are checked by the simulation after every step. The tests add liveness after the faults
+ * have ended, and linearizability of the client history.
  */
 class RaftSimulationTest {
 
@@ -24,69 +28,148 @@ class RaftSimulationTest {
             sim.run(1_000);
             sim.checkConverged();
             Simulation.Stats stats = sim.stats();
-            assertEquals(1, sim.checks().leaderOfTerm().size(), "one election: " + stats);
+            assertEquals(1, sim.observation().leadersOfTerm().size(), "one election: " + stats);
             assertTrue(stats.accepted > 300, stats.toString());
             assertEquals(stats.accepted, stats.appliedCommands, stats.toString());
             assertEquals(0, stats.truncations);
             // The entry of the leader's term plus every command.
-            assertEquals(stats.accepted + 1, sim.checks().committed().size());
+            assertEquals(stats.accepted + 1, sim.observation().appliedLog().size());
+            List<Operation> history = sim.checkedHistory();
+            assertTrue(history.size() > 40, "operations in the checked history: " + history.size());
+            assertNull(LinearizabilityChecker.check(history));
+            assertTrue(stats.readsServed > 10, stats.toString());
         }
     }
 
-    /** Runs one seed: a rough phase, then a calm one in which the cluster must converge. */
-    private static Simulation runSeed(long seed) {
-        Simulation sim = new Simulation(SimOptions.fromSeed(seed));
-        sim.run(8_000);
-        sim.setDelays(1, 3, 2);
-        sim.setPauses(false);
-        sim.run(4_000);
-        long before = sim.stats().appliedCommands;
-        sim.run(1_000);
-        assertTrue(sim.stats().appliedCommands > before,
-                "no progress after the network became calm: " + sim.stats());
-        sim.setWorkload(false);
-        // A narrow flow-control window can leave a long backlog; working it off takes time
-        // in proportion to its length, but it must shrink.
+    /**
+     * Lets the cluster work off its backlog. A narrow flow-control window can leave a long
+     * one; that takes time in proportion to its length, but it must end.
+     */
+    private static void converge(Simulation sim) {
         for (int i = 0; i < 240 && !sim.isConverged(); i++) {
             sim.run(500);
         }
+        if (!sim.isConverged()) {
+            throw new AssertionError("not converged: " + sim.stats() + " " + sim.options() + " "
+                    + sim.nodes().stream().map(n -> n.view() + " applied=" + n.applied()).toList());
+        }
+    }
+
+    /**
+     * Runs one seed: a rough phase, then a calm one in which the cluster must converge and
+     * commit new proposals.
+     */
+    private static Simulation runSeed(SimOptions options) {
+        Simulation sim = new Simulation(options);
+        sim.run(8_000);
+        sim.calm();
+        sim.setWorkload(false);
+        converge(sim);
+
+        long before = sim.stats().appliedCommands;
+        sim.setWorkload(true);
+        sim.run(1_000);
+        sim.setWorkload(false);
+        converge(sim);
+        assertTrue(sim.stats().appliedCommands > before,
+                "no new proposal was committed after the faults ended: " + sim.stats());
         sim.checkConverged();
         assertEquals(0, sim.countUndecidedProposals(), sim.stats().toString());
+        assertNull(LinearizabilityChecker.check(sim.checkedHistory()));
         return sim;
     }
 
-    @Test
-    void randomClustersStaySafeAndConverge() {
-        long[] totals = new long[8];
-        Seeds.forEach(RaftSimulationTest.class, "raft-sim-reliable", 200, seed -> {
-            Simulation sim = runSeed(seed);
+    /** What a seed set reached, summed over its runs. */
+    private static final class Totals {
+        long runs;
+        long elections;
+        long truncations;
+        long overloaded;
+        long batchedWrites;
+        long lost;
+        long notLeader;
+        long applied;
+        long crashes;
+        long partitions;
+        long dropped;
+        long duplicated;
+        long readsServed;
+        long historyOperations;
+
+        void add(Simulation sim) {
             Simulation.Stats stats = sim.stats();
-            totals[0]++;
-            totals[1] += sim.checks().leaderOfTerm().size();
-            totals[2] += stats.truncations;
-            totals[3] += stats.rejectedOverloaded;
-            totals[4] += stats.batchedWrites;
-            totals[5] += stats.lost;
-            totals[6] += stats.rejectedNotLeader;
-            totals[7] += stats.appliedCommands;
-        });
-        if (totals[0] >= 100) {
+            runs++;
+            elections += sim.observation().leadersOfTerm().size();
+            truncations += stats.truncations;
+            overloaded += stats.rejectedOverloaded;
+            batchedWrites += stats.batchedWrites;
+            lost += stats.lost;
+            notLeader += stats.rejectedNotLeader;
+            applied += stats.appliedCommands;
+            crashes += stats.crashes;
+            partitions += stats.partitions;
+            dropped += stats.dropped;
+            duplicated += stats.duplicated;
+            readsServed += stats.readsServed;
+            historyOperations += sim.checkedHistory().size();
+        }
+
+        @Override
+        public String toString() {
+            return "runs=" + runs + " elections=" + elections + " truncations=" + truncations
+                    + " overloaded=" + overloaded + " batchedWrites=" + batchedWrites + " lost=" + lost
+                    + " notLeader=" + notLeader + " applied=" + applied + " crashes=" + crashes
+                    + " partitions=" + partitions + " dropped=" + dropped + " duplicated=" + duplicated
+                    + " readsServed=" + readsServed + " historyOperations=" + historyOperations;
+        }
+    }
+
+    @Test
+    void clustersOnAReliableNetworkStaySafeAndConverge() {
+        Totals totals = new Totals();
+        Seeds.forEach(RaftSimulationTest.class, "raft-sim-reliable", 60,
+                seed -> totals.add(runSeed(SimOptions.reliable(seed))));
+        System.out.println("reliable network: " + totals);
+        if (totals.runs >= 60) {
             // The seed set as a whole must reach the interesting situations.
-            String summary = java.util.Arrays.toString(totals);
-            assertTrue(totals[1] > 2 * totals[0], "leader changes: " + summary);
-            assertTrue(totals[2] > 0, "log truncations: " + summary);
-            assertTrue(totals[3] > 0, "overload rejections: " + summary);
-            assertTrue(totals[4] > 0, "writes covered by one completion: " + summary);
-            assertTrue(totals[5] > 0, "accepted proposals that were lost: " + summary);
-            assertTrue(totals[6] > 0, "proposals to a node that is not the leader: " + summary);
-            assertTrue(totals[7] > 100 * totals[0], "applied commands: " + summary);
+            String summary = totals.toString();
+            assertTrue(totals.elections > 2 * totals.runs, summary);
+            assertTrue(totals.truncations > 0, summary);
+            assertTrue(totals.overloaded > 0, summary);
+            assertTrue(totals.batchedWrites > 0, summary);
+            assertTrue(totals.lost > 0, summary);
+            assertTrue(totals.notLeader > 0, summary);
+            assertTrue(totals.applied > 100 * totals.runs, summary);
+            assertTrue(totals.readsServed > 10 * totals.runs, summary);
+            assertTrue(totals.historyOperations > 50 * totals.runs, summary);
+            assertEquals(0, totals.crashes + totals.partitions + totals.dropped + totals.duplicated, summary);
+        }
+    }
+
+    @Test
+    void clustersUnderTheFullFaultModelStaySafeAndConverge() {
+        Totals totals = new Totals();
+        Seeds.forEach(RaftSimulationTest.class, "raft-sim-faulty", 200,
+                seed -> totals.add(runSeed(SimOptions.faulty(seed))));
+        System.out.println("full fault model: " + totals);
+        if (totals.runs >= 100) {
+            String summary = totals.toString();
+            assertTrue(totals.elections > 3 * totals.runs, summary);
+            assertTrue(totals.truncations > totals.runs / 4, summary);
+            assertTrue(totals.lost > 0, summary);
+            assertTrue(totals.crashes > totals.runs, summary);
+            assertTrue(totals.partitions > totals.runs / 2, summary);
+            assertTrue(totals.dropped > 100 * totals.runs, summary);
+            assertTrue(totals.duplicated > 10 * totals.runs, summary);
+            assertTrue(totals.readsServed > 5 * totals.runs, summary);
+            assertTrue(totals.historyOperations > 30 * totals.runs, summary);
         }
     }
 
     @Test
     void aRunIsAFunctionOfItsSeed() {
-        long first = runSeed(7).traceHash();
-        assertEquals(first, runSeed(7).traceHash());
-        assertNotEquals(first, runSeed(8).traceHash());
+        long first = runSeed(SimOptions.faulty(7)).traceHash();
+        assertEquals(first, runSeed(SimOptions.faulty(7)).traceHash());
+        assertNotEquals(first, runSeed(SimOptions.faulty(8)).traceHash());
     }
 }

@@ -23,6 +23,13 @@ public sealed interface RaftEvent {
     record Persisted(long readySequence) implements RaftEvent {
     }
 
+    /**
+     * A client asks for an index at which a read is linearizable. The read may be served
+     * from the state machine of this node once it has applied everything through that index.
+     */
+    record ClientReadIndex(long requestId) implements RaftEvent {
+    }
+
     /** A client asks to append a command to the log. */
     record ClientPropose(long requestId, byte[] command) implements RaftEvent {
         public ClientPropose {

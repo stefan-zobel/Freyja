@@ -357,6 +357,34 @@ class RaftNodeTest {
         assertEquals(1, node.outbox.size());
     }
 
+    @Test
+    void anEntryOfAnEarlierTermIsCommittedOnlyThroughAnEntryOfTheCurrentTerm() {
+        TestNode node = follower(0);
+        node.autoPersist = true;
+        node.receive(1, new AppendEntries(2, 0, 0, List.of(entry(1, 2)), 0));
+        while (node.view().role() != Role.PRE_CANDIDATE) {
+            node.tick(1);
+        }
+        node.receive(1, new VoteResponse(3, true, true));
+        assertEquals(Role.CANDIDATE, node.view().role());
+        node.receive(1, new VoteResponse(3, false, true));
+        assertEquals(Role.LEADER, node.view().role());
+        assertEquals(2, node.view().lastLogIndex());
+        assertEquals(2, node.view().durableIndex());
+
+        // Node 2 lacks everything; the leader finds that out and sends both entries.
+        node.receive(2, new AppendResponse(3, false, 1, 0, 0));
+        // Node 2 has stored the entry of term 2: it is on a majority now, but it may still be
+        // replaced by a leader of a later term that does not have it. It is not committed.
+        node.receive(2, new AppendResponse(3, true, 1, 0, 0));
+        assertEquals(0, node.view().commitIndex());
+        assertTrue(node.applied.isEmpty());
+        // With the entry of term 3 on a majority, both are committed.
+        node.receive(2, new AppendResponse(3, true, 2, 0, 0));
+        assertEquals(2, node.view().commitIndex());
+        assertEquals(List.of("1@2:COMMAND", "2@3:NOOP"), shape(node.applied));
+    }
+
     // ------------------------------------------------------------------ flow control
 
     @Test

@@ -34,3 +34,6 @@ build/
 
 ### Mac OS ###
 .DS_Store
+
+### Local development tools (TLC), not part of the repository ###
+/tools/

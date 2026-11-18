@@ -18,15 +18,33 @@ public sealed interface Notification {
     record ProposalRejected(long requestId, Reason reason, int leaderHint) implements Notification {
     }
 
+    /**
+     * Leadership was confirmed after the request arrived. A read served from the state
+     * machine of this node after it has applied everything through {@code index} is
+     * linearizable.
+     */
+    record ReadIndexReady(long requestId, long index) implements Notification {
+    }
+
+    /**
+     * No read index could be given.
+     *
+     * @param leaderHint the leader this node knows of, or {@link RaftNode#NO_NODE}
+     */
+    record ReadIndexRejected(long requestId, Reason reason, int leaderHint) implements Notification {
+    }
+
     /** The role, the term, or the known leader of this node changed. */
     record RoleChanged(Role role, long term, int leaderId) implements Notification {
     }
 
-    /** Why a proposal was rejected. */
+    /** Why a request was rejected. */
     enum Reason {
-        /** This node is not the leader. */
+        /** This node is not the leader, or it stopped being the leader before it could answer. */
         NOT_LEADER,
         /** The uncommitted part of the log of the leader is at its limit. */
-        OVERLOADED
+        OVERLOADED,
+        /** The leader has not yet committed an entry of its own term. */
+        NOT_READY
     }
 }

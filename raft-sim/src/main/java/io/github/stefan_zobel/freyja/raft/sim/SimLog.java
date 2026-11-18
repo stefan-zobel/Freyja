@@ -55,6 +55,11 @@ public final class SimLog implements LogView {
         return hardState;
     }
 
+    /** A copy of the stored entries. */
+    public List<LogEntry> entries() {
+        return new ArrayList<>(entries);
+    }
+
     /** Stores what {@code ready} asks to persist, in the order the contract prescribes. */
     void store(Ready ready) {
         if (ready.hardState() != null) {

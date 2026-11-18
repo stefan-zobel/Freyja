@@ -9,9 +9,12 @@ import java.util.TreeMap;
 
 import io.github.stefan_zobel.freyja.raft.Notification.ProposalAccepted;
 import io.github.stefan_zobel.freyja.raft.Notification.ProposalRejected;
+import io.github.stefan_zobel.freyja.raft.Notification.ReadIndexReady;
+import io.github.stefan_zobel.freyja.raft.Notification.ReadIndexRejected;
 import io.github.stefan_zobel.freyja.raft.Notification.Reason;
 import io.github.stefan_zobel.freyja.raft.Notification.RoleChanged;
 import io.github.stefan_zobel.freyja.raft.RaftEvent.ClientPropose;
+import io.github.stefan_zobel.freyja.raft.RaftEvent.ClientReadIndex;
 import io.github.stefan_zobel.freyja.raft.RaftEvent.MessageReceived;
 import io.github.stefan_zobel.freyja.raft.RaftEvent.Persisted;
 import io.github.stefan_zobel.freyja.raft.RaftEvent.Tick;
@@ -100,7 +103,15 @@ public final class RaftNode {
 
     // ---- leader state
     private final TreeMap<Integer, Progress> progress = new TreeMap<>();
+    /** Number of the latest heartbeat round started. It never goes back while the node runs. */
     private long heartbeatRound;
+    /** The latest heartbeat round that a majority has answered. */
+    private long quorumRound;
+    /**
+     * Read requests waiting for a heartbeat round that started after they arrived, in order
+     * of arrival: {@code {request id, read index, round}}.
+     */
+    private final ArrayDeque<long[]> pendingReads = new ArrayDeque<>();
     private long uncommittedBytes;
     /** Sizes of the entries appended in this leadership and not yet committed: {index, size}. */
     private final ArrayDeque<long[]> uncommitted = new ArrayDeque<>();
@@ -122,8 +133,10 @@ public final class RaftNode {
         boolean recentActive;
         /** The highest commit index sent to the follower in an append. */
         long sentCommit;
-        /** The match index when the previous heartbeat response arrived. */
-        long matchAtHeartbeat;
+        /** The match index at the previous check for stalled replication. */
+        long matchAtCheck;
+        /** The latest heartbeat round the follower has answered. */
+        long ackedRound;
         /** Last index of every append in flight, ascending. */
         final ArrayDeque<Long> inflight = new ArrayDeque<>();
 
@@ -184,6 +197,7 @@ public final class RaftNode {
             case MessageReceived m -> receive(m.fromNode(), m.message());
             case Persisted p -> persisted(p.readySequence());
             case ClientPropose p -> propose(p.requestId(), p.command());
+            case ClientReadIndex r -> readIndex(r.requestId());
         }
         RoleChanged now = new RoleChanged(role, term, leaderId);
         if (!now.equals(lastRoleNotice)) {
@@ -408,20 +422,74 @@ public final class RaftNode {
                     becomeFollower(term, NO_NODE);
                     return;
                 }
+                resumeStalledReplication();
             }
             if (heartbeatElapsed >= config.heartbeatTicks()) {
                 heartbeatElapsed = 0;
-                heartbeatRound++;
-                for (int peer : peers) {
-                    Progress pr = progress.get(peer);
-                    send(peer, new Heartbeat(term, Math.min(pr.match, commitIndex), heartbeatRound));
-                }
+                startHeartbeatRound();
             }
         } else {
             electionElapsed++;
             if (voter && electionElapsed >= randomizedElectionTicks) {
                 campaign();
             }
+        }
+    }
+
+    private void startHeartbeatRound() {
+        heartbeatRound++;
+        for (int peer : peers) {
+            Progress pr = progress.get(peer);
+            send(peer, new Heartbeat(term, Math.min(pr.match, commitIndex), heartbeatRound));
+        }
+    }
+
+    /**
+     * ReadIndex: the commit index at the arrival of the request is a valid read index once
+     * a majority has answered a heartbeat round that started after the arrival. That majority
+     * shows that no leader of a later term existed when the request arrived, so nothing was
+     * committed then that this leader does not know to be committed.
+     */
+    private void readIndex(long requestId) {
+        if (role != Role.LEADER) {
+            notifications.add(new ReadIndexRejected(requestId, Reason.NOT_LEADER, leaderId));
+            return;
+        }
+        if (termAt(commitIndex) != term) {
+            // Entries of earlier leaders may be committed without this leader knowing it.
+            notifications.add(new ReadIndexRejected(requestId, Reason.NOT_READY, id));
+            return;
+        }
+        if (peers.length == 0) {
+            notifications.add(new ReadIndexReady(requestId, commitIndex));
+            return;
+        }
+        pendingReads.addLast(new long[] {requestId, commitIndex, heartbeatRound + 1});
+        if (quorumRound == heartbeatRound) {
+            // No round is on its way; otherwise the request shares the next one.
+            startHeartbeatRound();
+        }
+    }
+
+    /** Called when a follower answered a heartbeat: releases the reads a majority confirmed. */
+    private void heartbeatAnswered() {
+        long[] rounds = new long[peers.length + 1];
+        for (int i = 0; i < peers.length; i++) {
+            rounds[i] = progress.get(peers[i]).ackedRound;
+        }
+        rounds[peers.length] = heartbeatRound;
+        Arrays.sort(rounds);
+        long confirmed = rounds[rounds.length - cluster.quorum()];
+        if (confirmed <= quorumRound) {
+            return;
+        }
+        quorumRound = confirmed;
+        while (!pendingReads.isEmpty() && pendingReads.peekFirst()[2] <= quorumRound) {
+            long[] read = pendingReads.pollFirst();
+            notifications.add(new ReadIndexReady(read[0], read[1]));
+        }
+        if (!pendingReads.isEmpty() && quorumRound == heartbeatRound) {
+            startHeartbeatRound(); // for the requests that arrived while the round was under way
         }
     }
 
@@ -679,20 +747,36 @@ public final class RaftNode {
             return;
         }
         pr.recentActive = true;
-        if (pr.match < lastIndex()) {
-            if (!pr.replicating) {
-                pr.probePaused = false;
-                sendAppend(from, true);
-            } else if (pr.match == pr.matchAtHeartbeat && pr.next > pr.match + 1) {
-                // Appends are in flight, but nothing was acknowledged for a whole heartbeat
-                // interval: assume they were lost and find the match point again.
-                pr.probeFrom(pr.match + 1);
-                sendAppend(from, true);
-            } else {
-                sendAppend(from, false);
-            }
+        if (response.round() > pr.ackedRound && response.round() <= heartbeatRound) {
+            pr.ackedRound = response.round();
+            heartbeatAnswered();
         }
-        pr.matchAtHeartbeat = pr.match;
+    }
+
+    /**
+     * Once per election timeout: sends again what may have been lost. A lost message is
+     * normally noticed through the rejection of the one after it; this covers the case that
+     * nothing follows.
+     */
+    private void resumeStalledReplication() {
+        long last = lastIndex();
+        for (int peer : peers) {
+            Progress pr = progress.get(peer);
+            if (pr.match < last) {
+                if (!pr.replicating) {
+                    pr.probePaused = false;
+                    sendAppend(peer, true);
+                } else if (pr.match == pr.matchAtCheck && !pr.inflight.isEmpty()) {
+                    // Appends are in flight, but nothing was acknowledged for a whole
+                    // election timeout: find the match point again.
+                    pr.probeFrom(pr.match + 1);
+                    sendAppend(peer, true);
+                } else {
+                    sendAppend(peer, false);
+                }
+            }
+            pr.matchAtCheck = pr.match;
+        }
     }
 
     // ------------------------------------------------------------------ replication
@@ -769,6 +853,12 @@ public final class RaftNode {
     }
 
     private void clearRoleState() {
+        for (long[] read : pendingReads) {
+            notifications.add(new ReadIndexRejected(read[0], Reason.NOT_LEADER, NO_NODE));
+        }
+        pendingReads.clear();
+        // Rounds of an earlier leadership confirm nothing about a later one.
+        quorumRound = heartbeatRound;
         votes.clear();
         progress.clear();
         uncommitted.clear();

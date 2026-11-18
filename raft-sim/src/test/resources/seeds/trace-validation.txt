@@ -1,0 +1,3 @@
+# Seeds whose trace the model once rejected. Each runs in the trace-validation profile.
+6  # the model counted every pre-vote answer; the core counts the first answer of a node
+7  # a run of 9,786 steps; TLC needs time in the square of the length

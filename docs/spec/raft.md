@@ -147,9 +147,10 @@ public record Ready(
   the term the follower named. Whole terms are skipped this way.
 - **Heartbeats** are separate from appends, so that flow control never holds them back. A
   heartbeat carries the commit index, limited to the match index of its receiver.
-- **Recovery from lost appends:** when a heartbeat answer arrives and the follower is behind,
-  a probing leader sends its probe again. A replicating leader that has appends in flight but
-  saw no progress since the previous heartbeat answer falls back to probing.
+- **Recovery from lost appends:** a lost append is normally noticed through the rejection
+  of the one after it. For the case that nothing follows, the leader checks once per election
+  timeout: a probing leader sends its probe again, and a replicating leader that has appends
+  in flight but saw no acknowledgment since the previous check falls back to probing.
 
 ## 5. Mandatory Protocol Details
 
@@ -170,6 +171,18 @@ public record Ready(
   majority that started after the request arrived, then reports the read index. Pending
   requests share heartbeat rounds. The runtime serves the read once the state machine has
   applied through that index.
+  - A request to a node that is not the leader is rejected with a leader hint. A leader that
+    has not committed an entry of its term rejects with "not ready"; the client tries again.
+  - A request that finds no round on its way starts one at once. One that arrives while a
+    round is on its way waits for the next round, which starts when the current one is
+    answered by a majority, or with the next regular heartbeat.
+  - A leader that steps down rejects the requests it has not answered.
+  - A single node is its own majority and answers at once.
+  - Why this is safe although heartbeat answers do not wait for persistence: a node that
+    answers a heartbeat of term T has not granted a vote in a later term, because its term
+    never goes back, not even across a crash (a vote leaves only after it is durable). If a
+    leader of a later term existed when the request arrived, a majority had voted for it
+    before, and no majority could answer a later round of term T.
 
 ## 6. Membership Change
 
@@ -218,6 +231,15 @@ A TLA+ specification covers elections with PreVote, replication, membership chan
 learners, ReadIndex, and the log-recovering mode. It is model-checked for clusters of up to
 five nodes with bounded terms and log lengths. The specification is kept in `docs/tla/` and is
 updated together with the protocol rules above.
+
+- The specification grows with the milestones. `docs/tla/README.md` says what it covers and
+  within which bounds it has been checked. So far: elections with PreVote, replication, and
+  asynchronous persistence, exhaustively for three nodes within small bounds. Five nodes
+  are out of reach of an exhaustive check with the present model of the network.
+- It models durable and volatile state separately: a promise may be sent only if the
+  durable state backs it, and a restart loses everything else.
+- Vote counting: of several answers of one node to a request for a vote or pre-vote, only
+  the first counts in a round. A node that a majority has turned down gives up the round.
 
 The model is tied to the implementation by trace validation (`verification.md` §2.7). For
 that purpose the core exposes a read-only view of its protocol state (term, role, vote, known

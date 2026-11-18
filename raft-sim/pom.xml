@@ -12,6 +12,37 @@
 
     <artifactId>raft-sim</artifactId>
 
+    <properties>
+        <!-- Tests that need the external model checker TLC run only in the profile below. -->
+        <excludedTestGroups>tlc</excludedTestGroups>
+        <includedTestGroups/>
+    </properties>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <groups>${includedTestGroups}</groups>
+                    <excludedGroups>${excludedTestGroups}</excludedGroups>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <!-- Trace validation against the TLA+ model (docs/spec/verification.md, section 2.7).
+             Needs tla2tools.jar: tools/tla2tools.jar, or -Dfreyja.tlc=path. -->
+        <profile>
+            <id>trace-validation</id>
+            <properties>
+                <excludedTestGroups/>
+                <includedTestGroups>tlc</includedTestGroups>
+            </properties>
+        </profile>
+    </profiles>
+
     <dependencies>
         <dependency>
             <groupId>io.github.stefan-zobel</groupId>

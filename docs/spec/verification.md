@@ -75,6 +75,15 @@ deleted. This test must pass on Windows.
     meantime at once. Even on a reliable network this produces leader changes, leaders of
     terms the cluster has left behind, and truncated logs.
   - Writes become durable in order after a random delay; one completion may cover several.
+  - A crash discards what was not durable. Of the writes on their way any prefix may have
+    reached the disk without having been reported. The state machine of a restarted node
+    either survived or is rebuilt from the log.
+  - Compound faults make rare situations frequent enough to be reached: a disk that stops
+    completing writes followed by a crash of that node (everything the node did in between
+    was done on state that is lost), and a leader that freezes while everything sent to it
+    is lost (it wakes up believing that it still leads).
+  - There is one seed set for a reliable network (delays, pauses, flow control) and one for
+    the full fault model.
   - The settings of a run (cluster size, delays, flow-control limits, load) are drawn from
     its seed, so that the seed set covers many shapes of a cluster.
 - **Safety invariants, checked after every step:**
@@ -88,15 +97,34 @@ deleted. This test must pass on Windows.
     configurations intersect.
 - **Liveness, checked only after the network has been healed for a bounded time:** a leader
   exists and new proposals commit. Once the load stops, all nodes hold the same log, fully
-  committed and applied, and every accepted proposal is either applied or known to be lost.
+  committed and applied, their state machines are equal, and every accepted proposal is
+  either applied or known to be lost. A narrow flow-control window can leave a long backlog;
+  the bound is therefore generous, but the backlog must be worked off.
 - **The seed set must reach the interesting situations:** leader changes, log truncations,
-  overload rejections, lost proposals. A run of the full set that reaches none of one kind
-  fails.
+  overload rejections, lost proposals, crashes, partitions, lost and duplicated messages,
+  served reads. A run of the full set that reaches none of one kind fails.
+- **The oracles are themselves tested by mutation:** a deliberately broken core (a promise
+  sent before it is durable, a second vote in a term, an acknowledgment for entries a pending
+  write no longer covers, a leader that counts its own entries before they are durable, a
+  read answered without a confirmed leadership) must be caught by the simulator or by a unit
+  test of the core. The mutations are applied by hand when the simulator or the core changes
+  in a way that could blind an oracle; they are not part of the build.
 
 ### 2.5 Linearizability
 
 - Clients issue concurrent writes, conditional writes, and reads, and retry through sessions.
+  In `raft-sim` there are no sessions yet, so its clients do not retry: an operation without
+  a response stays open.
 - An operation without a response is treated as possibly taking effect at any later time.
+- Operations that are known to have had no effect are left out of the history: rejected
+  requests, proposals that never reached a log, and, once the cluster has converged,
+  proposals whose place in the log was taken by another entry.
+- The search grows with the number of operations that overlap and doubles with every
+  operation that never returns. The checked client therefore waits for at most a few answers
+  at a time and stops when it has given up on a few operations.
+- Right after a change of leader, the checked client reads back every completed write from
+  the leader of before. A node that was deposed without noticing must not answer from what
+  it knows.
 - The checker is Wing & Gong with memoization of visited states, applied per key. Histories
   are kept small enough per run for the search to finish; many seeds replace long histories.
 - Additional check: no command is applied twice (exactly-once through sessions).
@@ -106,7 +134,12 @@ deleted. This test must pass on Windows.
 The safety invariants are the project's laws: a human states them, and no code change may
 break them.
 
-- The invariants of §2.4 live in one source file, `SafetyInvariants` in `raft-sim`. The
+- The invariants of §2.4 live in one source file, `SafetyInvariants` in `raft-sim`. They
+  are predicates over an `Observation`: the logs of all nodes, the history of elections and
+  of applied entries, and what the latest step did. A predicate examines the latest step
+  against the history and relies on having held after every earlier step. Log matching also
+  exists in a form over the complete logs, called at restarts, at intervals, and at the end
+  of a run. The
   invariants of §3 (state-machine equality, no acknowledged write lost, exactly-once) live in
   one source file, `SystemInvariants`, next to the whole-system simulation in `kv-node`.
 - Each invariant is a named, side-effect-free predicate over the observed state of all nodes.
@@ -116,6 +149,8 @@ break them.
   invariant is never an acceptable fix.
 - `docs/spec/invariants.sha256` records the checksum of both files. A test compares them, so
   every change to an invariant needs a second, deliberate edit and is visible on its own.
+  The checksum is taken over the file with LF line ends, so that it is the same on every
+  platform.
 - Every invariant has a negative test: a deliberately broken history that the predicate must
   reject. An invariant that cannot fail proves nothing.
 
@@ -128,20 +163,46 @@ the two.
   JSON format written by a small hand-written encoder. Each line holds the node id, the event,
   and the node's resulting protocol state: term, role, vote, last log index and term, commit
   index, configuration, log-recovering flag, and the messages released.
+  - A line also lists what the step handed out to be made durable (hard state, truncation,
+    entries without payloads), because the model distinguishes durable from volatile state.
+  - A restart of a node after a crash is a line of its own: it changes the state of the node
+    without a step.
+  - Recording does not change a run, and the trace is a function of the seed.
 - `raft-core` stays pure. It exposes a read-only view of its protocol state; the simulator
   writes the trace.
 - A trace specification in `docs/tla/` constrains the model to the recorded sequence. TLC
   checks that the trace is a behavior the specification allows. A trace that the
   specification does not allow is a bug in the code or in the specification, and one of them
   is fixed.
+  - TLC reads the run as a generated module (`TraceData`, a sequence of records), written
+    from the same steps as the JSON lines. This needs no library on either side.
+  - A step is accepted if an action that belongs to its event leads to the recorded state
+    of the node, a received message was released before, and every released message is one
+    the node may send in its new state. For a promise that means: the durable state backs it.
+  - The trace shows the last index and term of a log, not its content. The model follows the
+    content through the actions.
 - **Mapping:** every `step` corresponds to one action of the specification or to a fixed,
   documented sequence of actions. The mapping is part of `docs/tla/`. An event without a
   mapping fails validation.
 - **Not vacuous:** the validation must reject mutated traces (a second leader in a term, an
-  acknowledgment before persistence, a changed committed entry). These mutations are tests.
+  acknowledgment before persistence, a vote before persistence, a changed committed entry, a
+  commit without a majority). These mutations are tests.
+- **The model itself is checked for not being vacuous:**
+  - Within the bounds of `Raft.cfg` (exhaustive: three nodes, 4 messages) TLC must be able
+    to reach a commit and a second election.
+  - TLC must refute variants of the model with a deliberate error. Refuted by a
+    breadth-first search with 6 messages, each within two minutes: an acknowledgment backed
+    by volatile state, a vote backed by volatile state, a leader that counts its own entries
+    before they are durable, a second vote in a term.
+  - Not refuted by that search within nine minutes, because the shortest counterexample
+    needs more steps: a commit of an entry of an earlier term without one of the current
+    term, and a vote granted without comparing logs. These two are covered by unit tests of
+    the core and by the simulator.
+  - The variants are produced by hand when the model changes.
 - TLC is an external development tool, not a dependency. Trace validation runs in its own
-  profile, not in the default `./mvnw test`, on a fixed set of seeds plus the failing-seed
-  corpus.
+  profile (`-Ptrace-validation`), not in the default `./mvnw test`, on a fixed set of seeds
+  plus the failing-seed corpus. The profile expects `tla2tools.jar` in `tools/` of the
+  repository directory, or its path in the system property `freyja.tlc`.
 - The whole-system simulation (§3) records the same trace format for the Raft part of every
   node, so traces from complete nodes are validated as well.
 
