@@ -24,6 +24,10 @@ public sealed interface CommandResult {
     record SessionOk() implements CommandResult {
     }
 
+    /** An alarm was set or cleared, or the cluster version is the one asked for. */
+    record AdminApplied() implements CommandResult {
+    }
+
     /** The command had no effect. */
     record Failed(Failure failure) implements CommandResult {
     }
@@ -37,9 +41,14 @@ public sealed interface CommandResult {
          * the state machine no longer has. The client must not send the command again.
          */
         SEQUENCE_TOO_OLD,
-        /** The alarm for lack of space is set: only deletes are accepted. */
+        /**
+         * The alarm for lack of space is set: only deletes are accepted. The command did not
+         * use up its sequence number and may be sent again when the alarm is cleared.
+         */
         NO_SPACE,
         /** A key, a value, or the whole command exceeds its limit, or a key is empty. */
-        INVALID
+        INVALID,
+        /** The cluster version asked for is below the one the cluster has. */
+        VERSION_TOO_OLD
     }
 }

@@ -6,6 +6,8 @@ import java.util.List;
 
 import io.github.stefan_zobel.freyja.common.DecodeException;
 import io.github.stefan_zobel.freyja.common.LittleEndian;
+import io.github.stefan_zobel.freyja.common.kv.Command.Alarm;
+import io.github.stefan_zobel.freyja.common.kv.Command.ClearAlarm;
 import io.github.stefan_zobel.freyja.common.kv.Command.CloseSession;
 import io.github.stefan_zobel.freyja.common.kv.Command.Condition;
 import io.github.stefan_zobel.freyja.common.kv.Command.ConditionKind;
@@ -15,7 +17,10 @@ import io.github.stefan_zobel.freyja.common.kv.Command.KeepAlive;
 import io.github.stefan_zobel.freyja.common.kv.Command.Mutation;
 import io.github.stefan_zobel.freyja.common.kv.Command.Put;
 import io.github.stefan_zobel.freyja.common.kv.Command.RegisterSession;
+import io.github.stefan_zobel.freyja.common.kv.Command.SetAlarm;
+import io.github.stefan_zobel.freyja.common.kv.Command.SetClusterVersion;
 import io.github.stefan_zobel.freyja.common.kv.Command.Write;
+import io.github.stefan_zobel.freyja.common.kv.CommandResult.AdminApplied;
 import io.github.stefan_zobel.freyja.common.kv.CommandResult.ConditionalApplied;
 import io.github.stefan_zobel.freyja.common.kv.CommandResult.Failed;
 import io.github.stefan_zobel.freyja.common.kv.CommandResult.Failure;
@@ -31,7 +36,8 @@ import io.github.stefan_zobel.freyja.common.kv.CommandResult.Written;
  * <pre>
  * version    uint8    1
  * timestamp  uint64   the clock of the leader when it proposed the command, in milliseconds
- * type       uint8    1 Write, 2 Conditional, 3 RegisterSession, 4 KeepAlive, 5 CloseSession
+ * type       uint8    1 Write, 2 Conditional, 3 RegisterSession, 4 KeepAlive, 5 CloseSession,
+ *                     6 SetAlarm, 7 ClearAlarm, 8 SetClusterVersion
  * body       ...
  * </pre>
  *
@@ -40,6 +46,8 @@ import io.github.stefan_zobel.freyja.common.kv.CommandResult.Written;
  *   <li>Conditional: session id, sequence, conditions, mutations if they hold, mutations
  *       otherwise.</li>
  *   <li>KeepAlive, CloseSession: session id.</li>
+ *   <li>SetAlarm, ClearAlarm: alarm ({@code uint8}; 0 NOSPACE).</li>
+ *   <li>SetClusterVersion: version ({@code uint32}).</li>
  *   <li>A list is a count ({@code uint32}) and its elements. A byte string is a length
  *       ({@code uint32}) and its bytes.</li>
  *   <li>Mutation: kind ({@code uint8}; 1 put, 2 delete), key, and for a put the value.</li>
@@ -48,7 +56,7 @@ import io.github.stefan_zobel.freyja.common.kv.CommandResult.Written;
  * </ul>
  *
  * <p>A result: kind ({@code uint8}; 1 written, 2 conditional, 3 session registered, 4 session
- * ok, 5 failed) and one field where the kind has one.
+ * ok, 5 failed, 6 admin applied) and one field where the kind has one.
  */
 public final class CommandCodec {
 
@@ -96,6 +104,18 @@ public final class CommandCodec {
             case CloseSession c -> {
                 out.u8(5);
                 out.u64(c.sessionId());
+            }
+            case SetAlarm a -> {
+                out.u8(6);
+                out.u8(a.alarm().ordinal());
+            }
+            case ClearAlarm a -> {
+                out.u8(7);
+                out.u8(a.alarm().ordinal());
+            }
+            case SetClusterVersion v -> {
+                out.u8(8);
+                out.u32(v.version());
             }
         }
         return out.buffer.toByteArray();
@@ -150,10 +170,22 @@ public final class CommandCodec {
             case 3 -> new RegisterSession();
             case 4 -> new KeepAlive(in.u64());
             case 5 -> new CloseSession(in.u64());
+            case 6 -> new SetAlarm(alarm(in));
+            case 7 -> new ClearAlarm(alarm(in));
+            case 8 -> new SetClusterVersion(in.u32());
             default -> throw new DecodeException("unknown command type " + type);
         };
         in.end();
         return new Stamped(timestamp, command);
+    }
+
+    private static Alarm alarm(In in) {
+        int alarm = in.u8();
+        Alarm[] alarms = Alarm.values();
+        if (alarm >= alarms.length) {
+            throw new DecodeException("unknown alarm " + alarm);
+        }
+        return alarms[alarm];
     }
 
     private static List<Mutation> mutations(In in) {
@@ -189,6 +221,7 @@ public final class CommandCodec {
                 out.u8(5);
                 out.u8(f.failure().ordinal());
             }
+            case AdminApplied _ -> out.u8(6);
         }
         return out.buffer.toByteArray();
     }
@@ -215,6 +248,7 @@ public final class CommandCodec {
                 }
                 yield new Failed(failures[failure]);
             }
+            case 6 -> new AdminApplied();
             default -> throw new DecodeException("unknown result kind " + kind);
         };
         in.end();
@@ -270,6 +304,13 @@ public final class CommandCodec {
             need(8);
             long value = LittleEndian.getUint64(bytes, at);
             at += 8;
+            return value;
+        }
+
+        int u32() {
+            need(4);
+            int value = LittleEndian.getInt32(bytes, at);
+            at += 4;
             return value;
         }
 

@@ -5,9 +5,12 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.EnumSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.zip.CRC32C;
@@ -16,6 +19,8 @@ import io.github.stefan_zobel.freyja.common.ByteComparator;
 import io.github.stefan_zobel.freyja.common.DecodeException;
 import io.github.stefan_zobel.freyja.common.LittleEndian;
 import io.github.stefan_zobel.freyja.common.kv.Command;
+import io.github.stefan_zobel.freyja.common.kv.Command.Alarm;
+import io.github.stefan_zobel.freyja.common.kv.Command.ClearAlarm;
 import io.github.stefan_zobel.freyja.common.kv.Command.CloseSession;
 import io.github.stefan_zobel.freyja.common.kv.Command.Condition;
 import io.github.stefan_zobel.freyja.common.kv.Command.Conditional;
@@ -24,9 +29,12 @@ import io.github.stefan_zobel.freyja.common.kv.Command.KeepAlive;
 import io.github.stefan_zobel.freyja.common.kv.Command.Mutation;
 import io.github.stefan_zobel.freyja.common.kv.Command.Put;
 import io.github.stefan_zobel.freyja.common.kv.Command.RegisterSession;
+import io.github.stefan_zobel.freyja.common.kv.Command.SetAlarm;
+import io.github.stefan_zobel.freyja.common.kv.Command.SetClusterVersion;
 import io.github.stefan_zobel.freyja.common.kv.Command.Write;
 import io.github.stefan_zobel.freyja.common.kv.CommandCodec;
 import io.github.stefan_zobel.freyja.common.kv.CommandResult;
+import io.github.stefan_zobel.freyja.common.kv.CommandResult.AdminApplied;
 import io.github.stefan_zobel.freyja.common.kv.CommandResult.ConditionalApplied;
 import io.github.stefan_zobel.freyja.common.kv.CommandResult.Failed;
 import io.github.stefan_zobel.freyja.common.kv.CommandResult.Failure;
@@ -74,6 +82,8 @@ public final class KvStateMachine implements StateMachine, Closeable {
     private static final byte USER = 0x01;
     private static final byte[] META_KEY = {SYSTEM, 'm'};
     private static final byte[] CONFIG_KEY = {SYSTEM, 'c'};
+    private static final byte[] ALARM_KEY = {SYSTEM, 'a'};
+    private static final byte[] VERSION_KEY = {SYSTEM, 'v'};
     private static final byte SESSION = 's';
 
     /** What the state machine remembers of a session. */
@@ -94,11 +104,15 @@ public final class KvStateMachine implements StateMachine, Closeable {
     private ClusterConfig config;
     private long configIndex;
     private final TreeMap<Long, Session> sessions = new TreeMap<>();
+    private final EnumSet<Alarm> alarms = EnumSet.noneOf(Alarm.class);
+    private int clusterVersion;
 
-    private KvStateMachine(LsmEngine engine, long sessionTimeoutMillis, ClusterConfig initialConfig) {
+    private KvStateMachine(LsmEngine engine, long sessionTimeoutMillis, ClusterConfig initialConfig,
+                           int initialClusterVersion) {
         this.engine = engine;
         this.sessionTimeoutMillis = sessionTimeoutMillis;
         this.config = initialConfig;
+        this.clusterVersion = initialClusterVersion;
     }
 
     /**
@@ -108,13 +122,17 @@ public final class KvStateMachine implements StateMachine, Closeable {
      *                             activity by this much; it must be the same on all nodes
      * @param initialConfig        the configuration the cluster started with; it counts until
      *                             a CONFIG entry is applied
+     * @param initialClusterVersion the cluster version the cluster started with; it counts
+     *                             until the version is raised through the log
      */
     public static KvStateMachine open(StorageFileSystem fs, Path directory, EngineOptions options,
-                                      long sessionTimeoutMillis, ClusterConfig initialConfig) throws IOException {
+                                      long sessionTimeoutMillis, ClusterConfig initialConfig,
+                                      int initialClusterVersion) throws IOException {
         LsmEngine engine = LsmEngine.open(fs, directory, options);
         boolean opened = false;
         try {
-            KvStateMachine machine = new KvStateMachine(engine, sessionTimeoutMillis, initialConfig);
+            KvStateMachine machine = new KvStateMachine(engine, sessionTimeoutMillis, initialConfig,
+                    initialClusterVersion);
             machine.load();
             opened = true;
             return machine;
@@ -137,6 +155,19 @@ public final class KvStateMachine implements StateMachine, Closeable {
         if (stored != null) {
             configIndex = LittleEndian.getUint64(stored, 0);
             config = ClusterConfig.decode(Arrays.copyOfRange(stored, 8, stored.length));
+        }
+        byte[] storedAlarms = engine.get(ALARM_KEY);
+        if (storedAlarms != null) {
+            long bits = LittleEndian.getUint64(storedAlarms, 0);
+            for (Alarm alarm : Alarm.values()) {
+                if ((bits & 1L << alarm.ordinal()) != 0) {
+                    alarms.add(alarm);
+                }
+            }
+        }
+        byte[] storedVersion = engine.get(VERSION_KEY);
+        if (storedVersion != null) {
+            clusterVersion = LittleEndian.getInt32(storedVersion, 0);
         }
         try (ScanIterator scan = engine.scan(new byte[] {SYSTEM, SESSION}, new byte[] {SYSTEM, SESSION + 1})) {
             for (; scan.valid(); scan.next()) {
@@ -175,6 +206,16 @@ public final class KvStateMachine implements StateMachine, Closeable {
     /** The index of the entry that carried {@link #config}; 0 for the initial configuration. */
     public long configIndex() {
         return configIndex;
+    }
+
+    /** The alarms that are set, as of the applied index. */
+    public Set<Alarm> alarms() {
+        return Collections.unmodifiableSet(alarms);
+    }
+
+    /** The cluster version as of the applied index. */
+    public int clusterVersion() {
+        return clusterVersion;
     }
 
     /** The number of open sessions. */
@@ -282,9 +323,36 @@ public final class KvStateMachine implements StateMachine, Closeable {
                 pending.touchedSessions.add(close.sessionId());
                 yield new SessionOk();
             }
+            case SetAlarm set -> {
+                if (alarms.add(set.alarm())) {
+                    storeAlarms(pending);
+                }
+                yield new AdminApplied();
+            }
+            case ClearAlarm clear -> {
+                if (alarms.remove(clear.alarm())) {
+                    storeAlarms(pending);
+                }
+                yield new AdminApplied();
+            }
+            case SetClusterVersion set -> {
+                if (set.version() < clusterVersion) {
+                    yield new Failed(Failure.VERSION_TOO_OLD);
+                }
+                if (set.version() > clusterVersion) {
+                    clusterVersion = set.version();
+                    byte[] stored = new byte[4];
+                    LittleEndian.putInt32(stored, 0, clusterVersion);
+                    pending.batch.put(VERSION_KEY, stored);
+                }
+                yield new AdminApplied();
+            }
             case Write write -> inSession(write.sessionId(), write.sequence(), pending, () -> {
                 if (!valid(write.mutations())) {
                     return new Failed(Failure.INVALID);
+                }
+                if (alarms.contains(Alarm.NOSPACE) && puts(write.mutations())) {
+                    return new Failed(Failure.NO_SPACE);
                 }
                 write(write.mutations(), entry.index(), pending);
                 return new Written();
@@ -294,6 +362,12 @@ public final class KvStateMachine implements StateMachine, Closeable {
                         if (!valid(conditional.then()) || !valid(conditional.otherwise())
                                 || !validConditions(conditional.conditions())) {
                             return new Failed(Failure.INVALID);
+                        }
+                        // Decided without looking at the conditions: what a client may send
+                        // while the alarm is set does not depend on the data.
+                        if (alarms.contains(Alarm.NOSPACE)
+                                && (puts(conditional.then()) || puts(conditional.otherwise()))) {
+                            return new Failed(Failure.NO_SPACE);
                         }
                         boolean held = true;
                         for (Condition condition : conditional.conditions()) {
@@ -330,6 +404,10 @@ public final class KvStateMachine implements StateMachine, Closeable {
             return CommandCodec.decodeResult(session.lastResult);
         }
         CommandResult result = effect.run();
+        if (result instanceof Failed(Failure failure) && failure == Failure.NO_SPACE) {
+            // Not recorded: the client may send the command again when the alarm is cleared.
+            return result;
+        }
         session.lastSequence = sequence;
         session.lastResult = CommandCodec.encode(result);
         return result;
@@ -372,6 +450,25 @@ public final class KvStateMachine implements StateMachine, Closeable {
             }
         }
         return true;
+    }
+
+    private static boolean puts(List<Mutation> mutations) {
+        for (Mutation mutation : mutations) {
+            if (mutation instanceof Put) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void storeAlarms(Pending pending) {
+        long bits = 0;
+        for (Alarm alarm : alarms) {
+            bits |= 1L << alarm.ordinal();
+        }
+        byte[] stored = new byte[8];
+        LittleEndian.putUint64(stored, 0, bits);
+        pending.batch.put(ALARM_KEY, stored);
     }
 
     private static boolean validConditions(List<Condition> conditions) {

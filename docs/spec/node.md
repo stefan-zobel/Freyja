@@ -194,6 +194,10 @@ no leader can be elected. Recovery then is a manual, explicitly unsafe procedure
     started with counts.
   - `0x00 's'` + session id (`uint64`): last activity, last sequence number (`uint64` each),
     then the encoded result of the command with that sequence number.
+  - `0x00 'a'`: the alarms that are set, one bit per alarm (`uint64`; bit 0 `NOSPACE`).
+    Absent until an alarm is first set.
+  - `0x00 'v'`: the cluster version (`uint32`). Absent until it is first raised; until then
+    the version the cluster was created with counts.
 - The state is a function of the applied entries alone. No clock, no random number, and no
   local circumstance of a node enters it. In particular, the results of a batch do not depend
   on how the committed entries were cut into batches.
@@ -214,19 +218,24 @@ no leader can be elected. Recovery then is a manual, explicitly unsafe procedure
 - Commands inside one batch of entries see the effects of the commands before them.
 - Encoding of a command in the log: version (`uint8`, 1), time stamp of the leader in
   milliseconds (`uint64`), type (`uint8`: 1 write, 2 conditional, 3 register session,
-  4 keep alive, 5 close session), body.
+  4 keep alive, 5 close session, 6 set alarm, 7 clear alarm, 8 set cluster version), body.
   - Write: session id, sequence number (`uint64` each), mutations.
   - Conditional: session id, sequence number, conditions, mutations if all hold, mutations
     otherwise.
   - Keep alive, close session: session id.
+  - Set alarm, clear alarm: alarm (`uint8`: 0 `NOSPACE`). Set cluster version: version
+    (`uint32`).
   - A list is a count (`uint32`) and its elements; a byte string is a length (`uint32`) and
     its bytes. Mutation: kind (`uint8`: 1 put, 2 delete), key, and for a put the value.
     Condition: kind (`uint8`: 0 exists, 1 does not exist, 2 value equals, 3 `ModIndex`
     equals), key, value, `ModIndex` (`uint64`).
 - Encoding of a result: kind (`uint8`: 1 written, 2 conditional applied, 3 session
-  registered, 4 session ok, 5 failed), then for kind 2 whether the conditions held
-  (`uint8`), for kind 3 the session id (`uint64`), for kind 5 the failure (`uint8`:
-  0 no such session, 1 sequence too old, 2 no space, 3 invalid).
+  registered, 4 session ok, 5 failed, 6 admin applied), then for kind 2 whether the
+  conditions held (`uint8`), for kind 3 the session id (`uint64`), for kind 5 the failure
+  (`uint8`: 0 no such session, 1 sequence too old, 2 no space, 3 invalid, 4 version too
+  old).
+- Administrative commands (alarms, cluster version) belong to no session. They are
+  idempotent by their meaning.
 - The command types and their codec live in `kv-common`, because the client needs them too.
 
 ### 4.2 Sessions and Exactly-Once
@@ -262,6 +271,13 @@ no leader can be elected. Recovery then is a manual, explicitly unsafe procedure
   it proposes a `NOSPACE` alarm. While the alarm is set in the replicated state, all nodes
   reject writes other than deletes. An administrator clears it.
 - A node whose engine reports low free space raises the same alarm.
+- While `NOSPACE` is set, a batch that contains a put is rejected with `NO_SPACE`; for a
+  conditional batch a put in either of its two batches is enough, whatever the conditions
+  say. A batch of deletes only, and every session command, is applied. A rejected command
+  does not use up its sequence number: the client may send it again once the alarm is
+  cleared.
+- The cluster version only rises. A command that asks for a lower one fails with
+  `VERSION_TOO_OLD`; asking for the present one is accepted.
 
 ## 5. Snapshots
 

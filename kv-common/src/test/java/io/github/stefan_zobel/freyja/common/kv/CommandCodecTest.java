@@ -26,6 +26,9 @@ class CommandCodecTest {
                 new Command.RegisterSession(),
                 new Command.KeepAlive(17),
                 new Command.CloseSession(Long.MAX_VALUE),
+                new Command.SetAlarm(Command.Alarm.NOSPACE),
+                new Command.ClearAlarm(Command.Alarm.NOSPACE),
+                new Command.SetClusterVersion(7),
                 new Command.Write(5, 9, List.of()),
                 new Command.Write(5, 10, List.of(new Put(b("k"), b("value")), new Delete(b("gone")),
                         new Put(b("empty"), new byte[0]))),
@@ -51,6 +54,7 @@ class CommandCodecTest {
         List<CommandResult> results = List.of(new CommandResult.Written(),
                 new CommandResult.ConditionalApplied(true), new CommandResult.ConditionalApplied(false),
                 new CommandResult.SessionRegistered(77), new CommandResult.SessionOk(),
+                new CommandResult.AdminApplied(), new CommandResult.Failed(Failure.VERSION_TOO_OLD),
                 new CommandResult.Failed(Failure.NO_SUCH_SESSION), new CommandResult.Failed(Failure.INVALID));
         for (CommandResult result : results) {
             assertEquals(result, CommandCodec.decodeResult(CommandCodec.encode(result)));

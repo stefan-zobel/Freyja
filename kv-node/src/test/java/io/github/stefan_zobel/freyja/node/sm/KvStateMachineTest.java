@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
+import java.util.Set;
 
 import org.junit.jupiter.api.Test;
 
@@ -21,6 +22,7 @@ import io.github.stefan_zobel.freyja.common.kv.Command.Mutation;
 import io.github.stefan_zobel.freyja.common.kv.Command.Put;
 import io.github.stefan_zobel.freyja.common.kv.CommandCodec;
 import io.github.stefan_zobel.freyja.common.kv.CommandResult;
+import io.github.stefan_zobel.freyja.common.kv.CommandResult.AdminApplied;
 import io.github.stefan_zobel.freyja.common.kv.CommandResult.ConditionalApplied;
 import io.github.stefan_zobel.freyja.common.kv.CommandResult.Failed;
 import io.github.stefan_zobel.freyja.common.kv.CommandResult.Failure;
@@ -49,7 +51,7 @@ class KvStateMachineTest {
 
     private static KvStateMachine open(MemoryFileSystem fs) throws IOException {
         fs.createDirectories(DIR.getParent());
-        return KvStateMachine.open(fs, DIR, engineOptions(), TIMEOUT, THREE);
+        return KvStateMachine.open(fs, DIR, engineOptions(), TIMEOUT, THREE, 1);
     }
 
     private static byte[] b(String text) {
@@ -271,6 +273,63 @@ class KvStateMachineTest {
         }
     }
 
+    @Test
+    void whileTheSpaceAlarmIsSetOnlyDeletesAreAccepted() throws IOException {
+        MemoryFileSystem fs = new MemoryFileSystem();
+        Log log = new Log();
+        try (KvStateMachine machine = open(fs)) {
+            long session = ((SessionRegistered) apply(machine, log.command(new Command.RegisterSession()))).sessionId();
+            apply(machine, log.command(new Command.Write(session, 1, List.of(new Put(b("k"), b("v"))))));
+            assertTrue(machine.alarms().isEmpty());
+
+            assertEquals(new AdminApplied(), apply(machine, log.command(new Command.SetAlarm(Command.Alarm.NOSPACE))));
+            assertEquals(new AdminApplied(), apply(machine, log.command(new Command.SetAlarm(Command.Alarm.NOSPACE))));
+            assertEquals(Set.of(Command.Alarm.NOSPACE), machine.alarms());
+
+            Command put = new Command.Write(session, 2, List.of(new Put(b("more"), b("data"))));
+            assertEquals(new Failed(Failure.NO_SPACE), apply(machine, log.command(put)));
+            assertEquals(new Failed(Failure.NO_SPACE), apply(machine, log.command(new Command.Conditional(session, 2,
+                    List.of(Condition.exists(b("k"))), List.of(new Delete(b("k"))),
+                    List.of(new Put(b("x"), b("y")))))), "a put in either batch");
+            assertNull(machine.get(b("more")));
+            assertEquals("v", s(machine.get(b("k")).value()));
+            // Sessions and deletes still work.
+            assertEquals(new SessionOk(), apply(machine, log.command(new Command.KeepAlive(session))));
+            assertEquals(new ConditionalApplied(true), apply(machine, log.command(new Command.Conditional(session, 2,
+                    List.of(Condition.exists(b("k"))), List.of(new Delete(b("k"))), List.of()))));
+            assertNull(machine.get(b("k")));
+        }
+        try (KvStateMachine machine = open(fs)) {
+            assertEquals(Set.of(Command.Alarm.NOSPACE), machine.alarms(), "the alarm survives a restart");
+            long session = 1;
+            assertEquals(new AdminApplied(), apply(machine, log.command(new Command.ClearAlarm(Command.Alarm.NOSPACE))));
+            assertEquals(new AdminApplied(), apply(machine, log.command(new Command.ClearAlarm(Command.Alarm.NOSPACE))));
+            assertTrue(machine.alarms().isEmpty());
+            // The rejected command did not use up its sequence number.
+            assertEquals(new Written(), apply(machine, log.command(
+                    new Command.Write(session, 3, List.of(new Put(b("more"), b("data")))))));
+            assertEquals("data", s(machine.get(b("more")).value()));
+        }
+    }
+
+    @Test
+    void theClusterVersionOnlyRises() throws IOException {
+        MemoryFileSystem fs = new MemoryFileSystem();
+        Log log = new Log();
+        try (KvStateMachine machine = open(fs)) {
+            assertEquals(1, machine.clusterVersion(), "the version the cluster was created with");
+            assertEquals(new AdminApplied(), apply(machine, log.command(new Command.SetClusterVersion(1))));
+            assertEquals(new AdminApplied(), apply(machine, log.command(new Command.SetClusterVersion(3))));
+            assertEquals(new AdminApplied(), apply(machine, log.command(new Command.SetClusterVersion(3))));
+            assertEquals(new Failed(Failure.VERSION_TOO_OLD),
+                    apply(machine, log.command(new Command.SetClusterVersion(2))));
+            assertEquals(3, machine.clusterVersion());
+        }
+        try (KvStateMachine machine = open(fs)) {
+            assertEquals(3, machine.clusterVersion());
+        }
+    }
+
     /** A random command of a client that has the session {@code session}. */
     private static Command randomCommand(Random random, long session, long sequence) {
         List<Mutation> mutations = new ArrayList<>();
@@ -316,6 +375,12 @@ class KvStateMachineTest {
                     log.other(EntryType.NOOP, new byte[0]);
                 } else if (choice == 2) {
                     log.command(new Command.KeepAlive(session));
+                } else if (choice == 3) {
+                    log.command(random.nextBoolean() ? new Command.SetAlarm(Command.Alarm.NOSPACE)
+                            : new Command.ClearAlarm(Command.Alarm.NOSPACE));
+                    if (random.nextInt(4) == 0) {
+                        log.command(new Command.SetClusterVersion(1 + random.nextInt(4)));
+                    }
                 } else {
                     Command command = randomCommand(random, session, ++sequence);
                     log.command(command);

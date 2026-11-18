@@ -113,4 +113,31 @@ public sealed interface Command {
     /** Ends a session. */
     record CloseSession(long sessionId) implements Command {
     }
+
+    /** A condition of the whole cluster that restricts what it accepts. */
+    enum Alarm {
+        /** Space is short on some node: only deletes are accepted. */
+        NOSPACE
+    }
+
+    /** Sets an alarm. Setting an alarm that is set has no effect. */
+    record SetAlarm(Alarm alarm) implements Command {
+        public SetAlarm {
+            Objects.requireNonNull(alarm, "alarm");
+        }
+    }
+
+    /** Clears an alarm. Clearing an alarm that is not set has no effect. */
+    record ClearAlarm(Alarm alarm) implements Command {
+        public ClearAlarm {
+            Objects.requireNonNull(alarm, "alarm");
+        }
+    }
+
+    /**
+     * Raises the cluster version. The version never goes down; setting the version the
+     * cluster has is accepted and has no effect.
+     */
+    record SetClusterVersion(int version) implements Command {
+    }
 }
