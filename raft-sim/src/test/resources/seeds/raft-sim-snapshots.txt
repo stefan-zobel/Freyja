@@ -2,3 +2,4 @@
 1   # log damage was injected into what a snapshot covers
 56  # a snapshot was installed behind entries the node had applied in the meantime
 77  # a node whose state machine was ahead of its damaged log rejected every snapshot
+55  # catches a heartbeat that moves the commit index of a node whose log went back to an earlier state

@@ -149,7 +149,8 @@ class TraceValidationTest {
     void tracesOfRunsWithMembershipChangesTransfersAndLogDamageAreBehaviorsOfTheModel() {
         int[] validated = new int[1];
         Seeds.forEach(TraceValidationTest.class, "trace-validation-membership", 10, seed -> {
-            TlaTraceWriter trace = record(SimOptions.reconfiguring(seed), 2_500);
+            // The model lets a damaged log keep a true prefix; it does not know logs that go back.
+            TlaTraceWriter trace = record(SimOptions.reconfiguring(seed).withLogReverts(false), 2_500);
             List<TlaTraceWriter.Step> steps = trace.steps();
             if (steps.size() > MAX_STEPS) {
                 steps.subList(MAX_STEPS, steps.size()).clear();

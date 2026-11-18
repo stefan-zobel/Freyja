@@ -31,6 +31,9 @@ import java.util.Random;
  *                            for a cluster whose membership never changes
  * @param snapshots           whether nodes write snapshots of their state machine and cut
  *                            their logs
+ * @param logReverts          whether the stored log of a node that is down goes back to a
+ *                            state it once had now and then, with entries in it again that
+ *                            the node had removed
  */
 public record SimOptions(
         int nodes,
@@ -54,7 +57,8 @@ public record SimOptions(
         boolean partitions,
         boolean crashes,
         int spareNodes,
-        boolean snapshots) {
+        boolean snapshots,
+        boolean logReverts) {
 
     public SimOptions {
         if (nodes < 1 || tickMillis < 1 || tickSpread < 0 || tickSpread >= tickMillis
@@ -69,7 +73,7 @@ public record SimOptions(
     /** A quiet cluster: fast network, fast disks, default flow control, no faults. */
     public static SimOptions calm(int nodes, long seed) {
         return new SimOptions(nodes, seed, 10, 0, 1, 3, 2, 10, 1, 256, 1 << 20, 64L << 20, 10, 16,
-                100, 0, 0, 0, false, false, 0, false);
+                100, 0, 0, 0, false, false, 0, false, false);
     }
 
     /**
@@ -93,7 +97,15 @@ public record SimOptions(
      * learners, learners are promoted, voters (also the leader) and learners are removed.
      */
     public static SimOptions reconfiguring(long seed) {
-        return draw(seed, true, 3, 4);
+        return draw(seed, true, 3, 4).withLogReverts(true);
+    }
+
+    /** These settings with or without logs that go back to a state they once had. */
+    public SimOptions withLogReverts(boolean logReverts) {
+        return new SimOptions(nodes, seed, tickMillis, tickSpread, minDelay, maxDelay, maxPersistDelay,
+                electionTicks, heartbeatTicks, maxInflightAppends, maxAppendBytes, maxUncommittedBytes,
+                proposalInterval, maxPayload, checkedOperations, maxPause, dropPercent, duplicatePercent,
+                partitions, crashes, spareNodes, snapshots, logReverts);
     }
 
     /**
@@ -106,7 +118,7 @@ public record SimOptions(
                 o.maxPersistDelay, o.electionTicks, o.heartbeatTicks, o.maxInflightAppends,
                 o.maxAppendBytes, o.maxUncommittedBytes, o.proposalInterval, o.maxPayload,
                 o.checkedOperations, o.maxPause, o.dropPercent, o.duplicatePercent, o.partitions,
-                o.crashes, o.spareNodes, true);
+                o.crashes, o.spareNodes, true, true);
     }
 
     private static SimOptions draw(long seed, boolean faults) {
@@ -143,6 +155,6 @@ public record SimOptions(
         return new SimOptions(nodes, seed, 10, faults ? spread : 0, 1, maxDelay, maxPersistDelay,
                 10, heartbeatTicks, window, appendSize, backlog, interval, payload, 150, pause,
                 faults ? drop : 0, faults ? duplicate : 0, faults && partitions, faults && crashes,
-                spareNodes, false);
+                spareNodes, false, false);
     }
 }

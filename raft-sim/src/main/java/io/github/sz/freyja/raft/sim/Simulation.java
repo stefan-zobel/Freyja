@@ -14,6 +14,7 @@ import java.util.TreeSet;
 import io.github.sz.freyja.raft.ClusterConfig;
 import io.github.sz.freyja.raft.ConfigChange;
 import io.github.sz.freyja.raft.EntryType;
+import io.github.sz.freyja.raft.HardState;
 import io.github.sz.freyja.raft.LogEntry;
 import io.github.sz.freyja.raft.Notification;
 import io.github.sz.freyja.raft.Notification.ProposalAccepted;
@@ -102,6 +103,10 @@ public final class Simulation {
         public long snapshotsInstalled;
         public long snapshotsRejected;
         public long logDamages;
+        /** Times the stored log of a node went back to a state it once had. */
+        public long logReverts;
+        /** Entries that were in a log again after a write had removed them. */
+        public long entriesBackInALog;
         /** Times a node left log-recovering mode. */
         public long logRecoveries;
 
@@ -119,7 +124,8 @@ public final class Simulation {
                     + " staleLeaderReads=" + staleLeaderReads + " configChanges=" + configChanges
                     + " configRejections=" + configRejections + " joined=" + joined + " retired=" + retired
                     + " transfers=" + transfers + " transfersAborted=" + transfersAborted
-                    + " logDamages=" + logDamages + " logRecoveries=" + logRecoveries
+                    + " logDamages=" + logDamages + " logReverts=" + logReverts
+                    + " entriesBackInALog=" + entriesBackInALog + " logRecoveries=" + logRecoveries
                     + " snapshotsCreated=" + snapshotsCreated + " snapshotsSent=" + snapshotsSent
                     + " snapshotsInstalled=" + snapshotsInstalled + " snapshotsRejected=" + snapshotsRejected;
         }
@@ -652,6 +658,9 @@ public final class Simulation {
     /** A write reaches the disk. A truncation removes entries that could not be read. */
     private static void store(SimNode node, Ready ready) {
         node.store.store(ready);
+        if (node.logReverted && ready.hardState() != null && ready.hardState().logRecovering()) {
+            node.logReverted = false; // the hard state says it now; the loss is not found again
+        }
         if (node.damagedFrom != 0 && ready.truncateSuffixFrom() != -1
                 && ready.truncateSuffixFrom() <= node.damagedFrom) {
             node.damagedFrom = 0;
@@ -801,6 +810,9 @@ public final class Simulation {
             kinds.add(this::transferLeadership);
             kinds.add(this::damageLog);
         }
+        if (options.logReverts()) {
+            kinds.add(this::revertLog);
+        }
         if (!kinds.isEmpty()) {
             kinds.get(random.nextInt(kinds.size())).run();
         }
@@ -892,24 +904,37 @@ public final class Simulation {
                 System.arraycopy(node.snapshot.registers(), 0, node.registers, 0, node.registers.length);
             }
         }
-        check(node.applied <= node.store.lastIndex() || node.store.hardState().logRecovering(),
-                "node " + node.id + " had applied " + node.applied + " entries, but only "
-                        + node.store.lastIndex() + " are stored");
         observation.beginStep();
         observation.resetLog(node.id, fullLog(node));
-        node.raft = RaftNode.create(node.config,
-                new PersistedState(node.store.hardState(),
-                        node.snapshot == null ? SnapshotMeta.none(node.initialConfig) : node.snapshot.meta()),
-                node.store, node.applied);
+        node.raft = coreOnStoredState(node);
         checkComplete();
         if (listener != null) {
             listener.restarted(now, node.id, node.view());
         }
         node.recovering = node.view().logRecovering();
-        if (node.damagedFrom != 0) {
+        if (node.logReverted) {
+            // The store vouches for what it holds and for nothing after it.
+            step(node, new RaftEvent.LogDamaged(node.store.lastIndex() + 1));
+        } else if (node.damagedFrom != 0) {
             // The truncation did not reach the disk before the crash: the damage is found again.
             step(node, new RaftEvent.LogDamaged(node.damagedFrom));
         }
+    }
+
+    /** A core on what the node finds on its disk. */
+    private static RaftNode coreOnStoredState(SimNode node) {
+        // A node that finds at its start that its log lost entries starts in log-recovering
+        // mode, as the runtime of a node does; the report of the loss makes the flag durable.
+        HardState stored = node.store.hardState();
+        HardState start = !node.logReverted ? stored : new HardState(stored.term(), stored.votedFor(), true,
+                stored.logEpoch(), stored.lostLogIndex(), stored.lostLogTerm());
+        check(node.applied <= node.store.lastIndex() || start.logRecovering(),
+                "node " + node.id + " had applied " + node.applied + " entries, but only "
+                        + node.store.lastIndex() + " are stored");
+        return RaftNode.create(node.config,
+                new PersistedState(start,
+                        node.snapshot == null ? SnapshotMeta.none(node.initialConfig) : node.snapshot.meta()),
+                node.store, node.applied);
     }
 
     private void partition() {
@@ -989,7 +1014,9 @@ public final class Simulation {
             return;
         }
         SimNode leader = nodes.get(knownLeader);
-        if (!leader.up || leader.view().role() != Role.LEADER) {
+        // A leader that pauses would take the request later, when this turn's picture of the
+        // cluster is out of date: a spare that it then adds might have been shut down for good.
+        if (!leader.up || leader.view().role() != Role.LEADER || now < leader.pausedUntil) {
             return;
         }
         ClusterConfig config = leader.view().config();
@@ -1026,6 +1053,22 @@ public final class Simulation {
             return;
         }
         ConfigChange change = choices.get(random.nextInt(choices.size()));
+        // No administrator asks for a change that makes a majority depend on a node that
+        // does not know what its log has lost: such a node gives no vote, and the cluster
+        // would be without a leader for good (docs/spec/raft.md, section 8, lost majority).
+        // A change that does not apply is left to the core, which refuses it.
+        ClusterConfig next = config.with(change);
+        if (next != null) {
+            int voting = 0;
+            for (int voter : next.voters()) {
+                if (!abstains(nodes.get(voter))) {
+                    voting++;
+                }
+            }
+            if (voting < next.quorum()) {
+                return;
+            }
+        }
         if (change instanceof ConfigChange.AddLearner) {
             spare.started = true;
             spare.up = true;
@@ -1033,6 +1076,12 @@ public final class Simulation {
         }
         deliver(leader, new RaftEvent.ProposeConfigChange(CONFIG_BASE + stats.configChanges
                 + stats.configRejections + stats.joined * 1000, change));
+    }
+
+    /** Whether the node has lost log entries it never saw, or is about to find that out. */
+    private static boolean abstains(SimNode node) {
+        HardState stored = node.store.hardState();
+        return node.logReverted || (stored.logRecovering() && stored.lostLogTerm() == HardState.UNKNOWN_TERM);
     }
 
     /**
@@ -1064,11 +1113,24 @@ public final class Simulation {
         SimNode victim = someNode();
         long first = victim.store.firstIndex();
         long last = victim.store.lastIndex();
-        if (!victim.up || last < first || victim.damagedFrom != 0) {
+        if (!victim.up || last < first || victim.damagedFrom != 0 || victim.logReverted
+                || !majorityIntactWithout(victim)) {
             return;
         }
-        // Every configuration in force on some node must keep a majority of intact logs.
-        // (A configuration change that is not committed yet is in force on some nodes only.)
+        // Only stored entries can be damaged, not what a snapshot covers.
+        long from = random.nextBoolean() ? Math.max(first, last - random.nextInt(10))
+                : first + random.nextInt((int) (last - first + 1));
+        stats.logDamages++;
+        victim.damagedFrom = from;
+        deliver(victim, new RaftEvent.LogDamaged(from));
+    }
+
+    /**
+     * Whether every configuration in force on some node keeps a majority of intact logs if
+     * the log of {@code victim} is damaged. (A configuration change that is not committed yet
+     * is in force on some nodes only.)
+     */
+    private boolean majorityIntactWithout(SimNode victim) {
         for (SimNode observer : nodes) {
             if (!observer.started || observer.retired) {
                 continue;
@@ -1077,21 +1139,44 @@ public final class Simulation {
             int intact = 0;
             for (int voter : config.voters()) {
                 SimNode node = nodes.get(voter);
-                if (node != victim && node.started && !node.retired && node.damagedFrom == 0
+                if (node != victim && node.started && !node.retired && node.damagedFrom == 0 && !node.logReverted
                         && !node.view().logRecovering() && !node.store.hardState().logRecovering()) {
                     intact++;
                 }
             }
             if (!config.voters().isEmpty() && intact < config.quorum()) {
-                return;
+                return false;
             }
         }
-        // Only stored entries can be damaged, not what a snapshot covers.
-        long from = random.nextBoolean() ? Math.max(first, last - random.nextInt(10))
-                : first + random.nextInt((int) (last - first + 1));
+        return true;
+    }
+
+    /**
+     * A node is down and the newest files of its log are lost: the stored log is what it was
+     * some writes ago, and entries that those writes had removed are in it again
+     * (docs/spec/node.md, section 3.3). The node finds the loss when it starts. As for any
+     * damage, a majority of the voters must hold an intact log.
+     */
+    private void revertLog() {
+        if (knownLeader == RaftNode.NO_NODE) {
+            return;
+        }
+        SimNode victim = someNode();
+        if (!victim.started || victim.retired || victim.damagedFrom != 0 || victim.logReverted
+                || !majorityIntactWithout(victim)) {
+            return;
+        }
+        crash(victim); // what was on its way to the disk may still have reached it
+        int writes = victim.store.revertible();
+        if (writes == 0) {
+            return;
+        }
+        stats.logReverts++;
         stats.logDamages++;
-        victim.damagedFrom = from;
-        deliver(victim, new RaftEvent.LogDamaged(from));
+        stats.entriesBackInALog += victim.store.revert(1 + random.nextInt(writes));
+        victim.logReverted = true;
+        // Whoever looks at the node while it is down sees what its disk holds now.
+        victim.raft = coreOnStoredState(victim);
     }
 
     /** Asks the leader to hand leadership to another voter, which may be down or cut off. */

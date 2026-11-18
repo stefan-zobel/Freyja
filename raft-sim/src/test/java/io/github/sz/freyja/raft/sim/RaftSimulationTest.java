@@ -109,6 +109,8 @@ class RaftSimulationTest {
         long transfersAborted;
         long logDamages;
         long logRecoveries;
+        long logReverts;
+        long entriesBackInALog;
         long snapshotsCreated;
         long snapshotsInstalled;
         long snapshotsRejected;
@@ -136,6 +138,8 @@ class RaftSimulationTest {
             transfersAborted += stats.transfersAborted;
             logDamages += stats.logDamages;
             logRecoveries += stats.logRecoveries;
+            logReverts += stats.logReverts;
+            entriesBackInALog += stats.entriesBackInALog;
             snapshotsCreated += stats.snapshotsCreated;
             snapshotsInstalled += stats.snapshotsInstalled;
             snapshotsRejected += stats.snapshotsRejected;
@@ -150,7 +154,8 @@ class RaftSimulationTest {
                     + " readsServed=" + readsServed + " historyOperations=" + historyOperations
                     + " configChanges=" + configChanges + " joined=" + joined + " retired=" + retired
                     + " transfers=" + transfers + " transfersAborted=" + transfersAborted
-                    + " logDamages=" + logDamages + " logRecoveries=" + logRecoveries
+                    + " logDamages=" + logDamages + " logReverts=" + logReverts + " entriesBackInALog="
+                    + entriesBackInALog + " logRecoveries=" + logRecoveries
                     + " snapshotsCreated=" + snapshotsCreated + " snapshotsInstalled=" + snapshotsInstalled
                     + " snapshotsRejected=" + snapshotsRejected;
         }
@@ -212,6 +217,8 @@ class RaftSimulationTest {
             assertTrue(totals.transfers > totals.runs / 2, summary);
             assertTrue(totals.transfersAborted > 0, summary);
             assertTrue(totals.logDamages > totals.runs / 2, summary);
+            assertTrue(totals.logReverts > totals.runs / 4, summary);
+            assertTrue(totals.entriesBackInALog > 0, summary);
             assertTrue(totals.logRecoveries > totals.runs / 4, summary);
             assertTrue(totals.elections > 3 * totals.runs, summary);
             assertTrue(totals.truncations > 0, summary);
@@ -232,6 +239,8 @@ class RaftSimulationTest {
             assertTrue(totals.snapshotsInstalled > totals.runs, summary);
             assertTrue(totals.configChanges > 2 * totals.runs, summary);
             assertTrue(totals.crashes > totals.runs / 2, summary);
+            assertTrue(totals.logReverts > totals.runs / 4, summary);
+            assertTrue(totals.entriesBackInALog > 0, summary);
             assertTrue(totals.logRecoveries > 0, summary);
             assertTrue(totals.historyOperations > 20 * totals.runs, summary);
         }

@@ -3,3 +3,4 @@
 76  # a node that had caught up stayed in log-recovering mode: an idle leader sent no append
 9   # a majority came to depend on a node in log-recovering mode
 59  # the same through a change that raced with the damage; the node now votes with the log it lost
+129 # catches a heartbeat that moves the commit index of a node whose log went back to an earlier state

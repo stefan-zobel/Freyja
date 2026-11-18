@@ -1,5 +1,6 @@
 package io.github.sz.freyja.raft.sim;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -12,6 +13,10 @@ import io.github.sz.freyja.raft.Ready;
  * The stable storage of a simulated node: what survives a crash. A write reaches it at the
  * moment the simulation declares the write durable, not before. Entries that a snapshot
  * covers are removed from its start.
+ *
+ * <p>The store remembers how to take its latest writes back. That is what the loss of the
+ * newest files of a log does to the log store of a node (docs/spec/node.md, section 3.3): the
+ * log is in a state it once had, and entries that a later write had removed are in it again.
  */
 public final class SimLog implements LogView {
 
@@ -19,6 +24,14 @@ public final class SimLog implements LogView {
     private final List<LogEntry> entries = new ArrayList<>();
     private long offset;
     private HardState hardState = HardState.INITIAL;
+
+    /** How to take one write back: where the log ended before it, and what it removed. */
+    private record Undo(long lastBefore, long truncateFrom, List<LogEntry> removed) {
+    }
+
+    /** The latest writes that changed the log, oldest first; at most {@value #MAX_UNDO}. */
+    private final ArrayDeque<Undo> undo = new ArrayDeque<>();
+    private static final int MAX_UNDO = 64;
 
     @Override
     public long firstIndex() {
@@ -83,12 +96,22 @@ public final class SimLog implements LogView {
             hardState = next;
         }
         long truncate = ready.truncateSuffixFrom();
+        long lastBefore = lastIndex();
+        List<LogEntry> removed = List.of();
         if (truncate != -1) {
             if (truncate <= offset) {
                 throw new AssertionError("truncation at " + truncate + " reaches into the snapshot at " + offset);
             }
             if (truncate <= lastIndex()) {
-                entries.subList((int) (truncate - offset - 1), entries.size()).clear();
+                List<LogEntry> suffix = entries.subList((int) (truncate - offset - 1), entries.size());
+                removed = List.copyOf(suffix);
+                suffix.clear();
+            }
+        }
+        if (truncate != -1 || !ready.entries().isEmpty()) {
+            undo.addLast(new Undo(lastBefore, truncate, removed));
+            if (undo.size() > MAX_UNDO) {
+                undo.removeFirst();
             }
         }
         for (LogEntry entry : ready.entries()) {
@@ -97,6 +120,39 @@ public final class SimLog implements LogView {
             }
             entries.add(entry);
         }
+    }
+
+    /** The number of writes that {@link #revert} can take back. */
+    int revertible() {
+        return undo.size();
+    }
+
+    /**
+     * Takes the latest {@code writes} writes back: the log is what it was before them, as far
+     * as no snapshot covers it. Entries that those writes had removed are in the log again.
+     * The hard state stays; it is not stored with the log.
+     *
+     * @return the number of entries that are in the log again though a write had removed them
+     */
+    int revert(int writes) {
+        int back = 0;
+        for (int i = 0; i < writes; i++) {
+            Undo last = undo.removeLast();
+            // What the write appended goes, and with it what it left of the log it cut.
+            long cutFrom = last.truncateFrom() != -1 && last.truncateFrom() <= last.lastBefore()
+                    ? last.truncateFrom() : last.lastBefore() + 1;
+            cutFrom = Math.max(cutFrom, offset + 1);
+            if (cutFrom <= lastIndex()) {
+                entries.subList((int) (cutFrom - offset - 1), entries.size()).clear();
+            }
+            for (LogEntry entry : last.removed()) {
+                if (entry.index() == lastIndex() + 1) {
+                    entries.add(entry);
+                    back++;
+                }
+            }
+        }
+        return back;
     }
 
     /** Removes the entries up to {@code through}: a snapshot covers them. */
@@ -125,6 +181,7 @@ public final class SimLog implements LogView {
             truncatePrefix(index);
         } else {
             entries.clear();
+            undo.clear(); // the log was started anew
         }
         offset = index;
     }

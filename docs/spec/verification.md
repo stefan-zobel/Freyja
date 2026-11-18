@@ -105,11 +105,21 @@ deleted. This test must pass on Windows.
     is injected only while a majority of the voters holds an intact log: the protocol
     repairs a minority, not a lost majority. The seed set must reach nodes that enter the
     log-recovering mode and nodes that leave it.
+  - A log that goes back, in the same seed set: a node is down, and its stored log becomes
+    what it was a number of writes ago, as the log store of a node does when its newest
+    files are lost (`node.md` §3.3). Entries that those writes had removed are in the log
+    again. The node finds the loss at its start, does not know what it lost, and gives no
+    vote. The seed set must reach logs that go back and entries that are in a log again.
+    The simulator asks for no membership change that would make a majority depend on a node
+    that does not know what it lost; that is the lost majority of `raft.md` §8, which a
+    node refuses at its admin interface (`operations.md`).
   - Mutations of the mode that the simulator catches: a recovering node that votes with
     the log it holds now or starts an election, one that leaves the mode at once, a leader
     that keeps the match index of a follower of a new epoch, an acknowledgment that outlives
-    its entries. Leaving the mode on an append that does not name the present epoch is
-    caught only by a unit test of the core; the simulator has not reached that interleaving.
+    its entries, a heartbeat that moves the commit index of a node in the mode (caught
+    through logs that go back; a seed of each of the two seed sets is in the corpus for
+    it). Leaving the mode on an append that does not name the present epoch is caught only
+    by a unit test of the core; the simulator has not reached that interleaving.
   - Mutations of snapshots that the simulator catches: a commit index that moves during an
     installation, a snapshot installed behind the commit index, a state machine that goes
     back, entries accepted during an installation. Keeping a suffix that disagrees with
@@ -448,9 +458,10 @@ Open in this milestone:
 
 - Traces of whole-system runs for the model (§2.7). The model has no snapshots, so only
   runs without shortened logs can be validated, and validating needs runs of TLC.
-- The model and the Raft simulator both let a damaged log keep a true prefix. Neither knows
-  entries that come back after the record of their removal is lost (`node.md` §3.3); the
-  whole-system simulation does.
+- The model lets a damaged log keep a true prefix. It does not know entries that come back
+  after the record of their removal is lost (`node.md` §3.3); the Raft simulator and the
+  whole-system simulation do. Runs of the Raft simulator that are validated against the
+  model are therefore recorded without logs that go back.
 - Probes of §3.1 that are not counted yet: torn tail truncated, damage detected through a
   sync point, write stalled by backpressure (they happen below the node and are covered by
   the storage tests), upgrade finalized and downgrade before finalization (milestone D1).
@@ -476,7 +487,8 @@ What the simulation found while it was built:
   old entries back. The leader, which did not know of the damage yet, sent a heartbeat with
   a commit index beyond them, and the node applied entries that were never committed. A
   node in log-recovering mode now takes no commit index from a heartbeat (`raft.md` §8). The
-  Raft simulator could not find this: there a damaged log always keeps a true prefix.
+  Raft simulator could not find this then: there a damaged log always kept a true prefix.
+  It has logs that go back since (§2.4) and finds the fault.
 
 Mutations that the simulation catches: a repeated command applied again; an older command
 of a session applied; the log shortened without a flush before; the applied index not

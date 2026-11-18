@@ -74,8 +74,9 @@ Rules:
     the Raft invariants over complete nodes.
   - Open: traces of whole-system runs for the model, which needs runs of TLC; the probes
     that are counted below the node (`verification.md` §3).
-  - To strengthen the Raft simulator: let a damaged log hand back entries that were cut off
-    before the damage, as the log store of a node does.
+  - The Raft simulator lets the log of a node go back to an earlier state, with entries in
+    it again that were cut off, as the log store of a node does after damage
+    (`verification.md` §2.4).
 - **C4.** Real transport with virtual threads. Wire protocol with handshake. `kv-client`.
   Admin API and command-line tool. End-to-end test with real processes.
   - Done so far: the client protocol with its codec (`kv-common`); the service that serves
@@ -141,7 +142,6 @@ leaves this list in the change that completes it.
 | Exhaustive check of a configuration with membership change | B3 | A run of TLC; the last attempt ran out of memory |
 | Export of whole-system runs as traces, and their validation | C3 | The export is not written; then runs of TLC |
 | The probes that are counted below the node | C3 | `verification.md` §3 |
-| A damaged log in the Raft simulator hands back entries cut off before the damage | C3 | Strengthens `raft-sim` |
 | Workloads during compaction, snapshot transfer, and follower catch-up | D3 | `verification.md` §7 |
 | Write and space amplification in the results | D3 | Needs figures of the nodes |
 | Overload tests at twice the sustainable load | D3 | |

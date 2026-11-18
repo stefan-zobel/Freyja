@@ -37,6 +37,11 @@ public final class SimNode {
      * asks for has reached the disk; 0 if the stored log is intact.
      */
     long damagedFrom;
+    /**
+     * The stored log went back to a state it once had while the node was down. The node
+     * finds that at every start until its hard state says that it is in log-recovering mode.
+     */
+    boolean logReverted;
     /** Whether the node was in log-recovering mode after its latest step. */
     boolean recovering;
 
