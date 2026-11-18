@@ -160,8 +160,7 @@ leaves this list in the change that completes it.
 | Multi-version simulation harness | D1 | A second release |
 | Upgrade procedure with finalization, verified in simulation and with real processes | E3 | A second release |
 | Compatibility suite | E3 | A first release to capture, a second to read it |
-| A scheduled job for the continuous simulation | D1 | A CI system |
-| CI green on Windows, Linux, and macOS | — | The workflow exists and has never run; it needs the remote repository |
+| A scheduled job for the continuous simulation | D1 | A decision of the project owner: the build workflow is started by hand only |
 | Every procedure of the runbook executed once | E3 | A real cluster |
 | Review against the exit criteria | E3 | Everything above |
 
