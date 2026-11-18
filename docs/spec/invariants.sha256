@@ -1,5 +1,5 @@
 # SHA-256 checksums of the protected invariant files (docs/spec/verification.md, section 2.6).
 # A test compares them. A changed checksum means a deliberate change of an invariant:
-# these files are changed only on the explicit instruction of the project lead.
+# these files are changed only on the explicit instruction of the project owner.
 # The checksum is taken over the file with LF line ends (sha256sum on such a checkout).
-504030621ccdfbdb5ff8ba96d973f0990ebbbbe692341b5300d246816b8f7df5  raft-sim/src/main/java/io/github/stefan_zobel/freyja/raft/sim/SafetyInvariants.java
+b05bfb9f12773c876af55ddfcfe2de994a429e934ad94e4407858dd06ace4d2e  raft-sim/src/main/java/io/github/stefan_zobel/freyja/raft/sim/SafetyInvariants.java

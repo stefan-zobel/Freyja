@@ -12,6 +12,8 @@ import java.util.Set;
 import java.util.TreeSet;
 
 import io.github.stefan_zobel.freyja.raft.ClusterConfig;
+import io.github.stefan_zobel.freyja.raft.ConfigChange;
+import io.github.stefan_zobel.freyja.raft.EntryType;
 import io.github.stefan_zobel.freyja.raft.LogEntry;
 import io.github.stefan_zobel.freyja.raft.Notification;
 import io.github.stefan_zobel.freyja.raft.Notification.ProposalAccepted;
@@ -88,6 +90,10 @@ public final class Simulation {
         public long readsRejected;
         /** Reads sent to the leader of before, right after a write completed under a new one. */
         public long staleLeaderReads;
+        public long configChanges;
+        public long configRejections;
+        public long joined;
+        public long retired;
 
         @Override
         public String toString() {
@@ -100,7 +106,8 @@ public final class Simulation {
                     + " diskStalls=" + diskStalls
                     + " partitions=" + partitions + " checkedOperations=" + checkedOperations
                     + " readsServed=" + readsServed + " readsRejected=" + readsRejected
-                    + " staleLeaderReads=" + staleLeaderReads;
+                    + " staleLeaderReads=" + staleLeaderReads + " configChanges=" + configChanges
+                    + " configRejections=" + configRejections + " joined=" + joined + " retired=" + retired;
         }
     }
 
@@ -156,6 +163,8 @@ public final class Simulation {
 
     /** Request ids from here on belong to checked operations. */
     private static final long CHECKED_BASE = 1L << 50;
+    /** Request ids from here on belong to membership changes. */
+    private static final long CONFIG_BASE = 1L << 55;
     private static final int CHECKED_KEYS = 3;
     /** The checked client waits for answers to at most this many operations at a time. */
     private static final int CHECKED_CONCURRENCY = 4;
@@ -220,22 +229,27 @@ public final class Simulation {
         this.maxPersistDelay = options.maxPersistDelay();
         this.dropPercent = options.dropPercent();
         this.duplicatePercent = options.duplicatePercent();
-        this.blocked = new boolean[options.nodes()][options.nodes()];
-        this.observation = new Observation(options.nodes());
+        int total = options.nodes() + options.spareNodes();
+        this.blocked = new boolean[total][total];
 
         Set<Integer> ids = new TreeSet<>();
         for (int i = 0; i < options.nodes(); i++) {
             ids.add(i);
         }
         cluster = new ClusterConfig(ids, Set.of());
-        for (int i = 0; i < options.nodes(); i++) {
+        this.observation = new Observation(total, cluster);
+        for (int i = 0; i < total; i++) {
             RaftConfig config = new RaftConfig(i, random.nextLong(), options.electionTicks(),
                     options.heartbeatTicks(), options.maxInflightAppends(), options.maxAppendBytes(),
-                    options.maxUncommittedBytes());
+                    options.maxUncommittedBytes(), 50);
             int spread = options.tickSpread();
             int interval = options.tickMillis() + (spread == 0 ? 0 : random.nextInt(2 * spread + 1) - spread);
             SimNode node = new SimNode(i, config, interval);
-            node.raft = RaftNode.create(config, PersistedState.initial(cluster), node.store, 0);
+            // A spare node knows of no cluster. It is started when it is to join.
+            node.initialConfig = i < options.nodes() ? cluster : ClusterConfig.EMPTY;
+            node.started = i < options.nodes();
+            node.up = node.started;
+            node.raft = RaftNode.create(config, PersistedState.initial(node.initialConfig), node.store, 0);
             nodes.add(node);
             schedule(random.nextInt(interval) + 1, () -> tick(node));
         }
@@ -245,6 +259,9 @@ public final class Simulation {
         schedule(options.proposalInterval(), this::loadTurn);
         schedule(100, this::checkedTurn);
         schedule(500, this::faultTurn);
+        if (options.spareNodes() > 0) {
+            schedule(700, this::membershipTurn);
+        }
     }
 
     // ------------------------------------------------------------------ control
@@ -274,7 +291,7 @@ public final class Simulation {
         duplicatePercent = 0;
         healPartition();
         for (SimNode node : nodes) {
-            if (!node.up) {
+            if (!node.up && node.started && !node.retired) {
                 restart(node);
             }
         }
@@ -336,10 +353,7 @@ public final class Simulation {
     private String notConverged() {
         SimNode leader = null;
         for (SimNode node : nodes) {
-            if (!node.up) {
-                return "node " + node.id + " is down";
-            }
-            if (node.view().role() == Role.LEADER) {
+            if (node.up && node.view().role() == Role.LEADER) {
                 if (leader != null) {
                     return "two leaders: " + leader.view() + " and " + node.view();
                 }
@@ -347,14 +361,23 @@ public final class Simulation {
             }
         }
         if (leader == null) {
-            return "no leader: " + nodes.stream().map(SimNode::view).toList();
+            return "no leader: " + nodes.stream().filter(n -> n.up).map(SimNode::view).toList();
         }
+        // Only the members count: a node that has left the cluster may know anything.
+        ClusterConfig config = leader.view().config();
         long last = leader.view().lastLogIndex();
         for (SimNode node : nodes) {
+            if (!config.voters().contains(node.id) && !config.learners().contains(node.id)) {
+                continue;
+            }
+            if (!node.up) {
+                return "member " + node.id + " is down";
+            }
             ProtocolState view = node.view();
             if (view.term() != leader.view().term() || view.leaderId() != leader.id
                     || view.lastLogIndex() != last || view.commitIndex() != last
-                    || view.durableIndex() != last || node.applied != last) {
+                    || view.durableIndex() != last || node.applied != last
+                    || !view.config().equals(config)) {
                 return "node " + node.id + " has not converged: " + view + ", applied "
                         + node.applied + "; leader: " + leader.view();
             }
@@ -486,6 +509,7 @@ public final class Simulation {
                     case ReadIndexRejected rejected -> readIndexRejected(rejected);
                     case RoleChanged _ -> {
                     }
+                    case Notification.ConfigChanged changed -> node.configIndex = changed.index();
                 }
             }
         }
@@ -528,6 +552,9 @@ public final class Simulation {
                 case ReadIndexRejected n ->
                         mix(mix(mix(mix(h, 14), n.requestId()), n.reason().ordinal()), n.leaderHint());
                 case RoleChanged n -> mix(mix(mix(mix(h, 15), n.role().ordinal()), n.term()), n.leaderId());
+                case Notification.ConfigChanged n ->
+                        mix(mix(mix(h, 16), n.index()), n.config().voters().hashCode() * 31L
+                                + n.config().learners().hashCode());
             };
         }
         return h;
@@ -624,10 +651,18 @@ public final class Simulation {
 
     /** A random node, with a preference for the leader the clients know. */
     private SimNode someNode() {
-        int target = knownLeader != RaftNode.NO_NODE && random.nextBoolean()
-                ? knownLeader
-                : random.nextInt(nodes.size());
-        return nodes.get(target);
+        return nodes.get(knownLeader != RaftNode.NO_NODE && random.nextBoolean() ? knownLeader : anyNode());
+    }
+
+    /** The id of a random node among those that were started and not retired. */
+    private int anyNode() {
+        List<SimNode> live = new ArrayList<>();
+        for (SimNode node : nodes) {
+            if (node.started && !node.retired) {
+                live.add(node);
+            }
+        }
+        return live.get(random.nextInt(live.size())).id;
     }
 
     private void pauseSomeNode() {
@@ -674,7 +709,7 @@ public final class Simulation {
         node.pausedUntil = 0;
         long incarnation = node.incarnation;
         schedule(50 + random.nextInt(1500), () -> {
-            if (!node.up && node.incarnation == incarnation) {
+            if (!node.up && !node.retired && node.incarnation == incarnation) {
                 restart(node);
             }
         });
@@ -687,6 +722,7 @@ public final class Simulation {
         node.lastReadySequence = 0;
         node.lastPersistTime = now;
         node.lastSeenTerm = node.store.hardState().term();
+        node.configIndex = 0;
         if (random.nextBoolean()) {
             // The state machine did not survive; it is rebuilt from the log.
             node.applied = 0;
@@ -697,7 +733,7 @@ public final class Simulation {
         observation.beginStep();
         observation.resetLog(node.id, node.store.entries());
         node.raft = RaftNode.create(node.config,
-                new PersistedState(node.store.hardState(), SnapshotMeta.none(cluster), cluster),
+                new PersistedState(node.store.hardState(), SnapshotMeta.none(node.initialConfig)),
                 node.store, node.applied);
         checkComplete();
         if (listener != null) {
@@ -769,6 +805,93 @@ public final class Simulation {
         });
     }
 
+    // ------------------------------------------------------------------ membership
+
+    /**
+     * Now and then asks the leader for a membership change: a spare node joins as a learner,
+     * a learner is promoted or removed, a voter (also the leader itself) is removed. Nodes
+     * that have left the cluster keep running for a while and are then shut down for good.
+     */
+    private void membershipTurn() {
+        schedule(300 + random.nextInt(900), this::membershipTurn);
+        if (!faults || knownLeader == RaftNode.NO_NODE) {
+            return;
+        }
+        SimNode leader = nodes.get(knownLeader);
+        if (!leader.up || leader.view().role() != Role.LEADER) {
+            return;
+        }
+        ClusterConfig config = leader.view().config();
+        boolean settled = leader.view().commitIndex() >= leader.configIndex;
+        for (SimNode node : nodes) {
+            if (settled && node.started && !node.retired && node != leader && !memberAnywhere(node.id)
+                    && random.nextInt(3) == 0) {
+                retire(node);
+            }
+        }
+        List<ConfigChange> choices = new ArrayList<>();
+        SimNode spare = null;
+        for (SimNode node : nodes) {
+            if (!node.started && spare == null) {
+                spare = node;
+            }
+        }
+        if (spare != null) {
+            choices.add(new ConfigChange.AddLearner(spare.id));
+        }
+        for (int learner : config.learners()) {
+            choices.add(new ConfigChange.PromoteLearner(learner));
+            choices.add(new ConfigChange.PromoteLearner(learner)); // more likely than removal
+            choices.add(new ConfigChange.RemoveLearner(learner));
+        }
+        if (config.voters().size() > 2) {
+            List<Integer> voters = new ArrayList<>(config.voters());
+            choices.add(new ConfigChange.RemoveVoter(voters.get(random.nextInt(voters.size()))));
+            if (random.nextInt(3) == 0) {
+                choices.add(new ConfigChange.RemoveVoter(leader.id));
+            }
+        }
+        if (choices.isEmpty()) {
+            return;
+        }
+        ConfigChange change = choices.get(random.nextInt(choices.size()));
+        if (change instanceof ConfigChange.AddLearner) {
+            spare.started = true;
+            spare.up = true;
+            stats.joined++;
+        }
+        deliver(leader, new RaftEvent.ProposeConfigChange(CONFIG_BASE + stats.configChanges
+                + stats.configRejections + stats.joined * 1000, change));
+    }
+
+    /**
+     * Whether any other node that still runs or may run again has the node in its
+     * configuration. The node the clients take for the leader may have been deposed; a node
+     * is shut down for good only when nobody counts on it any more.
+     */
+    private boolean memberAnywhere(int id) {
+        for (SimNode other : nodes) {
+            if (other.id != id && other.started && !other.retired) {
+                ClusterConfig config = other.view().config();
+                if (config.voters().contains(id) || config.learners().contains(id)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Shuts a node down for good. */
+    private void retire(SimNode node) {
+        stats.retired++;
+        node.retired = true;
+        node.up = false;
+        node.incarnation++;
+        node.pendingWrites.clear();
+        node.awaitingApply.clear();
+        node.awaitingRead.clear();
+    }
+
     private void healPartition() {
         partitionEpoch++;
         for (boolean[] row : blocked) {
@@ -811,7 +934,7 @@ public final class Simulation {
 
         byte[] payload = entry.payload();
         long result = 0;
-        if (payload.length >= COMMAND_HEADER) {
+        if (entry.type() == EntryType.COMMAND && payload.length >= COMMAND_HEADER) {
             int key = payload[9] & 0xFF;
             long a = longAt(payload, 10);
             if (payload[8] == COMMAND_WRITE) {
@@ -854,9 +977,7 @@ public final class Simulation {
     }
 
     private int target() {
-        return knownLeader == RaftNode.NO_NODE || random.nextInt(5) == 0
-                ? random.nextInt(nodes.size())
-                : knownLeader;
+        return knownLeader == RaftNode.NO_NODE || random.nextInt(5) == 0 ? anyNode() : knownLeader;
     }
 
     private void propose(long commandId, int target, int attemptsLeft) {
@@ -868,6 +989,10 @@ public final class Simulation {
     }
 
     private void proposalAccepted(SimNode node, ProposalAccepted accepted) {
+        if (accepted.requestId() >= CONFIG_BASE) {
+            stats.configChanges++;
+            return;
+        }
         stats.accepted++;
         boolean isChecked = accepted.requestId() >= CHECKED_BASE;
         long commandId = isChecked ? accepted.requestId() : accepted.requestId() / 4;
@@ -882,6 +1007,10 @@ public final class Simulation {
     }
 
     private void proposalRejected(ProposalRejected rejected) {
+        if (rejected.requestId() >= CONFIG_BASE) {
+            stats.configRejections++;
+            return;
+        }
         if (rejected.requestId() >= CHECKED_BASE) {
             checked.get((int) (rejected.requestId() - CHECKED_BASE)).discarded = true;
             return;

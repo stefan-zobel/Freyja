@@ -4,9 +4,11 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
 
+import io.github.stefan_zobel.freyja.raft.Notification.ConfigChanged;
 import io.github.stefan_zobel.freyja.raft.Notification.ProposalAccepted;
 import io.github.stefan_zobel.freyja.raft.Notification.ProposalRejected;
 import io.github.stefan_zobel.freyja.raft.Notification.ReadIndexReady;
@@ -17,6 +19,7 @@ import io.github.stefan_zobel.freyja.raft.RaftEvent.ClientPropose;
 import io.github.stefan_zobel.freyja.raft.RaftEvent.ClientReadIndex;
 import io.github.stefan_zobel.freyja.raft.RaftEvent.MessageReceived;
 import io.github.stefan_zobel.freyja.raft.RaftEvent.Persisted;
+import io.github.stefan_zobel.freyja.raft.RaftEvent.ProposeConfigChange;
 import io.github.stefan_zobel.freyja.raft.RaftEvent.Tick;
 import io.github.stefan_zobel.freyja.raft.RaftMessage.AppendEntries;
 import io.github.stefan_zobel.freyja.raft.RaftMessage.AppendResponse;
@@ -51,10 +54,20 @@ public final class RaftNode {
     private final RaftConfig config;
     private final int id;
     private final LogView stable;
-    private final ClusterConfig cluster;
+    /** The configuration in force: the newest one in the log, committed or not. */
+    private ClusterConfig cluster;
     /** The other voters, ascending. */
-    private final int[] peers;
-    private final boolean voter;
+    private int[] peers;
+    /** The other members, voters and learners, ascending: the nodes a leader replicates to. */
+    private int[] targets;
+    /** Whether this node is a voter in the configuration in force. */
+    private boolean voter;
+    /**
+     * The configurations of the log with the index of the entry that carries each, ascending.
+     * The first one is the configuration of the snapshot, at the snapshot index.
+     */
+    private final ArrayList<Long> configIndexes = new ArrayList<>();
+    private final ArrayList<ClusterConfig> configValues = new ArrayList<>();
 
     // ---- hard state
     private long term;
@@ -152,9 +165,6 @@ public final class RaftNode {
         this.config = Objects.requireNonNull(config, "config");
         this.stable = Objects.requireNonNull(log, "log");
         this.id = config.nodeId();
-        this.cluster = state.config();
-        this.voter = cluster.voters().contains(id);
-        this.peers = cluster.voters().stream().mapToInt(Integer::intValue).filter(n -> n != id).toArray();
         this.term = state.hardState().term();
         this.votedFor = state.hardState().votedFor();
         this.logRecovering = state.hardState().logRecovering();
@@ -173,6 +183,24 @@ public final class RaftNode {
         this.commitIndex = appliedIndex;
         this.applyOffered = appliedIndex;
         this.prngState = config.seed();
+        // The configuration in force is the newest one in the log, committed or not.
+        configIndexes.add(snapshotIndex);
+        configValues.add(state.snapshot().config());
+        for (long next = log.firstIndex(); next <= durableIndex;) {
+            List<LogEntry> chunk = log.entries(next, durableIndex + 1, 1 << 20);
+            if (chunk.isEmpty()) {
+                throw new IllegalArgumentException("the log view has no entry " + next);
+            }
+            for (LogEntry entry : chunk) {
+                if (entry.type() == EntryType.CONFIG) {
+                    configIndexes.add(entry.index());
+                    configValues.add(ClusterConfig.decode(entry.payload()));
+                }
+            }
+            next += chunk.size();
+        }
+        useNewestConfig();
+        notifications.clear(); // nothing changed for the runtime: it started the node with this
         resetElectionTimer();
         this.lastRoleNotice = new RoleChanged(role, term, leaderId);
     }
@@ -198,6 +226,7 @@ public final class RaftNode {
             case Persisted p -> persisted(p.readySequence());
             case ClientPropose p -> propose(p.requestId(), p.command());
             case ClientReadIndex r -> readIndex(r.requestId());
+            case ProposeConfigChange c -> proposeConfigChange(c.requestId(), c.change());
         }
         RoleChanged now = new RoleChanged(role, term, leaderId);
         if (!now.equals(lastRoleNotice)) {
@@ -325,6 +354,65 @@ public final class RaftNode {
             throw new IllegalStateException("appending " + entry + " after " + lastIndex());
         }
         unstable.add(entry);
+        if (entry.type() == EntryType.CONFIG) {
+            configIndexes.add(entry.index());
+            configValues.add(ClusterConfig.decode(entry.payload()));
+            useNewestConfig();
+        }
+    }
+
+    /** Puts the newest configuration of the log in force. */
+    private void useNewestConfig() {
+        cluster = configValues.getLast();
+        voter = cluster.voters().contains(id);
+        peers = cluster.voters().stream().mapToInt(Integer::intValue).filter(n -> n != id).toArray();
+        TreeMap<Integer, Boolean> members = new TreeMap<>();
+        for (int node : cluster.voters()) {
+            members.put(node, true);
+        }
+        for (int node : cluster.learners()) {
+            members.put(node, false);
+        }
+        members.remove(id);
+        targets = members.keySet().stream().mapToInt(Integer::intValue).toArray();
+        if (role == Role.LEADER) {
+            progress.keySet().retainAll(members.keySet());
+            for (int target : targets) {
+                if (!progress.containsKey(target)) {
+                    Progress pr = new Progress();
+                    pr.next = lastIndex() + 1;
+                    pr.recentActive = true;
+                    progress.put(target, pr);
+                }
+            }
+        }
+        notifications.add(new ConfigChanged(configIndexes.getLast(), cluster));
+    }
+
+    /** The index of the entry that carries the configuration in force. */
+    private long configIndex() {
+        return configIndexes.getLast();
+    }
+
+    /** The quorum-th largest value among the voters: a majority has at least this much. */
+    private long quorumValue(boolean rounds) {
+        int n = cluster.voters().size();
+        if (n == 0) {
+            return 0;
+        }
+        long[] values = new long[n];
+        int k = 0;
+        for (int node : cluster.voters()) {
+            if (node == id) {
+                // The leader counts itself only up to what it has durably stored.
+                values[k++] = rounds ? heartbeatRound : durableIndex;
+            } else {
+                Progress pr = progress.get(node);
+                values[k++] = pr == null ? 0 : rounds ? pr.ackedRound : pr.match;
+            }
+        }
+        Arrays.sort(values);
+        return values[n - cluster.quorum()];
     }
 
     /** Removes every entry from {@code from} on. The entries must not be committed. */
@@ -349,6 +437,16 @@ public final class RaftNode {
         // log when it completes.
         for (long[] write : writes) {
             write[1] = Math.min(write[1], from - 1);
+        }
+        // A configuration that was in a removed entry is no longer in force.
+        boolean reverted = false;
+        while (configIndexes.getLast() >= from) {
+            configIndexes.removeLast();
+            configValues.removeLast();
+            reverted = true;
+        }
+        if (reverted) {
+            useNewestConfig();
         }
     }
 
@@ -438,7 +536,7 @@ public final class RaftNode {
 
     private void startHeartbeatRound() {
         heartbeatRound++;
-        for (int peer : peers) {
+        for (int peer : targets) {
             Progress pr = progress.get(peer);
             send(peer, new Heartbeat(term, Math.min(pr.match, commitIndex), heartbeatRound));
         }
@@ -460,7 +558,7 @@ public final class RaftNode {
             notifications.add(new ReadIndexRejected(requestId, Reason.NOT_READY, id));
             return;
         }
-        if (peers.length == 0) {
+        if (voter && peers.length == 0) {
             notifications.add(new ReadIndexReady(requestId, commitIndex));
             return;
         }
@@ -473,13 +571,7 @@ public final class RaftNode {
 
     /** Called when a follower answered a heartbeat: releases the reads a majority confirmed. */
     private void heartbeatAnswered() {
-        long[] rounds = new long[peers.length + 1];
-        for (int i = 0; i < peers.length; i++) {
-            rounds[i] = progress.get(peers[i]).ackedRound;
-        }
-        rounds[peers.length] = heartbeatRound;
-        Arrays.sort(rounds);
-        long confirmed = rounds[rounds.length - cluster.quorum()];
+        long confirmed = quorumValue(true);
         if (confirmed <= quorumRound) {
             return;
         }
@@ -495,9 +587,10 @@ public final class RaftNode {
 
     /** CheckQuorum: whether a majority was heard from since the last check. */
     private boolean quorumActive() {
-        int active = 1;
-        for (Progress pr : progress.values()) {
-            if (pr.recentActive) {
+        int active = voter ? 1 : 0;
+        for (Map.Entry<Integer, Progress> entry : progress.entrySet()) {
+            Progress pr = entry.getValue();
+            if (pr.recentActive && cluster.voters().contains(entry.getKey())) {
                 active++;
             }
             pr.recentActive = false;
@@ -516,7 +609,7 @@ public final class RaftNode {
         }
         LogEntry entry = appendAsLeader(EntryType.COMMAND, command);
         notifications.add(new ProposalAccepted(requestId, entry.index(), entry.term()));
-        for (int peer : peers) {
+        for (int peer : targets) {
             sendAppend(peer, false);
         }
     }
@@ -532,7 +625,7 @@ public final class RaftNode {
     // ------------------------------------------------------------------ messages
 
     private void receive(int from, RaftMessage message) {
-        if (from == id || !cluster.voters().contains(from)) {
+        if (from == id) {
             return;
         }
         long messageTerm = message.term();
@@ -615,14 +708,17 @@ public final class RaftNode {
     private void checkElection() {
         int granted = 0;
         int rejected = 0;
-        for (boolean vote : votes.values()) {
-            if (vote) {
+        for (Map.Entry<Integer, Boolean> vote : votes.entrySet()) {
+            if (!cluster.voters().contains(vote.getKey())) {
+                continue; // only voters of the configuration in force count
+            }
+            if (vote.getValue()) {
                 granted++;
             } else {
                 rejected++;
             }
         }
-        if (role == Role.PRE_CANDIDATE || selfVoteSequence <= persistedSequence) {
+        if (voter && (role == Role.PRE_CANDIDATE || selfVoteSequence <= persistedSequence)) {
             granted++;
         }
         if (granted >= cluster.quorum()) {
@@ -760,7 +856,7 @@ public final class RaftNode {
      */
     private void resumeStalledReplication() {
         long last = lastIndex();
-        for (int peer : peers) {
+        for (int peer : targets) {
             Progress pr = progress.get(peer);
             if (pr.match < last) {
                 if (!pr.replicating) {
@@ -787,6 +883,9 @@ public final class RaftNode {
      */
     private void sendAppend(int to, boolean evenIfEmpty) {
         Progress pr = progress.get(to);
+        if (pr == null) {
+            return; // no longer a member, or this node is no longer the leader
+        }
         boolean force = evenIfEmpty;
         while (true) {
             if (pr.replicating ? pr.inflight.size() >= config.maxInflightAppends() : pr.probePaused) {
@@ -816,23 +915,59 @@ public final class RaftNode {
 
     /** Advances the commit index to what a majority holds durably, if that is in this term. */
     private void maybeCommit() {
-        long[] matches = new long[peers.length + 1];
-        for (int i = 0; i < peers.length; i++) {
-            matches[i] = progress.get(peers[i]).match;
-        }
-        // The leader counts itself only up to what it has durably stored.
-        matches[peers.length] = durableIndex;
-        Arrays.sort(matches);
-        long candidate = matches[matches.length - cluster.quorum()];
+        long candidate = Math.min(quorumValue(false), lastIndex());
         if (candidate > commitIndex && termAt(candidate) == term) {
             commitIndex = candidate;
             while (!uncommitted.isEmpty() && uncommitted.peekFirst()[0] <= commitIndex) {
                 uncommittedBytes -= uncommitted.pollFirst()[1];
             }
-            for (int peer : peers) {
+            for (int peer : targets) {
                 sendAppend(peer, false);
             }
+            if (!voter && commitIndex >= configIndex()) {
+                // The change that removed this leader is committed; its work is done.
+                becomeFollower(term, NO_NODE);
+            }
         }
+    }
+
+    /**
+     * A membership change: one node at a time, as a CONFIG entry that carries the complete
+     * new configuration. The new configuration is in force on every node from the moment
+     * the entry is in its log.
+     */
+    private void proposeConfigChange(long requestId, ConfigChange change) {
+        if (role != Role.LEADER) {
+            notifications.add(new ProposalRejected(requestId, Reason.NOT_LEADER, leaderId));
+            return;
+        }
+        if (termAt(commitIndex) != term) {
+            // Before that, this leader does not know which configuration is committed.
+            notifications.add(new ProposalRejected(requestId, Reason.NOT_READY, id));
+            return;
+        }
+        if (configIndex() > commitIndex) {
+            notifications.add(new ProposalRejected(requestId, Reason.CONFIG_IN_PROGRESS, id));
+            return;
+        }
+        ClusterConfig next = cluster.with(change);
+        if (next == null) {
+            notifications.add(new ProposalRejected(requestId, Reason.INVALID_CHANGE, id));
+            return;
+        }
+        if (change instanceof ConfigChange.PromoteLearner promote) {
+            Progress pr = progress.get(promote.node());
+            if (pr == null || pr.match + config.promotionLag() < lastIndex()) {
+                notifications.add(new ProposalRejected(requestId, Reason.LEARNER_BEHIND, id));
+                return;
+            }
+        }
+        LogEntry entry = appendAsLeader(EntryType.CONFIG, next.encode());
+        notifications.add(new ProposalAccepted(requestId, entry.index(), entry.term()));
+        for (int peer : targets) {
+            sendAppend(peer, false);
+        }
+        maybeCommit(); // a cluster that shrank to this node alone
     }
 
     // ------------------------------------------------------------------ roles
@@ -916,7 +1051,7 @@ public final class RaftNode {
         clearRoleState();
         electionElapsed = 0;
         long next = lastIndex() + 1;
-        for (int peer : peers) {
+        for (int peer : targets) {
             Progress pr = new Progress();
             pr.next = next;
             pr.recentActive = true;
@@ -924,7 +1059,7 @@ public final class RaftNode {
         }
         // An entry of the new term: only through it can earlier entries become committed.
         appendAsLeader(EntryType.NOOP, EMPTY);
-        for (int peer : peers) {
+        for (int peer : targets) {
             sendAppend(peer, false);
         }
         maybeCommit();

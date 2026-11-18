@@ -24,13 +24,20 @@ final class TestCluster {
         }
         ClusterConfig cluster = new ClusterConfig(ids, Set.of());
         for (int i = 0; i < size; i++) {
-            RaftConfig config = new RaftConfig(i, 1000 + i, template.electionTicks(),
-                    template.heartbeatTicks(), template.maxInflightAppends(),
-                    template.maxAppendBytes(), template.maxUncommittedBytes());
+            RaftConfig config = template.withNode(i, 1000 + i);
             TestNode node = new TestNode(config, cluster);
             node.autoPersist = true;
             nodes.add(node);
         }
+    }
+
+    /** Starts a node that knows of no cluster yet. Its id is the next free one. */
+    TestNode addEmptyNode() {
+        int id = nodes.size();
+        TestNode node = new TestNode(nodes.getFirst().config.withNode(id, 1000 + id), ClusterConfig.EMPTY);
+        node.autoPersist = true;
+        nodes.add(node);
+        return node;
     }
 
     TestNode node(int id) {

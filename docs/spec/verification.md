@@ -82,8 +82,13 @@ deleted. This test must pass on Windows.
     completing writes followed by a crash of that node (everything the node did in between
     was done on state that is lost), and a leader that freezes while everything sent to it
     is lost (it wakes up believing that it still leads).
-  - There is one seed set for a reliable network (delays, pauses, flow control) and one for
-    the full fault model.
+  - There is one seed set for a reliable network (delays, pauses, flow control), one for
+    the full fault model, and one for the full fault model with membership changes.
+  - Membership changes: spare nodes join as learners, learners are promoted or removed,
+    voters are removed, now and then the leader itself. A node that has left keeps running
+    for a while (it tries to start elections) and is then shut down for good, but only when
+    no other node has it in its configuration any more. Liveness is demanded of the members
+    of the final configuration.
   - The settings of a run (cluster size, delays, flow-control limits, load) are drawn from
     its seed, so that the seed set covers many shapes of a cluster.
 - **Safety invariants, checked after every step:**
@@ -94,7 +99,10 @@ deleted. This test must pass on Windows.
   - State machine safety: no two nodes apply different entries at the same index.
   - No message that promises a state is sent before that state was reported persisted.
   - At most one uncommitted configuration change; any two quorums of consecutive
-    configurations intersect.
+    configurations intersect. Examined for every `CONFIG` entry a node appends, against the
+    configuration before it in the same log: the voters differ by at most one node, the
+    majorities intersect, and, if the entry is new to the cluster, the entry that carries
+    the configuration before it is committed.
 - **Liveness, checked only after the network has been healed for a bounded time:** a leader
   exists and new proposals commit. Once the load stops, all nodes hold the same log, fully
   committed and applied, their state machines are equal, and every accepted proposal is

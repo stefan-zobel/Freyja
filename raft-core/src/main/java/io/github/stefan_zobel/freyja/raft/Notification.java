@@ -34,6 +34,15 @@ public sealed interface Notification {
     record ReadIndexRejected(long requestId, Reason reason, int leaderHint) implements Notification {
     }
 
+    /**
+     * Another configuration is in force on this node: one arrived in the log, or the entry
+     * that carried the previous one was removed from it.
+     *
+     * @param index the index of the entry that carries the configuration
+     */
+    record ConfigChanged(long index, ClusterConfig config) implements Notification {
+    }
+
     /** The role, the term, or the known leader of this node changed. */
     record RoleChanged(Role role, long term, int leaderId) implements Notification {
     }
@@ -45,6 +54,12 @@ public sealed interface Notification {
         /** The uncommitted part of the log of the leader is at its limit. */
         OVERLOADED,
         /** The leader has not yet committed an entry of its own term. */
-        NOT_READY
+        NOT_READY,
+        /** An earlier membership change is not committed yet. */
+        CONFIG_IN_PROGRESS,
+        /** The change does not fit the configuration in force. */
+        INVALID_CHANGE,
+        /** The learner to promote is too far behind the log of the leader. */
+        LEARNER_BEHIND
     }
 }

@@ -6,6 +6,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import io.github.stefan_zobel.freyja.raft.ClusterConfig;
 import io.github.stefan_zobel.freyja.raft.ProtocolState;
 import io.github.stefan_zobel.freyja.raft.RaftConfig;
 import io.github.stefan_zobel.freyja.raft.RaftNode;
@@ -22,6 +23,14 @@ public final class SimNode {
 
     /** Whether the process runs. A node that is down receives nothing. */
     boolean up = true;
+    /** Whether the node was ever started. A spare node starts when it is to join. */
+    boolean started = true;
+    /** Whether the node was shut down for good after it had left the cluster. */
+    boolean retired;
+    /** The configuration this node was started with. */
+    ClusterConfig initialConfig;
+    /** The index of the entry that carries the configuration in force on this node. */
+    long configIndex;
     /** Counts the starts of the process. Work scheduled for an earlier start is void. */
     long incarnation;
     /** The node processes nothing before this virtual time. */

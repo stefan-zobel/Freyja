@@ -47,7 +47,7 @@ public enum EntryType { COMMAND, NOOP, CONFIG }
 public record HardState(long term, int votedFor, boolean logRecovering) {}   // -1 = no vote
 public record ClusterConfig(Set<Integer> voters, Set<Integer> learners) {}
 public record SnapshotMeta(long lastIncludedIndex, long lastIncludedTerm, ClusterConfig config) {}
-public record PersistedState(HardState hardState, SnapshotMeta snapshot, ClusterConfig config) {}
+public record PersistedState(HardState hardState, SnapshotMeta snapshot) {}
 
 public sealed interface RaftEvent {
     record Tick() implements RaftEvent {}
@@ -198,6 +198,32 @@ public record Ready(
 - A leader that removes itself steps down once the change is committed.
 - Node ids are never reused. A node that was removed must join again under a new id.
 - The configuration is part of `SnapshotMeta` and of the persisted state.
+
+Details:
+
+- **A `CONFIG` entry carries the complete new configuration** (voters and learners), not the
+  change. A node that receives the log from its start therefore learns the configuration
+  from the first `CONFIG` entry it sees.
+- **The configuration in force** on a node is the one of its snapshot, replaced by every
+  `CONFIG` entry of its log in order. The node derives it at start from the snapshot and the
+  stored log; it is not stored separately. Without a snapshot, the snapshot meta data holds
+  the configuration the cluster started with.
+- **A node that is to join** starts with the empty configuration. It is no voter, so it
+  starts no election, and it accepts the log from whichever leader contacts it.
+- **Who counts:** votes and pre-votes count only if they come from voters of the
+  configuration in force. A leader counts toward commit and toward CheckQuorum only the
+  voters, and itself only if it is one. A leader that is no longer a voter (it removed
+  itself) keeps replicating until the change is committed and then steps down.
+- **Messages are accepted from any node**, member or not: a new node does not know its
+  leader, and a node may have to learn from a non-member that its term is old.
+- **A removed node** receives nothing from the moment its removal is in the log of the
+  leader, so it may never see that entry. It will try to start elections; PreVote and the
+  rule that a node in contact with a leader grants no vote keep it from disturbing the
+  cluster. It is shut down by the operator.
+- **Rejections** of a requested change: not the leader; no entry of the own term committed
+  yet; an earlier change uncommitted; the change does not fit the configuration (the node is
+  already a member, is no learner or no voter, or is the last voter); the learner to promote
+  is too far behind.
 
 ## 7. Leadership Transfer
 

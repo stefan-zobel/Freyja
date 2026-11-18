@@ -6,6 +6,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
 
+import io.github.stefan_zobel.freyja.raft.ClusterConfig;
+import io.github.stefan_zobel.freyja.raft.EntryType;
 import io.github.stefan_zobel.freyja.raft.HardState;
 import io.github.stefan_zobel.freyja.raft.LogEntry;
 import io.github.stefan_zobel.freyja.raft.RaftMessage;
@@ -42,7 +44,8 @@ public final class SafetyInvariants {
             new Invariant("LogMatching", SafetyInvariants::logMatching),
             new Invariant("LeaderCompleteness", SafetyInvariants::leaderCompleteness),
             new Invariant("StateMachineSafety", SafetyInvariants::stateMachineSafety),
-            new Invariant("DurabilityBeforeVisibility", SafetyInvariants::durabilityBeforeVisibility));
+            new Invariant("DurabilityBeforeVisibility", SafetyInvariants::durabilityBeforeVisibility),
+            new Invariant("ConfigurationSafety", SafetyInvariants::configurationSafety));
 
     private SafetyInvariants() {
     }
@@ -240,6 +243,72 @@ public final class SafetyInvariants {
                     && released.durableLastIndex() < response.index()) {
                 return "node " + released.node() + " acknowledged index " + response.index()
                         + " while only " + released.durableLastIndex() + " entries were durable";
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Configuration safety: at most one configuration change is uncommitted, and any two
+     * quorums of consecutive configurations intersect.
+     *
+     * <p>Examined for every CONFIG entry appended in this step, against the configuration
+     * before it in the same log (the latest earlier CONFIG entry, or the configuration the
+     * cluster started with):
+     * <ul>
+     *   <li>The sets of voters differ by at most one node, and every majority of the one
+     *       shares a node with every majority of the other.</li>
+     *   <li>If the entry is new to the cluster (no other log holds an entry of its term at
+     *       its index), the entry that carries the configuration before it is committed.</li>
+     * </ul>
+     */
+    public static String configurationSafety(Observation o) {
+        for (Observation.Appended appended : o.appendedThisStep()) {
+            LogEntry entry = appended.entry();
+            if (entry.type() != EntryType.CONFIG) {
+                continue;
+            }
+            int position = (int) entry.index() - 1;
+            List<LogEntry> own = o.log(appended.node());
+            if (position >= own.size() || own.get(position) != entry) {
+                continue; // replaced again within the same step
+            }
+            ClusterConfig before = o.initialConfig();
+            long beforeIndex = 0;
+            for (int i = position - 1; i >= 0; i--) {
+                if (own.get(i).type() == EntryType.CONFIG) {
+                    before = ClusterConfig.decode(own.get(i).payload());
+                    beforeIndex = own.get(i).index();
+                    break;
+                }
+            }
+            ClusterConfig after = ClusterConfig.decode(entry.payload());
+            Set<Integer> onlyBefore = new java.util.TreeSet<>(before.voters());
+            onlyBefore.removeAll(after.voters());
+            Set<Integer> onlyAfter = new java.util.TreeSet<>(after.voters());
+            onlyAfter.removeAll(before.voters());
+            int common = before.voters().size() - onlyBefore.size();
+            if (onlyBefore.size() + onlyAfter.size() > 1) {
+                return "the voters change by more than one node at " + entry + ": from "
+                        + before.voters() + " to " + after.voters();
+            }
+            // Two majorities can avoid each other only if both find enough voters outside
+            // the common part, or share the common part without overlap.
+            int neededBefore = Math.max(0, before.quorum() - onlyBefore.size());
+            int neededAfter = Math.max(0, after.quorum() - onlyAfter.size());
+            if (after.voters().isEmpty() || neededBefore + neededAfter <= common) {
+                return "a majority of " + before.voters() + " and a majority of " + after.voters()
+                        + " need not share a node (at " + entry + ")";
+            }
+            boolean known = false;
+            for (int other = 0; other < o.nodeCount() && !known; other++) {
+                List<LogEntry> log = o.log(other);
+                known = other != appended.node() && position < log.size()
+                        && log.get(position).term() == entry.term();
+            }
+            if (!known && beforeIndex > o.committedIndex()) {
+                return "the configuration change " + entry + " was created while the change at index "
+                        + beforeIndex + " was not committed (committed: " + o.committedIndex() + ")";
             }
         }
         return null;

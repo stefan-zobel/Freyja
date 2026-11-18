@@ -27,6 +27,8 @@ import java.util.Random;
  * @param duplicatePercent    share of messages that arrive twice
  * @param partitions          whether the network is partitioned now and then
  * @param crashes             whether nodes crash and restart
+ * @param spareNodes          number of nodes that may join the cluster during the run; 0
+ *                            for a cluster whose membership never changes
  */
 public record SimOptions(
         int nodes,
@@ -48,14 +50,15 @@ public record SimOptions(
         int dropPercent,
         int duplicatePercent,
         boolean partitions,
-        boolean crashes) {
+        boolean crashes,
+        int spareNodes) {
 
     public SimOptions {
         if (nodes < 1 || tickMillis < 1 || tickSpread < 0 || tickSpread >= tickMillis
                 || minDelay < 0 || maxDelay < minDelay || maxPersistDelay < 0
                 || proposalInterval < 1 || maxPayload < 0 || checkedOperations < 0 || maxPause < 0
                 || dropPercent < 0 || dropPercent > 100 || duplicatePercent < 0
-                || duplicatePercent > 100) {
+                || duplicatePercent > 100 || spareNodes < 0) {
             throw new IllegalArgumentException(toString());
         }
     }
@@ -63,7 +66,7 @@ public record SimOptions(
     /** A quiet cluster: fast network, fast disks, default flow control, no faults. */
     public static SimOptions calm(int nodes, long seed) {
         return new SimOptions(nodes, seed, 10, 0, 1, 3, 2, 10, 1, 256, 1 << 20, 64L << 20, 10, 16,
-                100, 0, 0, 0, false, false);
+                100, 0, 0, 0, false, false, 0);
     }
 
     /**
@@ -79,11 +82,23 @@ public record SimOptions(
      * partitioned, tick rates differ, and nodes crash and lose what was not durable.
      */
     public static SimOptions faulty(long seed) {
-        return draw(seed, true);
+        return draw(seed, true, 2, 0);
+    }
+
+    /**
+     * The full fault model, and the membership of the cluster changes: nodes join as
+     * learners, learners are promoted, voters (also the leader) and learners are removed.
+     */
+    public static SimOptions reconfiguring(long seed) {
+        return draw(seed, true, 3, 4);
     }
 
     private static SimOptions draw(long seed, boolean faults) {
-        Random random = new Random(seed * 0x9E3779B97F4A7C15L + (faults ? 2 : 1));
+        return draw(seed, faults, 1, 0);
+    }
+
+    private static SimOptions draw(long seed, boolean faults, int salt, int spareNodes) {
+        Random random = new Random(seed * 0x9E3779B97F4A7C15L + salt);
         int[] sizes = {1, 3, 3, 5, 5, 7};
         int[] delays = {3, 10, 40, 150};
         int[] persistDelays = {0, 2, 20, 80};
@@ -111,6 +126,7 @@ public record SimOptions(
         int spread = random.nextBoolean() ? 3 : 0;
         return new SimOptions(nodes, seed, 10, faults ? spread : 0, 1, maxDelay, maxPersistDelay,
                 10, heartbeatTicks, window, appendSize, backlog, interval, payload, 150, pause,
-                faults ? drop : 0, faults ? duplicate : 0, faults && partitions, faults && crashes);
+                faults ? drop : 0, faults ? duplicate : 0, faults && partitions, faults && crashes,
+                spareNodes);
     }
 }

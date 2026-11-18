@@ -8,6 +8,7 @@ import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
+import io.github.stefan_zobel.freyja.raft.ClusterConfig;
 import io.github.stefan_zobel.freyja.raft.HardState;
 import io.github.stefan_zobel.freyja.raft.LogEntry;
 import io.github.stefan_zobel.freyja.raft.Outbound;
@@ -45,6 +46,7 @@ public final class Observation {
                            long durableLastIndex) {
     }
 
+    private final ClusterConfig initialConfig;
     private final List<List<LogEntry>> logs = new ArrayList<>();
     private final TreeMap<Long, Set<Integer>> leadersOfTerm = new TreeMap<>();
     private final List<LogEntry> appliedLog = new ArrayList<>();
@@ -55,16 +57,45 @@ public final class Observation {
     private final List<Applied> applied = new ArrayList<>();
     private final List<Released> released = new ArrayList<>();
 
+    /** An observation of {@code nodes} nodes that all are voters from the start. */
     public Observation(int nodes) {
+        this(nodes, allOf(nodes));
+    }
+
+    /**
+     * @param nodes         the number of nodes that exist or may join; their ids are
+     *                      {@code 0..nodes-1}
+     * @param initialConfig the configuration the cluster starts with
+     */
+    public Observation(int nodes, ClusterConfig initialConfig) {
+        this.initialConfig = initialConfig;
         for (int i = 0; i < nodes; i++) {
             logs.add(new ArrayList<>());
         }
+    }
+
+    private static ClusterConfig allOf(int nodes) {
+        Set<Integer> ids = new TreeSet<>();
+        for (int i = 0; i < nodes; i++) {
+            ids.add(i);
+        }
+        return new ClusterConfig(ids, Set.of());
     }
 
     // ------------------------------------------------------------------ reading
 
     public int nodeCount() {
         return logs.size();
+    }
+
+    /** The configuration the cluster started with: the one in force before any CONFIG entry. */
+    public ClusterConfig initialConfig() {
+        return initialConfig;
+    }
+
+    /** The highest index any node has seen as committed. */
+    public long committedIndex() {
+        return commitTerms.size();
     }
 
     /** The log of a node as the node sees it, durable or not. Index 1 is element 0. */

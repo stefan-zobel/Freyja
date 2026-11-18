@@ -14,10 +14,12 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Supplier;
 
 import org.junit.jupiter.api.Test;
 
+import io.github.stefan_zobel.freyja.raft.ClusterConfig;
 import io.github.stefan_zobel.freyja.raft.EntryType;
 import io.github.stefan_zobel.freyja.raft.HardState;
 import io.github.stefan_zobel.freyja.raft.LogEntry;
@@ -142,7 +144,51 @@ class SafetyInvariantsTest {
             o.released(2, new Outbound(0, new Heartbeat(4, 0, 1)), hard(3, 2), 0);
             return o;
         }));
+        broken.put("ConfigurationSafety", List.of(() -> {
+            Observation o = clean(); // two voters join in one change
+            o.beginStep();
+            o.appended(0, config(2, 1, Set.of(0, 1, 2, 3, 4)));
+            return o;
+        }, () -> {
+            Observation o = clean(); // a voter is replaced in one change
+            o.beginStep();
+            o.appended(0, config(2, 1, Set.of(0, 1, 3)));
+            return o;
+        }, () -> {
+            Observation o = clean(); // a second change while the first one is not committed
+            o.beginStep();
+            o.appended(0, config(2, 1, Set.of(0, 1)));
+            o.beginStep();
+            o.appended(0, config(3, 1, Set.of(0)));
+            return o;
+        }));
         return broken;
+    }
+
+    private static LogEntry config(long index, long term, Set<Integer> voters) {
+        return new LogEntry(index, term, EntryType.CONFIG, new ClusterConfig(voters, Set.of()).encode());
+    }
+
+    @Test
+    void configurationChangesOfOneNodeAtATimeAreAccepted() {
+        Observation o = clean();
+        o.beginStep();
+        LogEntry shrink = config(2, 1, Set.of(0, 1));
+        o.appended(0, shrink);
+        assertNull(SafetyInvariants.configurationSafety(o));
+        // A follower that receives the entry does not create it: no commit is demanded.
+        o.beginStep();
+        o.appended(1, shrink);
+        assertNull(SafetyInvariants.configurationSafety(o));
+        // Once the first change is committed, the next one may follow.
+        o.sawCommitted(2, 1);
+        o.beginStep();
+        o.appended(0, config(3, 1, Set.of(0, 1, 2)));
+        assertNull(SafetyInvariants.configurationSafety(o));
+        o.beginStep();
+        o.appended(0, new LogEntry(4, 1, EntryType.CONFIG,
+                new ClusterConfig(Set.of(0, 1, 2), Set.of(5, 6)).encode()));
+        assertNotNull(SafetyInvariants.configurationSafety(o), "the change at 3 is not committed");
     }
 
     @Test

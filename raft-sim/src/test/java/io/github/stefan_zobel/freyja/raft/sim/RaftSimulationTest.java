@@ -50,7 +50,14 @@ class RaftSimulationTest {
             sim.run(500);
         }
         if (!sim.isConverged()) {
-            throw new AssertionError("not converged: " + sim.stats() + " " + sim.options() + " "
+            String problem;
+            try {
+                sim.checkConverged();
+                problem = "";
+            } catch (AssertionError e) {
+                problem = e.getMessage();
+            }
+            throw new AssertionError("not converged: " + problem + " | " + sim.stats() + " " + sim.options() + " "
                     + sim.nodes().stream().map(n -> n.view() + " applied=" + n.applied()).toList());
         }
     }
@@ -95,6 +102,9 @@ class RaftSimulationTest {
         long duplicated;
         long readsServed;
         long historyOperations;
+        long configChanges;
+        long joined;
+        long retired;
 
         void add(Simulation sim) {
             Simulation.Stats stats = sim.stats();
@@ -112,6 +122,9 @@ class RaftSimulationTest {
             duplicated += stats.duplicated;
             readsServed += stats.readsServed;
             historyOperations += sim.checkedHistory().size();
+            configChanges += stats.configChanges;
+            joined += stats.joined;
+            retired += stats.retired;
         }
 
         @Override
@@ -120,7 +133,8 @@ class RaftSimulationTest {
                     + " overloaded=" + overloaded + " batchedWrites=" + batchedWrites + " lost=" + lost
                     + " notLeader=" + notLeader + " applied=" + applied + " crashes=" + crashes
                     + " partitions=" + partitions + " dropped=" + dropped + " duplicated=" + duplicated
-                    + " readsServed=" + readsServed + " historyOperations=" + historyOperations;
+                    + " readsServed=" + readsServed + " historyOperations=" + historyOperations
+                    + " configChanges=" + configChanges + " joined=" + joined + " retired=" + retired;
         }
     }
 
@@ -163,6 +177,24 @@ class RaftSimulationTest {
             assertTrue(totals.duplicated > 10 * totals.runs, summary);
             assertTrue(totals.readsServed > 5 * totals.runs, summary);
             assertTrue(totals.historyOperations > 30 * totals.runs, summary);
+        }
+    }
+
+    @Test
+    void clustersWhoseMembershipChangesStaySafeAndConverge() {
+        Totals totals = new Totals();
+        Seeds.forEach(RaftSimulationTest.class, "raft-sim-membership", 150,
+                seed -> totals.add(runSeed(SimOptions.reconfiguring(seed))));
+        System.out.println("membership changes: " + totals);
+        if (totals.runs >= 100) {
+            String summary = totals.toString();
+            assertTrue(totals.configChanges > 4 * totals.runs, summary);
+            assertTrue(totals.joined > 2 * totals.runs, summary);
+            assertTrue(totals.retired > totals.runs / 2, summary);
+            assertTrue(totals.elections > 3 * totals.runs, summary);
+            assertTrue(totals.truncations > 0, summary);
+            assertTrue(totals.crashes > totals.runs / 2, summary);
+            assertTrue(totals.historyOperations > 20 * totals.runs, summary);
         }
     }
 

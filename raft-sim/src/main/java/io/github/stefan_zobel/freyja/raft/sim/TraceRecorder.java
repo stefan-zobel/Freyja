@@ -115,6 +115,10 @@ public final class TraceRecorder implements Simulation.StepListener {
                     s.append("{\"type\":\"ClientPropose\",\"requestId\":").append(p.requestId()).append('}');
             case RaftEvent.ClientReadIndex r ->
                     s.append("{\"type\":\"ClientReadIndex\",\"requestId\":").append(r.requestId()).append('}');
+            case RaftEvent.ProposeConfigChange c ->
+                    s.append("{\"type\":\"ProposeConfigChange\",\"requestId\":").append(c.requestId())
+                            .append(",\"change\":\"").append(c.change().getClass().getSimpleName())
+                            .append("\",\"changedNode\":").append(c.change().node()).append('}');
         }
     }
 

@@ -30,6 +30,13 @@ public sealed interface RaftEvent {
     record ClientReadIndex(long requestId) implements RaftEvent {
     }
 
+    /** An administrator asks to change the membership of the cluster. */
+    record ProposeConfigChange(long requestId, ConfigChange change) implements RaftEvent {
+        public ProposeConfigChange {
+            Objects.requireNonNull(change, "change");
+        }
+    }
+
     /** A client asks to append a command to the log. */
     record ClientPropose(long requestId, byte[] command) implements RaftEvent {
         public ClientPropose {

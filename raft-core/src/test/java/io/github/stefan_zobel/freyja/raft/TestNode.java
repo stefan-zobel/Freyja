@@ -86,7 +86,7 @@ final class TestNode {
         pending.clear();
         outbox.clear();
         raft = RaftNode.create(config,
-                new PersistedState(hardState, SnapshotMeta.none(cluster), cluster), log, applied.size());
+                new PersistedState(hardState, SnapshotMeta.none(cluster)), log, applied.size());
     }
 
     void step(RaftEvent event) {
