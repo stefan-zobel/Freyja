@@ -88,8 +88,8 @@ Rules:
     client library against a scripted node and against that cluster, and end to end with
     real processes on real files: clients are served, the leader is killed and comes back, a
     fourth node joins and is promoted.
-  - Open: in the status, the match index and the repair state of every member; the check
-    for a healthy majority before a membership change.
+  - The status names the match index and the state of every member, and membership changes
+    that would leave no majority of voters that are well are refused unless forced.
 
 ## Phase D — Hardening
 

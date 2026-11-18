@@ -189,6 +189,10 @@ public record Ready(
   election timeout. A node that has heard from a leader within the minimum election timeout
   does not grant votes, except for a leadership transfer. It does not answer such a request
   at all, so that a node that lost contact cannot raise the term of the others.
+- **What the leader knows of the others** is readable as a view (`peers()`): per member the
+  match index, whether it was heard from since the last check for a quorum or at it, whether
+  it is in log-recovering mode, and whether a snapshot is on its way to it. The view is for
+  people and for the checks of an administrator; the protocol does not read it.
 - **Stepping down on request:** the runtime may ask a leader to give its leadership up
   (`StepDown`), for example because its disk has become slow (`node.md` §7). The leader
   becomes a follower in its term and knows no leader. Nothing else changes: what it has

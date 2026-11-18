@@ -19,27 +19,41 @@ CRC32C (`uint32`); a string is a length (`uint32`) and UTF-8. The types and thei
 in `kv-common`.
 
 - Requests: 1 status; 2 add learner (node id `uint32`, address for peers, address for
-  clients); 3 promote learner, 4 remove member, 5 transfer leadership (node id); 6 snapshot;
-  7 scrub; 8 compact; 9 clear the space alarm; 10 set cluster version (`uint32`); 11 set
-  address (as 2).
+  clients); 3 promote learner, 4 remove member (node id, force as one byte); 5 transfer
+  leadership (node id); 6 snapshot; 7 scrub; 8 compact; 9 clear the space alarm; 10 set
+  cluster version (`uint32`); 11 set address (as 2).
 - Responses: 65 done (a detail for a person); 66 refused (the reason, and the id of the
   leader if the reason is that the node is not the leader); 67 status (node id, cluster id,
   software, role, term, leader id, last log index, commit index, applied index, the index the
   log starts after, log-recovering, cluster version, space alarm, restarts, snapshots
-  installed, and per member its id, whether it votes, and its two addresses).
+  installed, and per member its id, whether it votes, its two addresses, its match index
+  (`uint64`, all bits set for unknown), and its state as a string).
 
 **What an answer means.**
 
 - Status, snapshot, scrub, and compact concern the node that is asked and are done at once.
-- A change of the cluster goes to the leader and is answered when the core has taken or
+- A change of the membership goes to the leader and is answered when the core has taken or
   refused it. Taken means: it is in the log of the leader at the index the answer names. The
   status shows when it has taken effect.
+- A command for the state machine (clear the alarm, set the cluster version, set an
+  address) goes to the leader and is answered when that node has applied it, with what it
+  did: a cluster version below the present one is refused there. If another entry takes its
+  place, the answer says that it was lost with a change of the leader.
 - Add learner is two entries: where the node listens, then the node as a learner.
 - A node that stops while a change waits says so; the change may be in the log.
+- **Members in the status.** The leader says of every member how far its log is known to
+  agree with its own (the match index) and how it is: `ok` (heard from since the last check
+  for a quorum or at it, and neither of the following), `silent`, `recovering` (refilling a
+  log it lost), `snapshot` (receiving the state machine). A node that is not the leader
+  does not know and says so with an empty state.
+- **The check for a healthy majority.** Promoting a learner and removing a member are
+  refused if, of the voters there would be afterward, fewer than a majority are `ok`,
+  counting the leader itself. Such a cluster could commit nothing, not even the way back.
+  With `force` the check is skipped.
 
 **The tool.** `FreyjaAdmin HOST:PORT COMMAND [ARGUMENT]...` in `kv-tools` sends one request
-to one node and prints the answer: `status`, `add-learner N PEER CLIENT`, `promote N`,
-`remove N`, `transfer N`, `snapshot`, `scrub`, `compact`, `clear-alarm`, `set-version V`,
+to one node and prints the answer: `status`, `add-learner N PEER CLIENT`, `promote N [--force]`,
+`remove N [--force]`, `transfer N`, `snapshot`, `scrub`, `compact`, `clear-alarm`, `set-version V`,
 `set-address N PEER CLIENT`. Exit code 0: done; 1: refused or not reachable; 2: wrong usage.
 
 **The node program.** `FreyjaNode init --data DIR --cluster HEX --node N [--voters N,...]
@@ -48,8 +62,7 @@ join. `FreyjaNode run --data DIR --peer HOST:PORT --client HOST:PORT --admin HOS
 [--seed N=HOST:PORT]... [--tick-ms MILLIS]` runs the node and prints
 `READY node=N peer=PORT client=PORT admin=PORT` when it listens.
 
-Not there yet: the match index and the repair state of every member in the status, the
-check for a healthy majority before a membership change, and the backup (milestone E3).
+Not there yet: the backup (milestone E3).
 
 ## 2. Observability
 

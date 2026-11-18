@@ -24,8 +24,8 @@ import io.github.stefan_zobel.freyja.common.wire.Handshake;
  *
  *   status                             the state of the node
  *   add-learner N PEER-ADDR CLIENT-ADDR  announce node N and add it as a learner
- *   promote N                          make learner N a voter
- *   remove N                           remove member N
+ *   promote N [--force]                make learner N a voter
+ *   remove N [--force]                 remove member N
  *   transfer N                         hand the leadership over to node N
  *   snapshot                           shorten the log of the node now
  *   scrub                              verify every block of the state machine of the node
@@ -62,7 +62,8 @@ public final class FreyjaAdmin {
             request = request(args);
         } catch (IllegalArgumentException e) {
             err.println("error: " + e.getMessage());
-            err.println("usage: FreyjaAdmin HOST:PORT status | add-learner N PEER CLIENT | promote N | remove N"
+            err.println("usage: FreyjaAdmin HOST:PORT status | add-learner N PEER CLIENT | promote N [--force]"
+                    + " | remove N [--force]"
                     + " | transfer N | snapshot | scrub | compact | clear-alarm | set-version V"
                     + " | set-address N PEER CLIENT");
             return 2;
@@ -94,7 +95,9 @@ public final class FreyjaAdmin {
 
     private static AdminRequest request(String[] args) {
         String command = args[1];
-        int given = args.length - 2;
+        boolean force = args[args.length - 1].equals("--force")
+                && (command.equals("promote") || command.equals("remove"));
+        int given = args.length - 2 - (force ? 1 : 0);
         int needed = switch (command) {
             case "status", "snapshot", "scrub", "compact", "clear-alarm" -> 0;
             case "promote", "remove", "transfer", "set-version" -> 1;
@@ -110,8 +113,8 @@ public final class FreyjaAdmin {
             case "scrub" -> new AdminRequest.Scrub();
             case "compact" -> new AdminRequest.Compact();
             case "clear-alarm" -> new AdminRequest.ClearSpaceAlarm();
-            case "promote" -> new AdminRequest.PromoteLearner(Integer.parseInt(args[2]));
-            case "remove" -> new AdminRequest.RemoveMember(Integer.parseInt(args[2]));
+            case "promote" -> new AdminRequest.PromoteLearner(Integer.parseInt(args[2]), force);
+            case "remove" -> new AdminRequest.RemoveMember(Integer.parseInt(args[2]), force);
             case "transfer" -> new AdminRequest.TransferLeadership(Integer.parseInt(args[2]));
             case "set-version" -> new AdminRequest.SetClusterVersion(Integer.parseInt(args[2]));
             case "add-learner" -> new AdminRequest.AddLearner(Integer.parseInt(args[2]), args[3], args[4]);
@@ -145,7 +148,9 @@ public final class FreyjaAdmin {
                 for (AdminResponse.Member member : status.members()) {
                     out.println("member:          node " + member.nodeId() + " " + (member.voter() ? "voter" : "learner")
                             + (member.peerAddress().isEmpty() ? "" : ", peers at " + member.peerAddress())
-                            + (member.clientAddress().isEmpty() ? "" : ", clients at " + member.clientAddress()));
+                            + (member.clientAddress().isEmpty() ? "" : ", clients at " + member.clientAddress())
+                            + (member.matchIndex() < 0 ? "" : ", log agrees through " + member.matchIndex())
+                            + (member.state().isEmpty() ? "" : ", " + member.state()));
                 }
                 return 0;
             }

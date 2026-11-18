@@ -31,6 +31,7 @@ import io.github.stefan_zobel.freyja.raft.HardState;
 import io.github.stefan_zobel.freyja.raft.LogEntry;
 import io.github.stefan_zobel.freyja.raft.Notification;
 import io.github.stefan_zobel.freyja.raft.Outbound;
+import io.github.stefan_zobel.freyja.raft.PeerProgress;
 import io.github.stefan_zobel.freyja.raft.PersistedState;
 import io.github.stefan_zobel.freyja.raft.ProtocolState;
 import io.github.stefan_zobel.freyja.raft.RaftConfig;
@@ -843,6 +844,11 @@ public final class Node implements Closeable {
     /** The protocol state of the Raft core. */
     public ProtocolState view() {
         return raft.view();
+    }
+
+    /** What this node, as leader, knows of the other members; empty if it is not the leader. */
+    public List<PeerProgress> peers() {
+        return raft.peers();
     }
 
     /** The generations of the state machine; {@code null} for a plain node. */

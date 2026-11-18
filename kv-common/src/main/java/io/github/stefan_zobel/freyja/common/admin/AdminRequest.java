@@ -26,12 +26,20 @@ public sealed interface AdminRequest {
         }
     }
 
-    /** Make a learner that has caught up a voter. */
-    record PromoteLearner(int nodeId) implements AdminRequest {
+    /**
+     * Make a learner that has caught up a voter.
+     *
+     * @param force do it also if the voters that are well would not be a majority afterward
+     */
+    record PromoteLearner(int nodeId, boolean force) implements AdminRequest {
     }
 
-    /** Remove a member, voter or learner. */
-    record RemoveMember(int nodeId) implements AdminRequest {
+    /**
+     * Remove a member, voter or learner.
+     *
+     * @param force do it also if the voters that are well would not be a majority afterward
+     */
+    record RemoveMember(int nodeId, boolean force) implements AdminRequest {
     }
 
     /** Hand the leadership over to a voter. */

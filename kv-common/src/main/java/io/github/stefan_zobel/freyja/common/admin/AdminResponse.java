@@ -30,11 +30,31 @@ public sealed interface AdminResponse {
         }
     }
 
-    /** Where a member listens. */
-    record Member(int nodeId, boolean voter, String peerAddress, String clientAddress) {
+    /**
+     * A member as the node that answers sees it.
+     *
+     * @param matchIndex how far its log is known to agree with the log of the leader; -1 if
+     *                   the node that answers is not the leader and does not know
+     * @param state      how it is, as the leader sees it: {@link #OK}, {@link #SILENT},
+     *                   {@link #RECOVERING}, {@link #SNAPSHOT}, or {@link #UNKNOWN}
+     */
+    record Member(int nodeId, boolean voter, String peerAddress, String clientAddress, long matchIndex,
+                  String state) {
+        /** Heard from lately, and neither refilling its log nor receiving a snapshot. */
+        public static final String OK = "ok";
+        /** Not heard from lately. */
+        public static final String SILENT = "silent";
+        /** Refilling a log that it lost. */
+        public static final String RECOVERING = "recovering";
+        /** Receiving the state machine of the leader. */
+        public static final String SNAPSHOT = "snapshot";
+        /** The node that answers is not the leader. */
+        public static final String UNKNOWN = "";
+
         public Member {
             Objects.requireNonNull(peerAddress, "peerAddress");
             Objects.requireNonNull(clientAddress, "clientAddress");
+            Objects.requireNonNull(state, "state");
         }
     }
 

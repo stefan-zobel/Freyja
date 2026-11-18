@@ -175,6 +175,8 @@ public final class RaftNode {
         boolean probePaused;
         /** Whether the follower was heard from since the last quorum check. */
         boolean recentActive;
+        /** Whether it was heard from before the last quorum check; for {@link PeerProgress} only. */
+        boolean activeAtCheck;
         /** The highest commit index sent to the follower in an append. */
         long sentCommit;
         /** The match index at the previous check for stalled replication. */
@@ -366,6 +368,22 @@ public final class RaftNode {
             at = configValues.get(i);
         }
         return new SnapshotMeta(index, termAt(index), at);
+    }
+
+    /**
+     * What this node, as leader, knows of the other members; empty if it is not the leader.
+     * A view for people and for the checks of an administrator.
+     */
+    public List<PeerProgress> peers() {
+        List<PeerProgress> peers = new ArrayList<>();
+        if (role == Role.LEADER) {
+            for (Map.Entry<Integer, Progress> entry : progress.entrySet()) {
+                Progress pr = entry.getValue();
+                peers.add(new PeerProgress(entry.getKey(), pr.match, pr.recentActive || pr.activeAtCheck,
+                        pr.recovering, pr.snapshotting));
+            }
+        }
+        return peers;
     }
 
     /** A read-only view of the protocol state. */
@@ -825,6 +843,7 @@ public final class RaftNode {
             if (pr.recentActive && cluster.voters().contains(entry.getKey())) {
                 active++;
             }
+            pr.activeAtCheck = pr.recentActive;
             pr.recentActive = false;
         }
         return active >= cluster.quorum();

@@ -18,22 +18,27 @@ import io.github.stefan_zobel.freyja.common.admin.AdminResponse.Refused;
 import io.github.stefan_zobel.freyja.common.admin.AdminResponse.Status;
 import io.github.stefan_zobel.freyja.common.kv.Command;
 import io.github.stefan_zobel.freyja.common.kv.CommandCodec;
+import io.github.stefan_zobel.freyja.common.kv.CommandResult;
 import io.github.stefan_zobel.freyja.node.Node;
 import io.github.stefan_zobel.freyja.node.NodeListener;
 import io.github.stefan_zobel.freyja.node.sm.KvStateMachine;
 import io.github.stefan_zobel.freyja.raft.ClusterConfig;
 import io.github.stefan_zobel.freyja.raft.ConfigChange;
+import io.github.stefan_zobel.freyja.raft.LogEntry;
 import io.github.stefan_zobel.freyja.raft.Notification;
+import io.github.stefan_zobel.freyja.raft.PeerProgress;
 import io.github.stefan_zobel.freyja.raft.ProtocolState;
 import io.github.stefan_zobel.freyja.raft.RaftEvent;
+import io.github.stefan_zobel.freyja.raft.SnapshotMeta;
 
 /**
  * Serves the requests of an administrator on one node (docs/spec/operations.md, section 1).
  *
  * <p>What concerns only this node is done at once: its status, a snapshot, a scrub, a
- * compaction. A change of the cluster is proposed to the core and answered when the core has
- * taken or refused it; taken means that it is in the log of the leader, not that it has taken
- * effect. The status shows the effect.
+ * compaction. A change of the membership is proposed to the core and answered when the core
+ * has taken or refused it; taken means that it is in the log of the leader, not that it has
+ * taken effect, which the status shows. A command for the state machine (an alarm, the cluster
+ * version, an address) is answered when this node has applied it, with what it did.
  *
  * <p>The service runs on the thread of the node and is told what the node reports.
  */
@@ -49,6 +54,11 @@ public final class AdminService implements NodeListener {
     }
 
     private final Map<Long, Waiting> waiting = new HashMap<>();
+    /** The ids of the waiting requests that are commands: they are answered when applied. */
+    private final java.util.Set<Long> commands = new java.util.HashSet<>();
+    /** Commands the core has taken, by the index it gave them: who waits, and the term. */
+    private final Map<Long, Waiting> taken = new HashMap<>();
+    private final Map<Long, Long> takenTerm = new HashMap<>();
     private Node node;
     private long restarts;
     private long nextId = FIRST_ID;
@@ -63,7 +73,11 @@ public final class AdminService implements NodeListener {
     public void detach() {
         node = null;
         List<Waiting> all = new ArrayList<>(waiting.values());
+        all.addAll(taken.values());
         waiting.clear();
+        commands.clear();
+        taken.clear();
+        takenTerm.clear();
         for (Waiting w : all) {
             send(w, new Refused("the node stopped before it could answer; the change may be in the log", -1));
         }
@@ -104,14 +118,14 @@ public final class AdminService implements NodeListener {
                 change(new Waiting(id, reply, "node " + add.nodeId() + " as a learner"),
                         new ConfigChange.AddLearner(add.nodeId()));
             }
-            case AdminRequest.PromoteLearner promote -> change(
+            case AdminRequest.PromoteLearner promote -> guarded(
                     new Waiting(id, reply, "the promotion of node " + promote.nodeId()),
-                    new ConfigChange.PromoteLearner(promote.nodeId()));
+                    new ConfigChange.PromoteLearner(promote.nodeId()), promote.force());
             case AdminRequest.RemoveMember remove -> {
                 ClusterConfig config = node.view().config();
-                change(new Waiting(id, reply, "the removal of node " + remove.nodeId()),
+                guarded(new Waiting(id, reply, "the removal of node " + remove.nodeId()),
                         config.learners().contains(remove.nodeId()) ? new ConfigChange.RemoveLearner(remove.nodeId())
-                                : new ConfigChange.RemoveVoter(remove.nodeId()));
+                                : new ConfigChange.RemoveVoter(remove.nodeId()), remove.force());
             }
             case AdminRequest.TransferLeadership transfer -> {
                 ProtocolState state = node.view();
@@ -140,13 +154,49 @@ public final class AdminService implements NodeListener {
         long id = nextId++;
         if (w != null) {
             waiting.put(id, w);
+            commands.add(id);
         }
         // Time stamp 0: the command does not move the time of the state machine.
         if (node.propose(id, CommandCodec.encode(0, command), node.now() + PROPOSAL_TICKS)
                 != Node.Admission.ACCEPTED && w != null) {
             waiting.remove(id);
+            commands.remove(id);
             send(w, new Refused("the node has too much to do", -1));
         }
+    }
+
+    /**
+     * A change of the voters is refused if the voters that are well would not be a majority
+     * afterward: such a cluster could not commit anything, not even the way back. Well is a
+     * voter that the leader has heard from lately and that is neither refilling its log nor
+     * receiving a snapshot.
+     */
+    private void guarded(Waiting w, ConfigChange change, boolean force) {
+        ProtocolState state = node.view();
+        if (!force && state.role().name().equals("LEADER")) {
+            ClusterConfig after;
+            try {
+                after = state.config().with(change);
+            } catch (RuntimeException e) {
+                after = null; // the core says why the change does not fit
+            }
+            if (after != null) {
+                int well = after.voters().contains(state.nodeId()) ? 1 : 0;
+                for (PeerProgress peer : node.peers()) {
+                    if (after.voters().contains(peer.nodeId()) && peer.active() && !peer.recovering()
+                            && !peer.snapshotting()) {
+                        well++;
+                    }
+                }
+                if (well < after.quorum()) {
+                    send(w, new Refused(w.what() + " was refused: of the " + after.voters().size()
+                            + " voters there would be then, only " + well + " are well, and " + after.quorum()
+                            + " are needed; force it if it must be", -1));
+                    return;
+                }
+            }
+        }
+        change(w, change);
     }
 
     private void change(Waiting w, ConfigChange change) {
@@ -165,10 +215,20 @@ public final class AdminService implements NodeListener {
         List<Member> members = new ArrayList<>();
         TreeSet<Integer> ids = new TreeSet<>(config.voters());
         ids.addAll(config.learners());
+        Map<Integer, PeerProgress> peers = new HashMap<>();
+        for (PeerProgress peer : node.peers()) {
+            peers.put(peer.nodeId(), peer);
+        }
+        boolean leader = state.role().name().equals("LEADER");
         for (int id : ids) {
             KvStateMachine.NodeAddress address = machine.addresses().get(id);
+            PeerProgress peer = peers.get(id);
+            long match = id == state.nodeId() && leader ? state.durableIndex() : peer == null ? -1 : peer.matchIndex();
+            String how = id == state.nodeId() && leader ? Member.OK : peer == null ? Member.UNKNOWN
+                    : peer.recovering() ? Member.RECOVERING : peer.snapshotting() ? Member.SNAPSHOT
+                    : peer.active() ? Member.OK : Member.SILENT;
             members.add(new Member(id, config.voters().contains(id), address == null ? "" : address.peer(),
-                    address == null ? "" : address.client()));
+                    address == null ? "" : address.client(), match, how));
         }
         return new Status(state.nodeId(), node.identity().clusterId(), Version.SOFTWARE, state.role().name(),
                 state.term(), state.leaderId(), state.lastLogIndex(), state.commitIndex(), machine.appliedIndex(),
@@ -185,12 +245,17 @@ public final class AdminService implements NodeListener {
         switch (notification) {
             case Notification.ProposalAccepted accepted -> {
                 Waiting w = waiting.remove(accepted.requestId());
-                if (w != null) {
+                if (w != null && commands.remove(accepted.requestId())) {
+                    // A command says what it did only when it is applied.
+                    taken.put(accepted.index(), w);
+                    takenTerm.put(accepted.index(), accepted.term());
+                } else if (w != null) {
                     send(w, new Done(w.what() + " is in the log at index " + accepted.index()));
                 }
             }
             case Notification.ProposalRejected rejected -> {
                 Waiting w = waiting.remove(rejected.requestId());
+                commands.remove(rejected.requestId());
                 if (w != null) {
                     send(w, new Refused(w.what() + " was refused: " + switch (rejected.reason()) {
                         case NOT_LEADER -> "this node is not the leader";
@@ -210,7 +275,41 @@ public final class AdminService implements NodeListener {
     }
 
     @Override
+    public void applied(LogEntry entry, CommandResult result) {
+        Waiting w = taken.remove(entry.index());
+        Long term = takenTerm.remove(entry.index());
+        if (w == null) {
+            return;
+        }
+        if (term != entry.term() || result == null) {
+            send(w, new Refused(w.what() + " was lost with a change of the leader; ask the leader again",
+                    node == null ? -1 : node.view().leaderId()));
+        } else if (result instanceof CommandResult.Failed failed) {
+            send(w, new Refused(w.what() + " was refused by the state machine: " + switch (failed.failure()) {
+                case VERSION_TOO_OLD -> "the cluster version is higher already";
+                default -> failed.failure().name();
+            }, -1));
+        } else {
+            send(w, new Done(w.what() + " is applied, at index " + entry.index()));
+        }
+    }
+
+    @Override
+    public void snapshotInstalled(SnapshotMeta meta) {
+        for (java.util.Iterator<Map.Entry<Long, Waiting>> it = taken.entrySet().iterator(); it.hasNext();) {
+            Map.Entry<Long, Waiting> entry = it.next();
+            if (entry.getKey() <= meta.lastIncludedIndex()) {
+                it.remove();
+                takenTerm.remove(entry.getKey());
+                send(entry.getValue(), new Refused(entry.getValue().what()
+                        + " may or may not be applied: the node took a snapshot over it; see the status", -1));
+            }
+        }
+    }
+
+    @Override
     public void proposalExpired(long requestId) {
+        commands.remove(requestId);
         Waiting w = waiting.remove(requestId);
         if (w != null) {
             send(w, new Refused(w.what() + " was not proposed in time", -1));

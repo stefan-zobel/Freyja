@@ -32,14 +32,16 @@ import io.github.stefan_zobel.freyja.common.kv.CommandCodec.Out;
  *
  * <ul>
  *   <li>Requests: 1 status; 2 add learner (node id {@code uint32}, address for peers, address
- *       for clients); 3 promote learner, 4 remove member, 5 transfer leadership (node id);
+ *       for clients); 3 promote learner, 4 remove member (node id, force); 5 transfer
+ *       leadership (node id);
  *       6 snapshot; 7 scrub; 8 compact; 9 clear space alarm; 10 set cluster version
  *       ({@code uint32}); 11 set address (as 2).</li>
  *   <li>Responses: 65 done (detail); 66 refused (reason, leader id {@code uint32}); 67 status
  *       (node id, cluster id {@code uint64}, software, role, term, leader id, last log index,
  *       commit index, applied index, snapshot index, log recovering, cluster version, space
  *       alarm, restarts, snapshots installed, number of members, and per member node id,
- *       voter, address for peers, address for clients).</li>
+ *       voter, address for peers, address for clients, match index {@code uint64} with all
+ *       bits set for unknown, and its state as a string).</li>
  * </ul>
  */
 public final class AdminCodec {
@@ -102,8 +104,14 @@ public final class AdminCodec {
                 string(out, a.peerAddress());
                 string(out, a.clientAddress());
             }
-            case PromoteLearner p -> out.u32(p.nodeId());
-            case RemoveMember r -> out.u32(r.nodeId());
+            case PromoteLearner p -> {
+                out.u32(p.nodeId());
+                out.u8(p.force() ? 1 : 0);
+            }
+            case RemoveMember r -> {
+                out.u32(r.nodeId());
+                out.u8(r.force() ? 1 : 0);
+            }
             case TransferLeadership t -> out.u32(t.nodeId());
             case SetClusterVersion v -> out.u32(v.version());
             default -> {
@@ -122,8 +130,8 @@ public final class AdminCodec {
         AdminRequest request = switch (type) {
             case 1 -> new AdminRequest.Status();
             case 2 -> new AddLearner(in.u32(), string(in), string(in));
-            case 3 -> new PromoteLearner(in.u32());
-            case 4 -> new RemoveMember(in.u32());
+            case 3 -> new PromoteLearner(in.u32(), bool(in));
+            case 4 -> new RemoveMember(in.u32(), bool(in));
             case 5 -> new TransferLeadership(in.u32());
             case 6 -> new Snapshot();
             case 7 -> new Scrub();
@@ -174,6 +182,8 @@ public final class AdminCodec {
                     out.u8(member.voter() ? 1 : 0);
                     string(out, member.peerAddress());
                     string(out, member.clientAddress());
+                    out.u64(member.matchIndex());
+                    string(out, member.state());
                 }
             }
         }
@@ -206,10 +216,10 @@ public final class AdminCodec {
                 boolean alarm = bool(in);
                 long restarts = in.u64();
                 long installed = in.u64();
-                int count = in.count(4 + 1 + 4 + 4);
+                int count = in.count(4 + 1 + 4 + 4 + 8 + 4);
                 List<Member> members = new ArrayList<>(count);
                 for (int i = 0; i < count; i++) {
-                    members.add(new Member(in.u32(), bool(in), string(in), string(in)));
+                    members.add(new Member(in.u32(), bool(in), string(in), string(in), in.u64(), string(in)));
                 }
                 yield new Status(nodeId, clusterId, software, role, term, leaderId, last, commit, applied, snapshot,
                         recovering, clusterVersion, alarm, members, restarts, installed);

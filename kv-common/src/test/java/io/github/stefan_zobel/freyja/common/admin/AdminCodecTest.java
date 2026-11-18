@@ -16,7 +16,7 @@ class AdminCodecTest {
 
     private static List<AdminRequest> requests() {
         return List.of(new AdminRequest.Status(), new AdminRequest.AddLearner(3, "h3:7000", "h3:7001"),
-                new AdminRequest.PromoteLearner(3), new AdminRequest.RemoveMember(0),
+                new AdminRequest.PromoteLearner(3, false), new AdminRequest.RemoveMember(0, true),
                 new AdminRequest.TransferLeadership(1), new AdminRequest.Snapshot(), new AdminRequest.Scrub(),
                 new AdminRequest.Compact(), new AdminRequest.ClearSpaceAlarm(), new AdminRequest.SetClusterVersion(2),
                 new AdminRequest.SetAddress(1, "", "h1:7001"));
@@ -26,7 +26,8 @@ class AdminCodecTest {
         return List.of(new AdminResponse.Done("taken at index 17"), new AdminResponse.Refused("not the leader", 2),
                 new AdminResponse.Refused("", -1),
                 new AdminResponse.Status(1, 0xC1A5, "0.1.0", "LEADER", 7, 1, 120, 118, 118, 100, false, 1, true,
-                        List.of(new Member(0, true, "h0:7000", "h0:7001"), new Member(3, false, "", "")), 2, 1),
+                        List.of(new Member(0, true, "h0:7000", "h0:7001", 120, Member.OK),
+                                new Member(3, false, "", "", -1, Member.UNKNOWN)), 2, 1),
                 new AdminResponse.Status(0, 1, "", "FOLLOWER", 0, -1, 0, 0, 0, 0, true, 0, false, List.of(), 0, 0));
     }
 
