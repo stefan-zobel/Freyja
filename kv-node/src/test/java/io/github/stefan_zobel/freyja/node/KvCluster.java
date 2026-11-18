@@ -51,6 +51,7 @@ final class KvCluster {
         Node node;
         final List<Notification> notes = new ArrayList<>();
         final List<SnapshotMeta> installed = new ArrayList<>();
+        final List<Long> expired = new ArrayList<>();
 
         Member(int id, ClusterConfig config) throws IOException {
             this.id = id;
@@ -110,10 +111,14 @@ final class KvCluster {
         public void snapshotInstalled(SnapshotMeta meta) {
             installed.add(meta);
         }
+
+        @Override
+        public void proposalExpired(long requestId) {
+            expired.add(requestId);
+        }
     }
 
-    Node.Options options = new Node.Options(RaftConfig.defaults(0, 5), 4 * 1024, 256, 16 * 1024, 5,
-            new SnapshotTransfers.Options(700, 3, 40, 2));
+    Node.Options options;
     final ArrayDeque<byte[]> network = new ArrayDeque<>();
     final List<Member> members = new ArrayList<>();
     /** The result of every applied entry, by index; an array so that null can be stored. */
@@ -141,7 +146,18 @@ final class KvCluster {
     }
 
     static KvCluster ofThree() throws IOException {
+        return ofThree(16 * 1024);
+    }
+
+    /** Three nodes that shorten their logs when these take more than the given bytes. */
+    static KvCluster ofThree(long snapshotLogBytes) throws IOException {
+        return ofThree(new Node.Options(RaftConfig.defaults(0, 5), 4 * 1024, 256, snapshotLogBytes, 5,
+                new SnapshotTransfers.Options(700, 3, 40, 2), new Node.Limits(10_000, 1L << 30, 0, 10)));
+    }
+
+    static KvCluster ofThree(Node.Options options) throws IOException {
         KvCluster cluster = new KvCluster();
+        cluster.options = options;
         for (int i = 0; i < 3; i++) {
             cluster.add(ClusterConfig.ofVoters(0, 1, 2)).start();
         }

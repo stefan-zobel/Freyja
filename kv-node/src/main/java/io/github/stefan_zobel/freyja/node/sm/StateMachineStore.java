@@ -11,6 +11,7 @@ import io.github.stefan_zobel.freyja.lsm.EngineOptions;
 import io.github.stefan_zobel.freyja.lsm.UnsupportedFormatException;
 import io.github.stefan_zobel.freyja.lsm.fs.StorageFileSystem;
 import io.github.stefan_zobel.freyja.node.StateMachine;
+import io.github.stefan_zobel.freyja.node.store.Bootstrap;
 import io.github.stefan_zobel.freyja.node.store.GenerationPointer;
 import io.github.stefan_zobel.freyja.raft.ClusterConfig;
 import io.github.stefan_zobel.freyja.raft.LogEntry;
@@ -52,6 +53,9 @@ public final class StateMachineStore implements StateMachine, Closeable {
     private KvStateMachine machine;
     /** The highest generation number ever used here; the next generation gets the one after. */
     private long highestGeneration;
+    /** Damage the engine of the state machine has reported; {@code null} if none. */
+    private CorruptionException damage;
+    private boolean verifying;
 
     private StateMachineStore(StorageFileSystem fs, Path directory, Options options, GenerationPointer current) {
         this.fs = fs;
@@ -90,7 +94,31 @@ public final class StateMachineStore implements StateMachine, Closeable {
     }
 
     /**
+     * Replaces the state machine of a node that is not running by an empty one, as the node
+     * had it when its directory was prepared. This is how a damaged state machine is given
+     * up; what it held comes back from the log or from another node.
+     */
+    public static void replaceByEmpty(StorageFileSystem fs, Path dataDirectory, Bootstrap bootstrap)
+            throws IOException {
+        Path directory = dataDirectory.resolve(DIRECTORY);
+        fs.createDirectories(directory);
+        GenerationPointer pointer = GenerationPointer.read(fs, directory);
+        long highest = pointer == null ? 0 : pointer.generation();
+        for (Path path : fs.list(directory)) {
+            String name = path.getFileName().toString();
+            if (name.matches("\\d{10}")) {
+                highest = Math.max(highest, Long.parseLong(name));
+            }
+        }
+        new GenerationPointer(highest + 1, SnapshotMeta.none(bootstrap.config()), bootstrap.clusterVersion())
+                .write(fs, directory);
+    }
+
+    /**
      * Opens the generation that counts and removes every other one.
+     *
+     * <p>The store makes itself the damage listener of the engine settings: damage that the
+     * engine finds later, in a read or in a scrub, is kept for {@link #damage}.
      *
      * @throws CorruptionException if {@code CURRENT} or the generation it names is damaged
      */
@@ -103,6 +131,11 @@ public final class StateMachineStore implements StateMachine, Closeable {
                     "the file that names the generation of the state machine is missing or damaged");
         }
         StateMachineStore store = new StateMachineStore(fs, directory, options, pointer);
+        options.engine().damageListener(found -> {
+            if (!store.verifying && store.damage == null) {
+                store.damage = found;
+            }
+        });
         for (Path path : fs.list(directory)) {
             String name = path.getFileName().toString();
             if (name.matches("\\d{10}")) {
@@ -142,6 +175,14 @@ public final class StateMachineStore implements StateMachine, Closeable {
     /** What a snapshot of the state machine as it is now covers. */
     public SnapshotMeta meta() {
         return new SnapshotMeta(machine.appliedIndex(), machine.appliedTerm(), machine.config());
+    }
+
+    /**
+     * Damage that the engine has found in the state machine since it was opened, or
+     * {@code null}. A state machine with damage must not be used any further.
+     */
+    public CorruptionException damage() {
+        return damage;
     }
 
     /** The number of the generation that counts. */
@@ -186,6 +227,7 @@ public final class StateMachineStore implements StateMachine, Closeable {
      * sender is all there is; it becomes the origin of the generation.
      */
     public boolean verify(long generation, SnapshotMeta meta, int clusterVersion) throws IOException {
+        verifying = true;
         try (KvStateMachine staged = KvStateMachine.open(fs, directory(generation), options.engine(),
                 options.sessionTimeoutMillis(), meta.config(), clusterVersion)) {
             return staged.appliedIndex() == meta.lastIncludedIndex()
@@ -195,6 +237,8 @@ public final class StateMachineStore implements StateMachine, Closeable {
                     && staged.engine().scrub() == 0;
         } catch (CorruptionException | UnsupportedFormatException e) {
             return false;
+        } finally {
+            verifying = false;
         }
     }
 

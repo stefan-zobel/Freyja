@@ -7,15 +7,21 @@ import java.util.ArrayDeque;
 import java.util.List;
 
 import io.github.stefan_zobel.freyja.common.DecodeException;
+import io.github.stefan_zobel.freyja.common.kv.Command;
+import io.github.stefan_zobel.freyja.common.kv.CommandCodec;
 import io.github.stefan_zobel.freyja.common.kv.CommandResult;
+import io.github.stefan_zobel.freyja.lsm.CorruptionException;
 import io.github.stefan_zobel.freyja.lsm.fs.StorageFileSystem;
 import io.github.stefan_zobel.freyja.node.raftlog.RaftLogStore;
 import io.github.stefan_zobel.freyja.node.sm.StateMachineStore;
 import io.github.stefan_zobel.freyja.node.snapshot.SnapshotTransfers;
+import io.github.stefan_zobel.freyja.node.store.Bootstrap;
 import io.github.stefan_zobel.freyja.node.store.HardStateStore;
 import io.github.stefan_zobel.freyja.node.store.InstallIntent;
 import io.github.stefan_zobel.freyja.node.store.NodeIdentity;
+import io.github.stefan_zobel.freyja.node.store.RepairMarker;
 import io.github.stefan_zobel.freyja.node.store.SnapshotMetaFile;
+import io.github.stefan_zobel.freyja.node.wire.AlarmCodec;
 import io.github.stefan_zobel.freyja.node.wire.MessageCodec;
 import io.github.stefan_zobel.freyja.node.wire.TransferCodec;
 import io.github.stefan_zobel.freyja.node.wire.TransferMessage;
@@ -30,6 +36,7 @@ import io.github.stefan_zobel.freyja.raft.RaftConfig;
 import io.github.stefan_zobel.freyja.raft.RaftEvent;
 import io.github.stefan_zobel.freyja.raft.RaftNode;
 import io.github.stefan_zobel.freyja.raft.Ready;
+import io.github.stefan_zobel.freyja.raft.Role;
 import io.github.stefan_zobel.freyja.raft.SnapshotDirective;
 import io.github.stefan_zobel.freyja.raft.SnapshotMeta;
 
@@ -72,9 +79,10 @@ public final class Node implements Closeable {
      * @param snapshotRetainEntries how many applied entries the log keeps then, for followers
      *                              that are a little behind
      * @param transfers             the settings of snapshot transfers
+     * @param limits                the limits that protect the node and the cluster
      */
     public record Options(RaftConfig raft, long segmentSize, int queueCapacity, long snapshotLogBytes,
-                          long snapshotRetainEntries, SnapshotTransfers.Options transfers) {
+                          long snapshotRetainEntries, SnapshotTransfers.Options transfers, Limits limits) {
         public Options {
             if (segmentSize < 1 || queueCapacity < 1 || snapshotLogBytes < 1 || snapshotRetainEntries < 0) {
                 throw new IllegalArgumentException("segment size " + segmentSize + ", queue capacity "
@@ -83,15 +91,56 @@ public final class Node implements Closeable {
             }
         }
 
-        /** Snapshots as by default: at 1 GiB of log, keeping 10,000 entries. */
+        /** Snapshots and limits as by default: at 1 GiB of log, keeping 10,000 entries. */
         public Options(RaftConfig raft, long segmentSize, int queueCapacity) {
-            this(raft, segmentSize, queueCapacity, 1L << 30, 10_000, SnapshotTransfers.Options.defaults());
+            this(raft, segmentSize, queueCapacity, 1L << 30, 10_000, SnapshotTransfers.Options.defaults(),
+                    Limits.defaults());
         }
 
         /** The defaults: 64 MiB segments, 4096 waiting events. */
         public static Options defaults() {
             return new Options(RaftConfig.defaults(0, 0), 64L << 20, 4096);
         }
+    }
+
+    /**
+     * The limits that protect the node and the cluster (sections 4.4 and 7).
+     *
+     * @param maxApplyLag     proposals are rejected while the state machine is more than this
+     *                        many entries behind the commit index
+     * @param quotaBytes      when the state machine holds more than this, the node raises the
+     *                        alarm for lack of space
+     * @param minFreeBytes    when the file system of the data directory has less than this
+     *                        free, the node raises the same alarm
+     * @param alarmCheckTicks how often the node looks at the two conditions, and how long it
+     *                        waits before it raises the alarm again
+     */
+    public record Limits(long maxApplyLag, long quotaBytes, long minFreeBytes, int alarmCheckTicks) {
+        public Limits {
+            if (maxApplyLag < 1 || quotaBytes < 1 || minFreeBytes < 0 || alarmCheckTicks < 1) {
+                throw new IllegalArgumentException("apply lag " + maxApplyLag + ", quota " + quotaBytes
+                        + ", free " + minFreeBytes + ", check every " + alarmCheckTicks + " ticks");
+            }
+        }
+
+        /** The defaults: 10,000 entries, 16 GiB, 1 GiB free, a look every 10 ticks. */
+        public static Limits defaults() {
+            return new Limits(10_000, 16L << 30, 1L << 30, 10);
+        }
+    }
+
+    /** What became of a proposal when it was handed to the node. */
+    public enum Admission {
+        /** It waits for the event loop. Its answer comes through the listener. */
+        ACCEPTED,
+        /** The queue is full, the node has stopped, or the state machine is too far behind. */
+        OVERLOADED,
+        /** Its deadline has passed. */
+        EXPIRED
+    }
+
+    /** A proposal that waits for the event loop. */
+    private record Proposal(long requestId, byte[] command, long deadline) {
     }
 
     /** A received snapshot that waits for the verdict of the core. */
@@ -120,6 +169,13 @@ public final class Node implements Closeable {
     private Staged staged;
     private long snapshotsCreated;
     private long snapshotsInstalled;
+    private boolean repairedAtStart;
+    /** The time of the node: the number of ticks it has processed. */
+    private long now;
+    private long expiredProposals;
+    private long alarmsRaised;
+    /** Request ids of the proposals the node makes itself; clients use ids from 0 on. */
+    private long ownRequestId = -1;
     private long rejectedEvents;
     private long invalidMessages;
     private boolean stopped;
@@ -173,6 +229,7 @@ public final class Node implements Closeable {
             throw new IOException(dataDirectory + " holds a node already");
         }
         HardStateStore.initialize(fs, dataDirectory);
+        new Bootstrap(config, clusterVersion).write(fs, dataDirectory);
         SnapshotMetaFile.write(fs, dataDirectory, SnapshotMeta.none(config));
         StateMachineStore.initialize(fs, dataDirectory, config, clusterVersion);
         // The identity comes last: a directory without it was never completely prepared.
@@ -199,9 +256,10 @@ public final class Node implements Closeable {
     /**
      * Starts a complete node from its data directory.
      *
-     * <p>An installation of a snapshot that a crash interrupted is completed first. If the log
-     * is damaged, the node makes its hard state say that it is in log-recovering mode and only
-     * then sets the damaged segments aside (section 3.3).
+     * <p>An installation of a snapshot that a crash interrupted is completed first. A state
+     * machine that was found damaged, earlier or now, is given up and rebuilt (section 6). If
+     * the log is damaged, the node makes its hard state say that it is in log-recovering mode
+     * and only then sets the damaged segments aside (section 3.3).
      *
      * @throws io.github.stefan_zobel.freyja.node.store.LostIdentityException if the node cannot
      *         know who it is or what it has promised (section 3.4)
@@ -224,7 +282,21 @@ public final class Node implements Closeable {
             }
             InstallIntent.clear(fs, dataDirectory);
         }
-        StateMachineStore store = StateMachineStore.open(fs, dataDirectory, machine);
+        boolean repaired = RepairMarker.exists(fs, dataDirectory);
+        StateMachineStore store = null;
+        if (!repaired) {
+            try {
+                store = StateMachineStore.open(fs, dataDirectory, machine);
+            } catch (CorruptionException e) {
+                // The state machine does not open. From here on it is not looked at again.
+                RepairMarker.write(fs, dataDirectory);
+                repaired = true;
+            }
+        }
+        if (repaired) {
+            giveUpStateMachine(fs, dataDirectory, options, identity, hardState);
+            store = StateMachineStore.open(fs, dataDirectory, machine);
+        }
         boolean opened = false;
         try {
             SnapshotMeta snapshot = SnapshotMetaFile.read(fs, dataDirectory);
@@ -236,6 +308,7 @@ public final class Node implements Closeable {
             }
             Node node = start(fs, dataDirectory, options, identity, hardState, snapshot, store, store,
                     transport, listener);
+            node.repairedAtStart = repaired;
             opened = true;
             return node;
         } finally {
@@ -243,6 +316,66 @@ public final class Node implements Closeable {
                 store.close();
             }
         }
+    }
+
+    /**
+     * Replaces a damaged state machine by an empty one (section 6). The marker is there when
+     * this starts and is removed when it is done, so a node that crashes in between does all
+     * of it again; every step can be repeated.
+     *
+     * <p>If the log reaches back to its first entry, the node applies it again from there.
+     * Otherwise the log is of no use without the state it continues, and it goes too: the
+     * node enters log-recovering mode, durably and before the log is touched, because it has
+     * acknowledged entries that it will no longer hold. The leader then sends its state
+     * machine and the entries after it.
+     */
+    private static void giveUpStateMachine(StorageFileSystem fs, Path dataDirectory, Options options,
+                                           NodeIdentity identity, HardStateStore hardState)
+            throws IOException {
+        Bootstrap bootstrap = Bootstrap.read(fs, dataDirectory);
+        if (bootstrap == null) {
+            throw new IOException(dataDirectory.resolve(Bootstrap.FILE_NAME) + " is missing or damaged; "
+                    + "the state machine cannot be rebuilt. Replace the member.");
+        }
+        SnapshotMeta snapshot = SnapshotMetaFile.read(fs, dataDirectory);
+        if (snapshot == null || snapshot.lastIncludedIndex() > 0) {
+            if (snapshot != null) {
+                // Through the core, which notes in the hard state what the lost log held: with
+                // that the node can still vote as it would have voted with its log.
+                long index = snapshot.lastIncludedIndex();
+                StateMachine none = new StateMachine() {
+                    @Override
+                    public long appliedIndex() {
+                        return index;
+                    }
+
+                    @Override
+                    public List<CommandResult> apply(List<LogEntry> entries) {
+                        throw new IllegalStateException("nothing is applied while the state machine is given up");
+                    }
+                };
+                Node node = start(fs, dataDirectory, options, identity, hardState, snapshot, none, null,
+                        (to, message) -> {
+                        }, notification -> {
+                        });
+                try {
+                    node.raft.step(new RaftEvent.LogDamaged(index + 1));
+                    node.drain();
+                } finally {
+                    node.log.close();
+                }
+            } else {
+                // Where the log starts is not known either. The node says that it lost a log
+                // it knows nothing about, and gives no vote until it is refilled.
+                HardState stored = hardState.get();
+                hardState.put(new HardState(stored.term(), stored.votedFor(), true, stored.logEpoch() + 1, 0,
+                        HardState.UNKNOWN_TERM));
+            }
+            SnapshotMetaFile.write(fs, dataDirectory, SnapshotMeta.none(bootstrap.config()));
+            RaftLogStore.deleteSegments(fs, dataDirectory.resolve(RAFT_DIRECTORY));
+        }
+        StateMachineStore.replaceByEmpty(fs, dataDirectory, bootstrap);
+        RepairMarker.clear(fs, dataDirectory);
     }
 
     private static Node start(StorageFileSystem fs, Path dataDirectory, Options options, NodeIdentity identity,
@@ -308,6 +441,14 @@ public final class Node implements Closeable {
      */
     public boolean offer(byte[] message) {
         try {
+            if (AlarmCodec.isAlarm(message)) {
+                AlarmCodec.Request request = AlarmCodec.decode(message);
+                if (request.to() != identity.nodeId() || store == null) {
+                    invalidMessages++;
+                    return false;
+                }
+                return enqueue(request);
+            }
             if (TransferCodec.isTransfer(message)) {
                 TransferCodec.Envelope envelope = TransferCodec.decode(message);
                 if (envelope.to() != identity.nodeId() || transfers == null) {
@@ -331,6 +472,29 @@ public final class Node implements Closeable {
     /** Hands an event of a client or an administrator to the core. */
     public boolean submit(RaftEvent event) {
         return enqueue(event);
+    }
+
+    /**
+     * Hands a command of a client to the node (section 7). A command that cannot be taken is
+     * rejected at once; one that waits beyond its deadline is dropped before it is proposed.
+     *
+     * @param requestId identifies the proposal in the answers of the core; not negative
+     * @param deadline  the time of the node ({@link #now}) after which nobody waits for the
+     *                  answer
+     */
+    public Admission propose(long requestId, byte[] command, long deadline) {
+        if (requestId < 0) {
+            throw new IllegalArgumentException("request id " + requestId);
+        }
+        if (deadline < now) {
+            expiredProposals++;
+            return Admission.EXPIRED;
+        }
+        if (!stopped && raft.view().commitIndex() - stateMachine.appliedIndex() > options.limits().maxApplyLag()) {
+            rejectedEvents++;
+            return Admission.OVERLOADED;
+        }
+        return enqueue(new Proposal(requestId, command, deadline)) ? Admission.ACCEPTED : Admission.OVERLOADED;
     }
 
     /**
@@ -370,12 +534,27 @@ public final class Node implements Closeable {
         }
         try {
             if (item instanceof RaftEvent event) {
-                if (event instanceof RaftEvent.Tick && transfers != null) {
-                    transfers.tick();
+                if (event instanceof RaftEvent.Tick) {
+                    now++;
+                    if (transfers != null) {
+                        transfers.tick();
+                    }
+                    if (store != null && now % options.limits().alarmCheckTicks() == 0) {
+                        checkSpace();
+                    }
                 }
                 raft.step(event);
             } else if (item instanceof TransferCodec.Envelope envelope) {
                 transfers.handle(envelope.from(), envelope.message());
+            } else if (item instanceof Proposal proposal) {
+                if (proposal.deadline() < now) {
+                    expiredProposals++;
+                    listener.proposalExpired(proposal.requestId());
+                } else {
+                    raft.step(new RaftEvent.ClientPropose(proposal.requestId(), proposal.command()));
+                }
+            } else if (item instanceof AlarmCodec.Request request) {
+                raiseAlarm(request.alarm());
             }
             work();
             if (item == SNAPSHOT_REQUEST) {
@@ -390,6 +569,11 @@ public final class Node implements Closeable {
                 // The core gave no verdict on a received snapshot; it has no use for it.
                 store.discard(staged.generation());
                 staged = null;
+            }
+            if (store != null && store.damage() != null) {
+                // A scrub or a read found damage. Nothing more is applied to this state machine.
+                stateMachineDamaged();
+                throw store.damage();
             }
         } catch (IOException | RuntimeException e) {
             // Whatever failed, the state in memory may be ahead of the state on disk.
@@ -438,7 +622,13 @@ public final class Node implements Closeable {
             }
             if (ready.hasEntriesToApply()) {
                 List<LogEntry> entries = log.entries(ready.applyFrom(), ready.applyTo() + 1, Integer.MAX_VALUE);
-                List<CommandResult> results = stateMachine.apply(entries);
+                List<CommandResult> results;
+                try {
+                    results = stateMachine.apply(entries);
+                } catch (CorruptionException e) {
+                    stateMachineDamaged();
+                    throw e;
+                }
                 for (int i = 0; i < entries.size(); i++) {
                     listener.applied(entries.get(i), results.get(i));
                 }
@@ -469,6 +659,51 @@ public final class Node implements Closeable {
                 }
             }
         }
+    }
+
+    // ------------------------------------------------------------------ alarms
+
+    /** Raises the alarm for lack of space if the state machine or the disk is too full. */
+    private void checkSpace() throws IOException {
+        if (store.machine().alarms().contains(Command.Alarm.NOSPACE)) {
+            return;
+        }
+        if (store.machine().engine().storedBytes() > options.limits().quotaBytes()
+                || fs.freeSpace(dataDirectory) < options.limits().minFreeBytes()) {
+            raiseAlarm(Command.Alarm.NOSPACE);
+        }
+    }
+
+    /**
+     * Gets an alarm into the replicated state: the leader proposes it, every other node asks
+     * the leader to. Nothing is remembered: while the condition lasts, the node asks again.
+     */
+    private void raiseAlarm(Command.Alarm alarm) {
+        if (store == null || store.machine().alarms().contains(alarm)) {
+            return;
+        }
+        ProtocolState state = raft.view();
+        if (state.role() == Role.LEADER) {
+            alarmsRaised++;
+            // Time stamp 0: the command of a node does not move the time of the state machine.
+            raft.step(new RaftEvent.ClientPropose(ownRequestId--,
+                    CommandCodec.encode(0, new Command.SetAlarm(alarm))));
+        } else if (state.leaderId() >= 0 && state.leaderId() != identity.nodeId()) {
+            transport.send(state.leaderId(), AlarmCodec.encode(identity.nodeId(), state.leaderId(), alarm));
+        }
+    }
+
+    /**
+     * Records that the state machine is damaged and stops the node (section 6). The node
+     * rebuilds the state machine at its next start. For whoever reads the state machine and
+     * finds damage there; the event loop calls it for damage that it meets itself.
+     */
+    public void stateMachineDamaged() throws IOException {
+        if (store != null) {
+            RepairMarker.write(fs, dataDirectory);
+        }
+        stopped = true;
+        queue.clear();
     }
 
     // ------------------------------------------------------------------ snapshots
@@ -591,6 +826,26 @@ public final class Node implements Closeable {
     /** How often the node has installed a snapshot of another node. */
     public long snapshotsInstalled() {
         return snapshotsInstalled;
+    }
+
+    /** The time of the node: the number of ticks it has processed. Deadlines are given in it. */
+    public long now() {
+        return now;
+    }
+
+    /** Proposals dropped or refused because their deadline had passed. */
+    public long expiredProposals() {
+        return expiredProposals;
+    }
+
+    /** How often this node, as leader, has proposed an alarm. */
+    public long alarmsRaised() {
+        return alarmsRaised;
+    }
+
+    /** Whether this start replaced a damaged state machine by an empty one. */
+    public boolean repairedAtStart() {
+        return repairedAtStart;
     }
 
     /** The first index the log store holds. */

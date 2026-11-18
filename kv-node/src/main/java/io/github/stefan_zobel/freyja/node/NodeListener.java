@@ -21,6 +21,13 @@ public interface NodeListener {
     }
 
     /**
+     * A proposal waited for the event loop beyond its deadline and was dropped. Nobody waits
+     * for its answer any more.
+     */
+    default void proposalExpired(long requestId) {
+    }
+
+    /**
      * The state machine was replaced by a snapshot of another node. Whatever the listener
      * derived from applied entries up to the index of the snapshot is out of date.
      */

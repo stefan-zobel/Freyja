@@ -60,9 +60,14 @@ Rules:
   - Done so far: commands and results with their codec (`kv-common`), the state machine
     with namespaces, applied index, configuration, sessions, and conditional batches.
     Alarms and the cluster version in the replicated state. Generations of the state
-    machine, shortening of the log, snapshot transfer and crash-safe installation.
-    Open: raising the alarm from the quota and from low space, reverse scans (the engine
-    iterates forward only), repair of a damaged state machine, overload.
+    machine, shortening of the log, snapshot transfer and crash-safe installation. Repair
+    of a damaged state machine. The alarm from the quota and from low free space. Deadlines
+    of proposals and the limit on the apply lag.
+  - Moved: the step-down of a leader with a slow disk needs the clock and comes with the
+    whole-system simulation (C3).
+  - Open decision: `node.md` §4.3 asks for reverse scans; the engine iterates forward only.
+    Either the engine gets backward iteration or the client API drops reverse scans. To be
+    decided before the client API of C4.
 - **C3.** Whole-system simulation with all faults and the reachability probes. Protected
   `SystemInvariants` file. Trace validation of whole-system traces.
 - **C4.** Real transport with virtual threads. Wire protocol with handshake. `kv-client`.

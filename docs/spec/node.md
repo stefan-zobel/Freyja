@@ -54,24 +54,33 @@ The event loop:
 ```
 NODE              identity: cluster id, node id, format version (written once)
 HARDSTATE-A/-B    term, vote, state of the log-recovering mode (§3.2)
+BOOTSTRAP         what the node was told when the directory was prepared (written once)
 SNAPSHOT          what the stored log starts after: index, term, configuration (§5)
 INSTALL           present only while a snapshot is being installed (§5)
+REPAIR            present only while a damaged state machine is given up (§6)
 raft/             Raft log segments
 sm/CURRENT        the active state-machine generation and what it started from
 sm/<generation>/  an lsm-core engine directory; a snapshot is received into a new one
 snap/out-<n>/     a checkpoint being sent
 ```
 
-The small files (`NODE`, `HARDSTATE-*`, `SNAPSHOT`, `INSTALL`, `sm/CURRENT`) share one layout:
+The small files (`NODE`, `HARDSTATE-*`, `BOOTSTRAP`, `SNAPSHOT`, `INSTALL`, `REPAIR`,
+`sm/CURRENT`) share one layout:
 magic (`uint32`), format version (`uint8`), body, CRC32C over everything before it, bound to
 a number that stands for the file. Each is replaced as a whole: written to a temporary file,
 synced, renamed, and the directory is synced.
 
 | File | Magic | Body |
 |---|---|---|
+| `BOOTSTRAP` | `FRYB` | cluster version (`uint32`), encoded configuration |
 | `SNAPSHOT` | `FRYS` | index, term (`uint64` each), encoded configuration |
+| `REPAIR` | `FRYR` | empty; only the presence of the file counts |
 | `INSTALL` | `FRYI` | flags (`uint8`: bit 0 keep the log suffix, bit 1 replace the state machine), generation (`uint64`), cluster version (`uint32`), then as `SNAPSHOT` |
 | `sm/CURRENT` | `FRYC` | generation (`uint64`), cluster version (`uint32`), then as `SNAPSHOT`: the origin of the generation |
+
+`BOOTSTRAP` holds the configuration and the cluster version the cluster started with; for a
+node that joined a cluster, an empty configuration. An empty state machine that is to apply
+the log from its first entry starts from exactly this.
 
 The origin of a generation is what it held when it became the state machine: nothing for
 the first generation of a node, a snapshot of another node later. Its configuration and its
@@ -294,6 +303,15 @@ no leader can be elected. Recovery then is a manual, explicitly unsafe procedure
   it proposes a `NOSPACE` alarm. While the alarm is set in the replicated state, all nodes
   reject writes other than deletes. An administrator clears it.
 - A node whose engine reports low free space raises the same alarm.
+- The size is the bytes the engine holds: its tables and what waits in memory. Low free
+  space is less than `minFreeBytes` (default 1 GiB) in the file system of the data directory.
+- A node looks at both every few ticks (default 10) while the alarm is not set in its state
+  machine. A leader proposes the command that sets the alarm; any other node asks the leader
+  to, with a message of its own (§8). Nothing is remembered: as long as the condition lasts
+  and the alarm is not set, the node asks again. An alarm that an administrator clears while
+  the condition lasts therefore comes back.
+- Commands that a node proposes itself carry the time stamp 0, so they do not move the time
+  of the state machine, and request ids below 0, which no client uses.
 - While `NOSPACE` is set, a batch that contains a put is rejected with `NO_SPACE`; for a
   conditional batch a put in either of its two batches is enough, whatever the conditions
   say. A batch of deletes only, and every session command, is applied. A rejected command
@@ -377,12 +395,40 @@ Local storage never guesses; the cluster repairs.
 
 | Finding | Reaction |
 |---|---|
-| Damage in the state-machine engine (read path, scrubber, failed open) | Discard the generation, request a snapshot from the leader, install it. Raft log and identity are unaffected. |
+| Damage in the state-machine engine (read path, scrubber, failed open) | Give the generation up and rebuild it: from the own log if that reaches back to its first entry, otherwise from the leader (below). The identity is unaffected. |
 | Damage in the Raft log | Log-recovering mode (§3.3). |
 | Lost identity | Refuse to start; replace the member (§3.4). |
 | Sync failure | Stop the process. On restart, normal recovery decides. |
 
 A node that is repairing reports that state through the admin API and the metrics.
+
+**A damaged state machine** is never used again once the damage is known:
+
+1. Whoever finds the damage (applying an entry, a read, a scrub through the damage listener
+   of the engine, or the start when the engine does not open) writes `REPAIR`. A running
+   node stops; the repair is part of the next start.
+2. If `SNAPSHOT` names index 0, the log reaches back to its first entry and stays. Otherwise
+   the log is of no use without the state it continues, and it goes too:
+   1. The core is told that the log is lost from the entry after `SNAPSHOT` on. It enters
+      log-recovering mode and notes in the hard state what the lost log held, so the node
+      can still vote as it would have voted with its log (`raft.md` §8). This is durable
+      before the log is touched. If `SNAPSHOT` cannot be read either, the hard state says
+      that the lost log is unknown, and the node gives no vote until it is refilled.
+   2. `SNAPSHOT` is set to index 0 with the configuration of `BOOTSTRAP`, and every segment
+      of the log is deleted.
+3. `sm/CURRENT` is set to a new, empty generation whose origin is `BOOTSTRAP`.
+4. `REPAIR` is deleted.
+
+After that the node starts as usual. With its log it applies everything again. Without it,
+the leader sends its state machine and the entries after it, as to any node in
+log-recovering mode, and the mode ends as specified there.
+
+Every step can be repeated; a node that finds `REPAIR` at its start begins again at step 2.
+Without a readable `BOOTSTRAP` the state machine cannot be rebuilt: the node refuses to
+start and the member is replaced.
+
+Giving up an intact log costs a transfer that a cleverer procedure could avoid. It keeps the
+repair on the one path that is verified for a node that has lost what it acknowledged.
 
 ## 7. Overload and Slow Disks
 
@@ -390,10 +436,19 @@ A node that is repairing reports that state through the admin API and the metric
   overload error; it never waits unboundedly.
 - Every client request carries a deadline. It is checked at admission, before proposing, and
   before answering. Expired requests are dropped.
+  - Inside a node a deadline is a point in the time of the node, which is the number of
+    ticks it has processed. The layer that receives a request turns the time the client
+    allows into that.
+  - A proposal whose deadline has passed is refused at admission. One that waits in the
+    queue beyond its deadline is dropped when its turn comes, and the listener is told.
 - A leader whose log sync takes longer than `slowSyncThreshold` (default: one election
-  timeout) steps down, so that a node with a healthy disk can lead.
+  timeout) steps down, so that a node with a healthy disk can lead. This needs the clock and
+  comes with it (milestone C3).
 - Proposals are rejected when the uncommitted cap of `raft.md` §4 is reached, or when the
-  state machine falls more than a configured number of entries behind the commit index.
+  state machine falls more than a configured number of entries (default 10,000) behind the
+  commit index.
+- A burst can overrun the queue of a follower as well. What a follower drops is sent again
+  by the rule for lost appends (`raft.md` §4).
 
 ## 8. Wire Protocol
 
@@ -407,6 +462,8 @@ A node that is repairing reports that state through the admin API and the metric
     boolean is one byte.
   - A receiver rejects what it does not know: another version, an unknown type, a length
     that does not fit the type, a wrong checksum.
+  - A request to the leader to set an alarm uses the same frame with type 40, 0 in the
+    place of the term, and one byte for the alarm (0 `NOSPACE`).
   - The messages of a snapshot transfer use the same frame with the types from 32 on
     (32 offer, 33 fetch, 34 chunk, 35 done, 36 abort) and the transfer id in the place of
     the term.

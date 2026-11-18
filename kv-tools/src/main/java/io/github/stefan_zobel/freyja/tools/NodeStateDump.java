@@ -7,11 +7,13 @@ import java.nio.file.Path;
 import io.github.stefan_zobel.freyja.lsm.fs.RealFileSystem;
 import io.github.stefan_zobel.freyja.lsm.fs.StorageFileSystem;
 import io.github.stefan_zobel.freyja.node.sm.StateMachineStore;
+import io.github.stefan_zobel.freyja.node.store.Bootstrap;
 import io.github.stefan_zobel.freyja.node.store.GenerationPointer;
 import io.github.stefan_zobel.freyja.node.store.HardStateStore;
 import io.github.stefan_zobel.freyja.node.store.InstallIntent;
 import io.github.stefan_zobel.freyja.node.store.LostIdentityException;
 import io.github.stefan_zobel.freyja.node.store.NodeIdentity;
+import io.github.stefan_zobel.freyja.node.store.RepairMarker;
 import io.github.stefan_zobel.freyja.node.store.SnapshotMetaFile;
 import io.github.stefan_zobel.freyja.raft.HardState;
 import io.github.stefan_zobel.freyja.raft.SnapshotMeta;
@@ -66,6 +68,17 @@ public final class NodeStateDump {
                 out.println("hard state:   " + (useA ? HardStateStore.FILE_A : HardStateStore.FILE_B) + " counts"
                         + (a == null || b == null || a.counter() != b.counter()
                                 ? "; the other file is written again at the next start" : ""));
+            }
+            if (fs.exists(directory.resolve(Bootstrap.FILE_NAME))) {
+                Bootstrap bootstrap = Bootstrap.read(fs, directory);
+                out.println("bootstrap:    " + (bootstrap == null
+                        ? "DAMAGED (a damaged state machine could not be rebuilt)"
+                        : "cluster version " + bootstrap.clusterVersion() + ", voters "
+                        + new java.util.TreeSet<>(bootstrap.config().voters()) + ", learners "
+                        + new java.util.TreeSet<>(bootstrap.config().learners())));
+            }
+            if (RepairMarker.exists(fs, directory)) {
+                out.println("repair:       the state machine is given up; it is rebuilt at the next start");
             }
             SnapshotMeta snapshot = SnapshotMetaFile.read(fs, directory);
             boolean hasSnapshotFile = fs.exists(directory.resolve(SnapshotMetaFile.FILE_NAME));

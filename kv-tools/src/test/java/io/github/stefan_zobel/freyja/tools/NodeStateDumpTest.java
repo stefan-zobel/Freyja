@@ -17,6 +17,7 @@ import io.github.stefan_zobel.freyja.node.Node;
 import io.github.stefan_zobel.freyja.node.store.HardStateStore;
 import io.github.stefan_zobel.freyja.node.store.NodeIdentity;
 import io.github.stefan_zobel.freyja.node.store.InstallIntent;
+import io.github.stefan_zobel.freyja.node.store.RepairMarker;
 import io.github.stefan_zobel.freyja.node.store.SnapshotMetaFile;
 import io.github.stefan_zobel.freyja.raft.ClusterConfig;
 import io.github.stefan_zobel.freyja.raft.HardState;
@@ -74,6 +75,12 @@ class NodeStateDumpTest {
         assertEquals(0, run(DIR.toString()), out());
         assertTrue(out().contains("log start:    after index 0 of term 0, voters [0, 1, 2], learners []"), out());
         assertTrue(out().contains("generation:   1, cluster version 4, started from index 0"), out());
+        assertTrue(out().contains("bootstrap:    cluster version 4, voters [0, 1, 2], learners []"), out());
+        assertTrue(!out().contains("repair:"), out());
+        RepairMarker.write(fs, DIR);
+        assertEquals(0, run(DIR.toString()), out());
+        assertTrue(out().contains("repair:       the state machine is given up"), out());
+        RepairMarker.clear(fs, DIR);
         assertTrue(!out().contains("installation:"), out());
 
         SnapshotMeta meta = new SnapshotMeta(90, 3, config);

@@ -310,6 +310,16 @@ replace it.
   operation, then at its second, and so on until one runs through. After each failure the
   node crashes and starts again; it must complete the installation, leave neither the
   intent file nor a second generation behind, and converge with the others.
+- **Repair:** tables of a stopped node are damaged so that the engine does not open; with a
+  log that reaches back to its first entry the node applies it again, with a shortened log it
+  enters log-recovering mode with the lost log noted in its hard state and gets the state
+  machine from the leader. Damage in a block that only a scrub reads stops the running node
+  and is repaired at its next start. The repair is failed at every file operation in turn,
+  as the installation is.
+- **Limits:** a state machine over its quota and a follower short of disk space set the
+  alarm for the whole cluster, puts are rejected and deletes applied, and the alarm comes
+  back when it is cleared too early; a proposal past its deadline is refused or dropped; a
+  full queue rejects at once and the cluster recovers from the burst.
 - Mutations that these tests catch: no flush before the log is shortened; `SNAPSHOT` written
   after the log is shortened; an interrupted installation not completed; the log not reset
   by a completed installation; the intent not written; a received snapshot not scrubbed; a

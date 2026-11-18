@@ -58,7 +58,7 @@ public final class TransferCodec {
 
     /** Whether a frame claims to hold a transfer message. Says nothing about its validity. */
     public static boolean isTransfer(byte[] frame) {
-        return frame.length > 1 && (frame[1] & 0xFF) >= FIRST_TYPE;
+        return frame.length > 1 && (frame[1] & 0xFF) >= FIRST_TYPE && (frame[1] & 0xFF) < AlarmCodec.TYPE;
     }
 
     public static byte[] encode(int from, int to, TransferMessage message) {

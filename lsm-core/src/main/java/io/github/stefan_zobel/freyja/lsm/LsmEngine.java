@@ -1503,6 +1503,26 @@ public final class LsmEngine implements Closeable {
         }
     }
 
+    /**
+     * The bytes the engine holds: its table files and what waits in memory to be written to
+     * one. Versions that a compaction will drop are counted as long as they are there.
+     */
+    public long storedBytes() {
+        ReadState current = state;
+        if (current == null) {
+            return 0;
+        }
+        long bytes = current.mem().approximateBytes();
+        for (Frozen frozen : current.frozen()) {
+            bytes += frozen.mem().approximateBytes();
+        }
+        Version version = current.version();
+        for (int level = 0; level < version.levelCount(); level++) {
+            bytes += version.levelBytes(level);
+        }
+        return bytes;
+    }
+
     /** Returns the number of table files in which damage was found since the engine opened. */
     public int damagedFileCount() {
         return damagedFiles.size();
