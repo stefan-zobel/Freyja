@@ -63,9 +63,8 @@ Rules:
     machine, shortening of the log, snapshot transfer and crash-safe installation. Repair
     of a damaged state machine. The alarm from the quota and from low free space. Deadlines
     of proposals and the limit on the apply lag.
-  - Open decision: `node.md` §4.3 asks for reverse scans; the engine iterates forward only.
-    Either the engine gets backward iteration or the client API drops reverse scans. To be
-    decided before the client API of C4.
+  - Decided: reverse scans stay in the client API (`node.md` §4.3), so the engine gets
+    backward iteration. Until it has, a node refuses them as unsupported.
 - **C3.** Whole-system simulation with all faults and the reachability probes. Protected
   `SystemInvariants` file. Trace validation of whole-system traces.
   - Done so far: the step-down of a leader with a slow disk; the simulation with clients,
@@ -120,3 +119,50 @@ Rules:
     the recovery from a lost majority (`operations.md` §3).
   - Open: the upgrade procedure and the compatibility suite, which need a second release;
     the runbook, whose procedures are to be executed on a real cluster.
+
+## Open Items
+
+Everything that is not done, in one place. The milestones above say what is done. An item
+leaves this list in the change that completes it.
+
+**Work that can be done on the development machine:**
+
+| Item | Milestone | Notes |
+|---|---|---|
+| Backward iteration in the engine, reverse scans through node and client | C2 | Decided; the wire format has the flag already |
+| Trace validation of the runs with membership changes, transfers, and log damage | B3 | A run of TLC; `docs/tla/README.md` |
+| Exhaustive check of a configuration with membership change | B3 | A run of TLC; the last attempt ran out of memory |
+| Export of whole-system runs as traces, and their validation | C3 | The export is not written; then runs of TLC |
+| The probes that are counted below the node | C3 | `verification.md` §3 |
+| A damaged log in the Raft simulator hands back entries cut off before the damage | C3 | Strengthens `raft-sim` |
+| Workloads during compaction, snapshot transfer, and follower catch-up | D3 | `verification.md` §7 |
+| Write and space amplification in the results | D3 | Needs figures of the nodes |
+| Overload tests at twice the sustainable load | D3 | |
+| TLS for peers, clients, and administration; authentication; certificate reload | E2 | Not started; how the role of an administrator is expressed is to be decided |
+| The runbook as a text | E3 | Its execution is listed below |
+
+**Work that needs Linux:**
+
+| Item | Milestone | Notes |
+|---|---|---|
+| External fault suite with the cross-check by an independent checker | D2 | Not started; the device-level stage is optional and needs privileges |
+| Performance baselines on the production platform; tuning | D3 | |
+| Soak tests of several days with monitoring | D4 | Not started; needs a machine that can be left alone for a week |
+
+**Work that needs something that does not exist yet:**
+
+| Item | Milestone | Needs |
+|---|---|---|
+| Multi-version simulation harness | D1 | A second release |
+| Upgrade procedure with finalization, verified in simulation and with real processes | E3 | A second release |
+| Compatibility suite | E3 | A first release to capture, a second to read it |
+| A scheduled job for the continuous simulation | D1 | A CI system |
+| CI green on Windows, Linux, and macOS | — | The workflow exists and has never run; it needs the remote repository |
+| Every procedure of the runbook executed once | E3 | A real cluster |
+| Review against the exit criteria | E3 | Everything above |
+
+**For the project owner:**
+
+- Review of `SystemInvariants` (`kv-node`). It was written with milestone C3 and is protected
+  from then on (`verification.md` §2.6).
+- The numbers of the exit criteria (`verification.md` §8) are proposals.
