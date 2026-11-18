@@ -41,6 +41,13 @@ public sealed interface RaftEvent {
     record TransferLeadership(long requestId, int toNode) implements RaftEvent {
     }
 
+    /**
+     * The runtime found that stored log entries from {@code firstDamagedIndex} on cannot be
+     * read. The node may have acknowledged them; it enters log-recovering mode.
+     */
+    record LogDamaged(long firstDamagedIndex) implements RaftEvent {
+    }
+
     /** A client asks to append a command to the log. */
     record ClientPropose(long requestId, byte[] command) implements RaftEvent {
         public ClientPropose {

@@ -91,6 +91,17 @@ deleted. This test must pass on Windows.
     of the final configuration.
   - Leadership transfers are requested in the same seed set, also to targets that are down
     or cut off. The seed set must reach both changes of leader and aborted transfers.
+  - Log damage in the same seed set: the stored log of a node becomes unreadable from some
+    index on, also where the node has acknowledged or applied it. If the node crashes before
+    the truncation has reached its disk, the damage is found again at the restart. Damage
+    is injected only while a majority of the voters holds an intact log: the protocol
+    repairs a minority, not a lost majority. The seed set must reach nodes that enter the
+    log-recovering mode and nodes that leave it.
+  - Mutations of the mode that the simulator catches: a recovering node that votes or
+    starts an election, one that leaves the mode at once, a leader that keeps the match
+    index of a follower of a new epoch, an acknowledgment that outlives its entries. Leaving
+    the mode on an append that does not name the present epoch is caught only by a unit
+    test of the core; the simulator has not reached that interleaving.
   - The settings of a run (cluster size, delays, flow-control limits, load) are drawn from
     its seed, so that the seed set covers many shapes of a cluster.
 - **Safety invariants, checked after every step:**

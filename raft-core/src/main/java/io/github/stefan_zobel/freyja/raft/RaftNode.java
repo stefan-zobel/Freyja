@@ -74,7 +74,14 @@ public final class RaftNode {
     // ---- hard state
     private long term;
     private int votedFor;
-    private final boolean logRecovering;
+    /**
+     * Log-recovering mode: the node has lost entries it may have acknowledged. It grants no
+     * votes and starts no elections until its log again matches the log of a leader through
+     * a committed entry of that leader's term.
+     */
+    private boolean logRecovering;
+    /** Counts the losses of log entries. It is part of the hard state. */
+    private long logEpoch;
     private boolean hardStateDirty;
 
     // ---- log
@@ -158,6 +165,8 @@ public final class RaftNode {
         long matchAtCheck;
         /** The latest heartbeat round the follower has answered. */
         long ackedRound;
+        /** The highest log epoch seen from the follower; -1 before its first answer. */
+        long epoch = -1;
         /** Last index of every append in flight, ascending. */
         final ArrayDeque<Long> inflight = new ArrayDeque<>();
 
@@ -176,6 +185,7 @@ public final class RaftNode {
         this.term = state.hardState().term();
         this.votedFor = state.hardState().votedFor();
         this.logRecovering = state.hardState().logRecovering();
+        this.logEpoch = state.hardState().logEpoch();
         this.durableIndex = log.lastIndex();
         this.handedOutIndex = durableIndex;
         long snapshotIndex = state.snapshot().lastIncludedIndex();
@@ -183,12 +193,13 @@ public final class RaftNode {
             throw new IllegalArgumentException("the log starts at " + log.firstIndex()
                     + " but the snapshot ends at " + snapshotIndex);
         }
-        if (appliedIndex < snapshotIndex || appliedIndex > durableIndex) {
+        // A node in log-recovering mode may have applied entries that its log has lost.
+        if (appliedIndex < snapshotIndex || (appliedIndex > durableIndex && !logRecovering)) {
             throw new IllegalArgumentException("applied index " + appliedIndex + " outside "
                     + snapshotIndex + ".." + durableIndex);
         }
         // Whatever was applied was committed.
-        this.commitIndex = appliedIndex;
+        this.commitIndex = Math.min(appliedIndex, durableIndex);
         this.applyOffered = appliedIndex;
         this.prngState = config.seed();
         // The configuration in force is the newest one in the log, committed or not.
@@ -236,6 +247,7 @@ public final class RaftNode {
             case ClientReadIndex r -> readIndex(r.requestId());
             case ProposeConfigChange c -> proposeConfigChange(c.requestId(), c.change());
             case TransferLeadership t -> transferLeadership(t.requestId(), t.toNode());
+            case RaftEvent.LogDamaged d -> logDamaged(d.firstDamagedIndex());
         }
         RoleChanged now = new RoleChanged(role, term, leaderId);
         if (!now.equals(lastRoleNotice)) {
@@ -261,7 +273,7 @@ public final class RaftNode {
 
         HardState hardState = null;
         if (hardStateDirty) {
-            hardState = new HardState(term, votedFor, logRecovering);
+            hardState = new HardState(term, votedFor, logRecovering, logEpoch);
             hardStateDirty = false;
         }
         long truncate = truncateFrom;
@@ -430,6 +442,38 @@ public final class RaftNode {
             throw new IllegalStateException("truncation at " + from
                     + " would remove committed entries (commit index " + commitIndex + ")");
         }
+        removeSuffix(from);
+    }
+
+    /**
+     * Log-recovering mode (docs/spec/raft.md, section 8). The hard state with the flag is
+     * part of the same {@code Ready} as the truncation and is persisted before it.
+     */
+    private void logDamaged(long firstDamagedIndex) {
+        if (firstDamagedIndex <= floorIndex()) {
+            throw new IllegalArgumentException("damage at " + firstDamagedIndex
+                    + " reaches into the snapshot, which ends at " + floorIndex());
+        }
+        if (firstDamagedIndex > lastIndex()) {
+            return; // nothing of the log is affected
+        }
+        if (role != Role.FOLLOWER) {
+            becomeFollower(term, NO_NODE);
+        }
+        leaderId = NO_NODE;
+        logRecovering = true;
+        logEpoch++;
+        hardStateDirty = true;
+        // An acknowledgment that still waits for its entries to become durable would promise
+        // entries that are gone.
+        gated.removeIf(g -> g.message().message() instanceof AppendResponse response && response.success());
+        // Entries that were committed are gone from this log, though not from the cluster.
+        // What the state machine has applied stays applied.
+        commitIndex = Math.min(commitIndex, firstDamagedIndex - 1);
+        removeSuffix(firstDamagedIndex);
+    }
+
+    private void removeSuffix(long from) {
         if (from <= handedOutIndex) {
             // The store holds, or will hold, entries that are no longer part of the log.
             truncateFrom = truncateFrom == -1 ? from : Math.min(truncateFrom, from);
@@ -542,7 +586,7 @@ public final class RaftNode {
             }
         } else {
             electionElapsed++;
-            if (voter && electionElapsed >= randomizedElectionTicks) {
+            if (voter && !logRecovering && electionElapsed >= randomizedElectionTicks) {
                 campaign();
             }
         }
@@ -669,7 +713,7 @@ public final class RaftNode {
         } else if (messageTerm < term) {
             if (message instanceof AppendEntries || message instanceof Heartbeat) {
                 // A deposed leader learns the term from this answer and steps down.
-                send(from, new AppendResponse(term, false, 0, 0, 0));
+                send(from, new AppendResponse(term, false, 0, 0, 0, logEpoch));
             } else if (message instanceof RequestVote request && request.preVote()) {
                 send(from, new VoteResponse(term, true, false));
             }
@@ -691,6 +735,12 @@ public final class RaftNode {
         long lastTerm = lastTerm();
         boolean upToDate = request.lastLogTerm() > lastTerm
                 || (request.lastLogTerm() == lastTerm && request.lastLogIndex() >= lastIndex());
+        if (logRecovering) {
+            // This node may lack entries it has acknowledged. Its vote could elect a leader
+            // that lacks them too.
+            send(from, new VoteResponse(term, request.preVote(), false));
+            return;
+        }
         if (request.preVote()) {
             boolean grant = request.term() > term && upToDate;
             // Nothing is promised: the answer says what this node would do right now.
@@ -767,12 +817,12 @@ public final class RaftNode {
         List<LogEntry> entries = request.entries();
         if (prev < commitIndex) {
             // Everything up to the commit index is known to equal the log of the leader.
-            sendWhenDurable(from, new AppendResponse(term, true, commitIndex, 0, 0));
+            sendWhenDurable(from, new AppendResponse(term, true, commitIndex, 0, 0, logEpoch));
             return;
         }
         if (prev > lastIndex() || termAt(prev) != request.prevLogTerm()) {
             long hintIndex = findConflictByTerm(prev, request.prevLogTerm());
-            send(from, new AppendResponse(term, false, prev, hintIndex, termAt(hintIndex)));
+            send(from, new AppendResponse(term, false, prev, hintIndex, termAt(hintIndex), logEpoch));
             return;
         }
         for (int i = 0; i < entries.size(); i++) {
@@ -790,7 +840,16 @@ public final class RaftNode {
         }
         long match = prev + entries.size();
         commitIndex = Math.max(commitIndex, Math.min(request.leaderCommit(), match));
-        sendWhenDurable(from, new AppendResponse(term, true, match, 0, 0));
+        if (logRecovering && request.followerEpoch() == logEpoch && match >= request.leaderCommit()
+                && termAt(request.leaderCommit()) == term) {
+            // The leader sent this after it had dropped what it knew about the lost log, and
+            // this log now holds everything the leader knew as committed at that time, up to
+            // an entry of the leader's own term. Every entry that was or can still be
+            // committed with the help of an acknowledgment of the lost log is among them.
+            logRecovering = false;
+            hardStateDirty = true;
+        }
+        sendWhenDurable(from, new AppendResponse(term, true, match, 0, 0, logEpoch));
     }
 
     private void handleHeartbeat(int from, Heartbeat heartbeat) {
@@ -803,7 +862,7 @@ public final class RaftNode {
         leaderId = from;
         electionElapsed = 0;
         commitIndex = Math.max(commitIndex, Math.min(heartbeat.commit(), lastIndex()));
-        send(from, new HeartbeatResponse(term, heartbeat.round()));
+        send(from, new HeartbeatResponse(term, heartbeat.round(), logRecovering));
     }
 
     private void handleAppendResponse(int from, AppendResponse response) {
@@ -812,6 +871,19 @@ public final class RaftNode {
             return;
         }
         pr.recentActive = true;
+        if (response.logEpoch() < pr.epoch) {
+            return; // says nothing about the log the follower has now
+        }
+        if (response.logEpoch() > pr.epoch) {
+            boolean lostEntries = pr.epoch != -1;
+            pr.epoch = response.logEpoch();
+            if (lostEntries) {
+                // The follower has lost entries it had acknowledged. Forget what it had; the
+                // answer at hand is of the new epoch and is processed as usual.
+                pr.match = 0;
+                pr.probeFrom(response.index() + 1);
+            }
+        }
         if (response.success()) {
             long match = response.index();
             if (match > lastIndex()) {
@@ -871,6 +943,9 @@ public final class RaftNode {
             pr.ackedRound = response.round();
             heartbeatAnswered();
         }
+        if (response.recovering()) {
+            sendAppend(from, true);
+        }
     }
 
     /**
@@ -922,7 +997,7 @@ public final class RaftNode {
                 return;
             }
             long prev = pr.next - 1;
-            send(to, new AppendEntries(term, prev, termAt(prev), entries, commitIndex));
+            send(to, new AppendEntries(term, prev, termAt(prev), entries, commitIndex, pr.epoch));
             pr.sentCommit = commitIndex;
             force = false;
             if (!pr.replicating) {

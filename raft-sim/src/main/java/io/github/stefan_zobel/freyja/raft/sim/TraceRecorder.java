@@ -115,6 +115,9 @@ public final class TraceRecorder implements Simulation.StepListener {
                     s.append("{\"type\":\"ClientPropose\",\"requestId\":").append(p.requestId()).append('}');
             case RaftEvent.ClientReadIndex r ->
                     s.append("{\"type\":\"ClientReadIndex\",\"requestId\":").append(r.requestId()).append('}');
+            case RaftEvent.LogDamaged d ->
+                    s.append("{\"type\":\"LogDamaged\",\"firstDamagedIndex\":").append(d.firstDamagedIndex())
+                            .append('}');
             case RaftEvent.TransferLeadership t ->
                     s.append("{\"type\":\"TransferLeadership\",\"requestId\":").append(t.requestId())
                             .append(",\"to\":").append(t.toNode()).append('}');

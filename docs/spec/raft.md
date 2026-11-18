@@ -44,7 +44,8 @@ public interface LogView {               // read-only access to durably stored e
 
 public record LogEntry(long index, long term, EntryType type, byte[] payload) {}
 public enum EntryType { COMMAND, NOOP, CONFIG }
-public record HardState(long term, int votedFor, boolean logRecovering) {}   // -1 = no vote
+public record HardState(long term, int votedFor, boolean logRecovering, long logEpoch) {}
+                                                                             // -1 = no vote
 public record ClusterConfig(Set<Integer> voters, Set<Integer> learners) {}
 public record SnapshotMeta(long lastIncludedIndex, long lastIncludedTerm, ClusterConfig config) {}
 public record PersistedState(HardState hardState, SnapshotMeta snapshot) {}
@@ -247,12 +248,36 @@ the transfer is aborted and the leader resumes.
 A node whose runtime reports `LogDamaged` (see `node.md`) has lost entries it may have
 acknowledged. The core then:
 
-1. Sets `logRecovering` in the hard state and persists it before anything else happens.
-2. Discards its log from the first damaged index.
-3. Grants no votes and starts no elections, but accepts entries and snapshots from a leader of
-   its current or a later term and acknowledges what it has durably stored.
-4. Clears `logRecovering` once its log matches a leader's log through a committed entry of
-   that leader's own term.
+1. Sets `logRecovering` in the hard state, raises the log epoch (see below), and persists
+   both before anything else happens. A leader or candidate becomes a follower.
+2. Discards its log from the first damaged index. Its commit index falls back with the log;
+   what its state machine has applied stays applied and is not applied again.
+3. Grants no votes and no pre-votes and starts no elections, but accepts entries and
+   snapshots from a leader of its current or a later term and acknowledges what it has
+   durably stored.
+4. Clears `logRecovering` on an append of a leader that (a) names the present log epoch of
+   the node, (b) leaves the log of the node equal to the log of the leader through the commit
+   index the append carries, and (c) carries a commit index whose entry is of the leader's
+   own term.
+
+**The log epoch** counts the times a node has lost log entries. It is part of the hard state.
+
+- Every append answer carries the epoch of its sender. A leader remembers the highest epoch
+  it has seen from each follower. When a higher one arrives, the leader forgets the match
+  index of that follower; answers of an earlier epoch are ignored from then on.
+- Every append carries the epoch of its receiver as the leader knows it.
+- An acknowledgment that still waits for its entries to become durable when the damage is
+  reported is dropped: it would promise entries that are gone.
+- A node in the mode says so in its heartbeat answers, and the leader then sends an append
+  even if it has nothing new; otherwise an idle cluster would never end the mode.
+
+Why rule 4 needs the epoch: without it, the node could leave the mode on an append that was
+sent before the leader knew of the damage. Such an append may carry an old commit index, and
+the leader may still count an acknowledgment of the lost log toward a later commit. An
+append that names the present epoch was sent after the leader had dropped everything it knew
+about the lost log. Its commit index covers every entry that was committed with the help of
+an acknowledgment of the lost log, at this leader or at an earlier one (condition c: a
+leader that has committed an entry of its own term knows every earlier commit).
 
 Reasoning: while the node abstains, any leader is elected by a majority that excludes it. That
 majority intersects every earlier commit quorum in a node other than the recovering one, so

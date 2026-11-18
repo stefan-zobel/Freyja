@@ -31,6 +31,13 @@ public final class SimNode {
     ClusterConfig initialConfig;
     /** The index of the entry that carries the configuration in force on this node. */
     long configIndex;
+    /**
+     * Stored entries from this index on cannot be read, until the truncation that the core
+     * asks for has reached the disk; 0 if the stored log is intact.
+     */
+    long damagedFrom;
+    /** Whether the node was in log-recovering mode after its latest step. */
+    boolean recovering;
     /** Counts the starts of the process. Work scheduled for an earlier start is void. */
     long incarnation;
     /** The node processes nothing before this virtual time. */

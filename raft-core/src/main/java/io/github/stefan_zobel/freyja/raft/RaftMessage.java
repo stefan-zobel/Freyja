@@ -48,11 +48,22 @@ public sealed interface RaftMessage {
      * @param prevLogTerm  term of that entry
      * @param entries      the entries, possibly none
      * @param leaderCommit commit index of the leader
+     * @param followerEpoch the log epoch of the receiver as the leader knows it, or -1 if the
+     *                     leader has not heard from the receiver yet. A node in log-recovering
+     *                     mode leaves that mode only on an append that names its present
+     *                     epoch: such an append was sent after the leader had dropped what it
+     *                     knew about the log the node has lost.
      */
     record AppendEntries(long term, long prevLogIndex, long prevLogTerm, List<LogEntry> entries,
-                         long leaderCommit) implements RaftMessage {
+                         long leaderCommit, long followerEpoch) implements RaftMessage {
         public AppendEntries {
             entries = List.copyOf(entries);
+        }
+
+        /** An append of a leader that has not heard from the receiver yet. */
+        public AppendEntries(long term, long prevLogIndex, long prevLogTerm, List<LogEntry> entries,
+                             long leaderCommit) {
+            this(term, prevLogIndex, prevLogTerm, entries, leaderCommit, -1);
         }
     }
 
@@ -65,9 +76,16 @@ public sealed interface RaftMessage {
      *                  the {@code prevLogIndex} that was rejected
      * @param hintIndex on rejection: the leader should try again at or below this index
      * @param hintTerm  on rejection: the term of the sender at {@code hintIndex}
+     * @param logEpoch  the log epoch of the sender. An answer of an earlier epoch than the
+     *                  leader has seen from the sender says nothing about its present log.
      */
-    record AppendResponse(long term, boolean success, long index, long hintIndex, long hintTerm)
-            implements RaftMessage {
+    record AppendResponse(long term, boolean success, long index, long hintIndex, long hintTerm,
+                          long logEpoch) implements RaftMessage {
+
+        /** An answer of a node that has never lost entries of its log. */
+        public AppendResponse(long term, boolean success, long index, long hintIndex, long hintTerm) {
+            this(term, success, index, hintIndex, hintTerm, 0);
+        }
     }
 
     /**
@@ -86,7 +104,18 @@ public sealed interface RaftMessage {
     record TimeoutNow(long term) implements RaftMessage {
     }
 
-    /** Answers a {@link Heartbeat}. */
-    record HeartbeatResponse(long term, long round) implements RaftMessage {
+    /**
+     * Answers a {@link Heartbeat}.
+     *
+     * @param recovering whether the sender is in log-recovering mode. The leader then sends
+     *                   an append even if it has nothing new: the node leaves the mode only
+     *                   on an append.
+     */
+    record HeartbeatResponse(long term, long round, boolean recovering) implements RaftMessage {
+
+        /** An answer of a node that is not in log-recovering mode. */
+        public HeartbeatResponse(long term, long round) {
+            this(term, round, false);
+        }
     }
 }

@@ -1,2 +1,3 @@
 # Seeds that failed at some time. Each runs on every build.
 7  # a node was shut down for good although the real leader still counted on it
+76  # a node that had caught up stayed in log-recovering mode: an idle leader sent no append

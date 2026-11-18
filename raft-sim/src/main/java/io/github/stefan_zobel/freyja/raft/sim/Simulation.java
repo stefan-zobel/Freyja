@@ -96,6 +96,9 @@ public final class Simulation {
         public long retired;
         public long transfers;
         public long transfersAborted;
+        public long logDamages;
+        /** Times a node left log-recovering mode. */
+        public long logRecoveries;
 
         @Override
         public String toString() {
@@ -110,7 +113,8 @@ public final class Simulation {
                     + " readsServed=" + readsServed + " readsRejected=" + readsRejected
                     + " staleLeaderReads=" + staleLeaderReads + " configChanges=" + configChanges
                     + " configRejections=" + configRejections + " joined=" + joined + " retired=" + retired
-                    + " transfers=" + transfers + " transfersAborted=" + transfersAborted;
+                    + " transfers=" + transfers + " transfersAborted=" + transfersAborted
+                    + " logDamages=" + logDamages + " logRecoveries=" + logRecoveries;
         }
     }
 
@@ -380,7 +384,7 @@ public final class Simulation {
             if (view.term() != leader.view().term() || view.leaderId() != leader.id
                     || view.lastLogIndex() != last || view.commitIndex() != last
                     || view.durableIndex() != last || node.applied != last
-                    || !view.config().equals(config)) {
+                    || !view.config().equals(config) || view.logRecovering()) {
                 return "node " + node.id + " has not converged: " + view + ", applied "
                         + node.applied + "; leader: " + leader.view();
             }
@@ -420,6 +424,10 @@ public final class Simulation {
         drain(node);
 
         ProtocolState view = node.view();
+        if (node.recovering && !view.logRecovering()) {
+            stats.logRecoveries++;
+        }
+        node.recovering = view.logRecovering();
         observation.sawCommitted(view.commitIndex(), view.term());
         SafetyInvariants.checkAll(observation);
         check(view.term() >= node.lastSeenTerm, "node " + node.id + ": the term went back: " + view);
@@ -608,6 +616,15 @@ public final class Simulation {
         });
     }
 
+    /** A write reaches the disk. A truncation removes entries that could not be read. */
+    private static void store(SimNode node, Ready ready) {
+        node.store.store(ready);
+        if (node.damagedFrom != 0 && ready.truncateSuffixFrom() != -1
+                && ready.truncateSuffixFrom() <= node.damagedFrom) {
+            node.damagedFrom = 0;
+        }
+    }
+
     /** A write completes. Now and then the completion covers every write handed out so far. */
     private void persist(SimNode node, long sequence, long incarnation) {
         if (node.incarnation != incarnation || node.persistedSequence >= sequence) {
@@ -623,7 +640,7 @@ public final class Simulation {
             stats.batchedWrites++;
         }
         while (!node.pendingWrites.isEmpty() && node.pendingWrites.peekFirst().sequence() <= through) {
-            node.store.store(node.pendingWrites.pollFirst());
+            store(node, node.pendingWrites.pollFirst());
         }
         node.persistedSequence = through;
         step(node, new Persisted(through));
@@ -652,6 +669,7 @@ public final class Simulation {
         }
         if (options.spareNodes() > 0) {
             kinds.add(this::transferLeadership);
+            kinds.add(this::damageLog);
         }
         if (!kinds.isEmpty()) {
             kinds.get(random.nextInt(kinds.size())).run();
@@ -710,7 +728,7 @@ public final class Simulation {
         // Of the writes on their way, any prefix may have reached the disk unreported.
         int reached = random.nextInt(node.pendingWrites.size() + 1);
         for (int i = 0; i < reached; i++) {
-            node.store.store(node.pendingWrites.pollFirst());
+            store(node, node.pendingWrites.pollFirst());
         }
         node.pendingWrites.clear();
         node.awaitingApply.clear();
@@ -737,8 +755,9 @@ public final class Simulation {
             node.applied = 0;
             Arrays.fill(node.registers, 0);
         }
-        check(node.applied <= node.store.lastIndex(), "node " + node.id + " had applied "
-                + node.applied + " entries, but only " + node.store.lastIndex() + " are stored");
+        check(node.applied <= node.store.lastIndex() || node.store.hardState().logRecovering(),
+                "node " + node.id + " had applied " + node.applied + " entries, but only "
+                        + node.store.lastIndex() + " are stored");
         observation.beginStep();
         observation.resetLog(node.id, node.store.entries());
         node.raft = RaftNode.create(node.config,
@@ -747,6 +766,11 @@ public final class Simulation {
         checkComplete();
         if (listener != null) {
             listener.restarted(now, node.id, node.view());
+        }
+        node.recovering = node.view().logRecovering();
+        if (node.damagedFrom != 0) {
+            // The truncation did not reach the disk before the crash: the damage is found again.
+            step(node, new RaftEvent.LogDamaged(node.damagedFrom));
         }
     }
 
@@ -888,6 +912,38 @@ public final class Simulation {
             }
         }
         return false;
+    }
+
+    /**
+     * Stored log entries of a node become unreadable from some index on, also entries the
+     * node has acknowledged or applied. This is allowed only while a majority of the voters
+     * holds an intact log: the protocol repairs a minority, not a lost majority.
+     */
+    private void damageLog() {
+        if (knownLeader == RaftNode.NO_NODE) {
+            return;
+        }
+        ClusterConfig config = nodes.get(knownLeader).view().config();
+        SimNode victim = someNode();
+        if (!victim.up || victim.store.lastIndex() == 0 || victim.damagedFrom != 0) {
+            return;
+        }
+        int intact = 0;
+        for (int voter : config.voters()) {
+            SimNode node = nodes.get(voter);
+            if (node != victim && node.started && !node.retired && node.damagedFrom == 0
+                    && !node.view().logRecovering() && !node.store.hardState().logRecovering()) {
+                intact++;
+            }
+        }
+        if (intact < config.quorum()) {
+            return;
+        }
+        long last = victim.store.lastIndex();
+        long from = random.nextBoolean() ? Math.max(1, last - random.nextInt(10)) : 1 + random.nextInt((int) last);
+        stats.logDamages++;
+        victim.damagedFrom = from;
+        deliver(victim, new RaftEvent.LogDamaged(from));
     }
 
     /** Asks the leader to hand leadership to another voter, which may be down or cut off. */

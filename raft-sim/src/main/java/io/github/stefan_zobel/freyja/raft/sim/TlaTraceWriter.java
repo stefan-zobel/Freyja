@@ -88,6 +88,7 @@ public final class TlaTraceWriter implements Simulation.StepListener {
             case RaftEvent.ClientReadIndex _ -> step.event = "Read";
             case RaftEvent.ProposeConfigChange _ -> step.event = "Config";
             case RaftEvent.TransferLeadership _ -> step.event = "Transfer";
+            case RaftEvent.LogDamaged _ -> step.event = "Damage";
         }
         for (Ready ready : readies) {
             if (ready.hasPersistentWork()) {
