@@ -49,7 +49,7 @@ class ManifestDumpTest {
     /** Runs an engine through two flushes and returns its manifest. */
     private Path writeManifest() throws IOException {
         Path engineDir = dir.resolve("db");
-        try (LsmEngine engine = LsmEngine.open(fs, engineDir, new EngineOptions().blockCacheCapacity(0))) {
+        try (LsmEngine engine = LsmEngine.open(fs, engineDir, new EngineOptions().deterministic(true).blockCacheCapacity(0))) {
             engine.put(new byte[] {0x61}, new byte[] {1});
             engine.put(new byte[] {0x62}, new byte[] {2});
             engine.flush();

@@ -23,7 +23,7 @@ class LsmEngineScanTest {
 
     private final MemoryFileSystem fs = new MemoryFileSystem();
     private final Path dir = Path.of("scan-test").toAbsolutePath();
-    private final EngineOptions options = new EngineOptions().blockCacheCapacity(1 << 20);
+    private final EngineOptions options = new EngineOptions().deterministic(true).blockCacheCapacity(1 << 20);
 
     private static byte[] b(String text) {
         return text == null ? null : text.getBytes(StandardCharsets.UTF_8);

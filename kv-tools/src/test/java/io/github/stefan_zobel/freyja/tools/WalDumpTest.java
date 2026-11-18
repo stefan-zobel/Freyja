@@ -49,7 +49,7 @@ class WalDumpTest {
     /** Writes three batches through the engine and returns its first log. */
     private Path writeLog() throws IOException {
         Path engineDir = dir.resolve("db");
-        try (LsmEngine engine = LsmEngine.open(fs, engineDir, new EngineOptions().blockCacheCapacity(0))) {
+        try (LsmEngine engine = LsmEngine.open(fs, engineDir, new EngineOptions().deterministic(true).blockCacheCapacity(0))) {
             engine.put(new byte[] {0x61}, new byte[] {0x01, 0x02});
             engine.write(new WriteBatch()
                     .put(new byte[] {0x62}, new byte[100])

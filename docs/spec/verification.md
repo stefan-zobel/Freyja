@@ -160,6 +160,10 @@ must finish in seconds.
   spans several blocks must be reported as damage.
 - **Bloom filter:** no false negative for any inserted key, checked for every filter size
   from 1 key to 1,000 keys.
+- **Compaction retention:** for every history of up to 5 versions of a key (values and
+  tombstones), every set of snapshots on and between them, with and without data in deeper
+  levels: the retained versions show every snapshot and the present exactly what the full
+  history shows, and no version is retained that no reader can see.
 
 ## 3. Whole-System Simulation (primary oracle)
 

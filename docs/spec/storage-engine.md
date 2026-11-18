@@ -120,6 +120,12 @@ Compaction and scrubbing draw from a shared token bucket (bytes per second, conf
 Flushes are not limited. The limit is raised automatically while writes are slowed down or
 stalled by backpressure (§7), so compaction can catch up.
 
+- `compactionBytesPerSecond` sets the rate; the default 0 means no limit.
+- A caller announces the bytes it is about to write and waits until the bytes announced
+  before are paid for at the rate. Idle time is not saved up.
+- While at least one write is delayed or stalled, nobody waits, and no debt builds up.
+- Deterministic mode has no limit, because nothing there may wait for time to pass.
+
 ## 4. Memory Budget
 
 All limits are fields of `EngineOptions` and are enforced, not advisory.
@@ -148,9 +154,13 @@ All limits are fields of `EngineOptions` and are enforced, not advisory.
   - Only blocks whose checksum has been verified enter the cache. The key is file number and
     block offset.
   - An iterator pins the one data block it is positioned in.
-- When the table-metadata budget is exceeded, the least recently used SSTable readers are
-  closed and reopened on demand. (Not built yet: every live table keeps its reader open; see
-  `roadmap.md`, A5.)
+- When the table-metadata budget is exceeded, the tables that were used least recently
+  drop their index and filter blocks. A table loads them again, and verifies their checksums
+  again, when it is next used.
+  - The file handle of a table stays open; only the two blocks are dropped.
+  - The table that has just loaded its blocks is never asked to drop them, so a budget
+    smaller than the blocks of one table still lets every read finish.
+  - An iterator keeps the index block it started with.
 
 ## 5. Concurrency Model
 
@@ -165,9 +175,20 @@ All limits are fields of `EngineOptions` and are enforced, not advisory.
   batch.
 - Readers never block writers. A read pins the current version (the set of live SSTables plus
   MemTables) for its duration.
+  - The read state (MemTable, waiting MemTables, version) is one immutable object that is
+    replaced as a whole. It holds a reference to the reader of each of its table files.
+  - A read pins the state it starts with and unpins it when it ends; a scan keeps its pin
+    until it is closed.
 - Flush, compaction, and scrubbing run on background threads in normal mode. In
   **deterministic mode** there are no background threads; these tasks run only when the caller
   invokes them. All randomized tests and both simulations use deterministic mode.
+  - Normal mode has one background thread. It flushes waiting MemTables first, oldest first,
+    and compacts when nothing waits.
+  - In deterministic mode a flush runs inside the write that fills the MemTable. Compaction
+    runs when the caller invokes `compact()` or `runBackgroundWork()`, and inside a write
+    that would otherwise stall (§7).
+- At most one flush and one compaction run at a time. The manifest and the read state are
+  changed under one lock, by whichever of them finishes.
 - The engine takes its time source through an interface, never from the system clock directly.
 
 ## 6. Write Path
@@ -188,20 +209,36 @@ All limits are fields of `EngineOptions` and are enforced, not advisory.
 
 ### 6.1 Flush
 
-A flush moves one MemTable into a table file in level 0. Steps, in this order:
+A flush moves one MemTable into a table file in level 0. It has two parts.
+
+**Freeze**, done by the writer that finds the MemTable full:
 
 1. Sync and close the log of the MemTable. Create the next log and sync the directory.
-2. Replace the MemTable by an empty one. Reads look at both until step 5.
-3. Write the table file, sync it, sync the directory.
-4. Append one manifest edit (file added, next file number, last sequence number, the new
-   log as the oldest live log) and sync the manifest.
-5. Publish the new version. Delete the sealed log.
+2. Replace the MemTable by an empty one and put the full one, together with its log number
+   and its last sequence number, at the end of the list of waiting MemTables. Reads look at
+   all of them.
 
-A crash before the manifest sync leaves the table file as an orphan and both logs in place;
+**Write out**, done by the background thread (or inline in deterministic mode), always for
+the oldest waiting MemTable:
+
+3. Write the table file, sync it, sync the directory.
+4. Append one manifest edit (file added, next file number, the MemTable's last sequence
+   number, the log of the next waiting MemTable or else of the active one as the oldest live
+   log) and sync the manifest.
+5. Publish the new version without that MemTable. Delete its log.
+
+Level-0 files are created in the order of their MemTables, so a larger file number means
+newer data.
+
+A crash before the manifest sync leaves the table file as an orphan and the logs in place;
 they are replayed at the next open. A crash after it leaves at most an obsolete log.
 
-Until background threads are built (milestone A5), the writer whose turn it is flushes inline
-when the MemTable has reached its size, and `flush()` does the same on request.
+`flush()` writes out everything that is in memory and returns when that is done. `close`
+does not flush: MemTables that still wait stay in their logs.
+
+The manifest is replaced by a new one that holds only the current state when it exceeds
+`maxManifestSize` (default 64 MiB), by the same steps as at open. If that fails, it is
+unknown which manifest `CURRENT` names, and the engine stops.
 
 ### 6.2 Open
 
@@ -226,6 +263,15 @@ directory as the old manifest describes it.
 - Stall writes when L0 has 12 or more files, or when the immutable-MemTable limit is reached.
 - A stalled write waits at most until its deadline, then fails with a dedicated error.
 - Thresholds are configurable; tests use much smaller values.
+- Slowing down means one delay of 1 ms per write group.
+- The deadline is `writeStallTimeoutMillis` after the write began to wait (default 60 s).
+  The error is `WriteStalledException`; the write stored nothing, and the engine is intact.
+- A write that waits wakes up when a flush or a compaction has finished. A compaction that
+  fails is not progress: writes that wait for it wait until their deadline.
+- In deterministic mode nothing waits. A write that would stall on waiting MemTables flushes
+  the oldest one itself. A write that would stall on level 0 runs one compaction itself and,
+  if nothing can be compacted, goes on.
+- The stall limit for level 0 must not be below the compaction trigger.
 
 ## 8. Levels and Compaction
 
@@ -240,6 +286,27 @@ directory as the old manifest describes it.
   leaves only orphans.
 - A compaction verifies the checksum of every block it reads. A damaged input aborts the
   compaction and is reported; damage is never copied into new files.
+- **Choice:** the level whose score is highest and at least 1. The score of L0 is its file
+  count divided by the trigger; the score of a deeper level is its size divided by its
+  target (64 MiB for L1 by default). The last level is never a source.
+  - From L0 all files are taken, because they overlap each other. From a deeper level the
+    oldest file is taken. In both cases every file of the next level whose key range
+    intersects is taken too.
+- **Output:** files in the next level. A new file is started when the current one has
+  reached `targetFileSize` (default 8 MiB), and only between two user keys, so that no user
+  key occurs in two files of a level. A compaction that keeps nothing writes no file.
+- **Retention in detail,** for one user key, from the newest version to the oldest:
+  - a version is kept if it is the newest, or if a live snapshot lies at or after it and
+    before the next newer version;
+  - a tombstone that would be kept is dropped if no live snapshot is older than it and no
+    level below the output level has a file whose key range includes the key.
+  The snapshots are those that are live when the compaction starts. A snapshot taken later
+  is newer than every input and sees the newest version, which is kept.
+- **File lifetime:** the inputs leave the version with the manifest edit. Each input file is
+  closed and deleted when the last read state and the last iterator that refer to it are
+  gone; until then readers that started earlier keep using it.
+- A failure before the manifest edit removes the output files and leaves the engine as it
+  was. A failure of the manifest edit itself stops the engine.
 
 ## 9. Snapshots and Checkpoints
 
@@ -265,6 +332,14 @@ directory as the old manifest describes it.
   SSTable into the target directory under its original name, write a fresh manifest and
   `CURRENT` there, sync the directory. A checkpoint is a complete engine directory and can be
   opened on its own. Checkpoints are the basis for Raft snapshots and backups.
+  - The target directory must not exist. It holds table files, one manifest, and `CURRENT`;
+    no log and no `LOCK`.
+  - The copy holds every write that returned before the call, and possibly later ones; it
+    is always a prefix of the write history.
+  - The pin keeps the linked files in place while the copy is made. Afterwards the source
+    may delete its names; the copy keeps the data.
+  - A failed checkpoint may leave a directory without `CURRENT`. It cannot be opened and is
+    to be removed.
 
 ## 10. Observability Hooks
 

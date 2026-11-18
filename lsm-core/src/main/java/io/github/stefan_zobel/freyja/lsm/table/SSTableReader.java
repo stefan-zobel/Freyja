@@ -51,16 +51,29 @@ public final class SSTableReader {
     private final long footerOffset;
     private final BlockCache cache; // may be null
     private final AtomicInteger references = new AtomicInteger(1);
+    private volatile Runnable whenUnused; // run once after the last reference is released
 
+    /**
+     * The index and filter block of the table.
+     *
+     * @param index  the index block
+     * @param filter the Bloom filter
+     * @param bytes  the size of both blocks
+     */
+    private record Metadata(Block index, BloomFilter filter, long bytes) {
+    }
+
+    private final TableMetadataBudget budget; // may be null
     private int formatVersion;
     private BlockHandle filterHandle;
     private BlockHandle indexHandle;
-    private Block index;
-    private BloomFilter filter;
+    private volatile Metadata metadata; // null while the blocks are not loaded
+    private volatile long lastUse;
 
     private SSTableReader(ReadableFile file, String name, long fileNumber, long fileSize,
-                          BlockCache cache) {
+                          BlockCache cache, TableMetadataBudget budget) {
         this.cache = cache;
+        this.budget = budget;
         this.file = file;
         this.name = name;
         this.fileNumber = fileNumber;
@@ -89,10 +102,23 @@ public final class SSTableReader {
      */
     public static SSTableReader open(StorageFileSystem fs, Path path, long fileNumber,
                                      BlockCache cache) throws IOException {
+        return open(fs, path, fileNumber, cache, null);
+    }
+
+    /**
+     * Opens and verifies a table whose index and filter block count against {@code budget}.
+     * The reader may drop these blocks while it is not used and loads them again on demand.
+     *
+     * @param cache  the block cache, or {@code null}
+     * @param budget the budget for index and filter blocks, or {@code null} for no limit
+     * @see #open(StorageFileSystem, Path, long)
+     */
+    public static SSTableReader open(StorageFileSystem fs, Path path, long fileNumber,
+                                     BlockCache cache, TableMetadataBudget budget) throws IOException {
         ReadableFile file = fs.open(path);
         try {
             SSTableReader reader =
-                    new SSTableReader(file, path.toString(), fileNumber, file.size(), cache);
+                    new SSTableReader(file, path.toString(), fileNumber, file.size(), cache, budget);
             reader.load();
             return reader;
         } catch (Throwable t) {
@@ -132,8 +158,30 @@ public final class SSTableReader {
 
         filterHandle = BlockHandle.decode(footer, 0);
         indexHandle = BlockHandle.decode(footer, 16);
+        metadata(); // opening verifies the index and the filter block
+    }
+
+    /** Returns the index and filter block, loading and verifying them if necessary. */
+    private Metadata metadata() throws IOException {
+        Metadata current = metadata;
+        if (current == null) {
+            current = loadMetadata();
+        }
+        if (budget != null) {
+            lastUse = budget.tick();
+        }
+        return current;
+    }
+
+    private synchronized Metadata loadMetadata() throws IOException {
+        Metadata current = metadata;
+        if (current != null) {
+            return current;
+        }
         byte[] indexContents = readBlock(indexHandle);
         byte[] filterContents = readBlock(filterHandle);
+        Block index;
+        BloomFilter filter;
         try {
             index = new Block(indexContents);
         } catch (DecodeException e) {
@@ -144,6 +192,28 @@ public final class SSTableReader {
         } catch (DecodeException e) {
             throw new CorruptionException(name, filterHandle.offset(), "malformed filter block", e);
         }
+        current = new Metadata(index, filter, (long) indexContents.length + filterContents.length);
+        metadata = current;
+        if (budget != null) {
+            lastUse = budget.tick();
+            budget.loaded(this, current.bytes());
+        }
+        return current;
+    }
+
+    /** Called by the budget: forget the index and filter block until the next use. */
+    void dropMetadata() {
+        metadata = null;
+    }
+
+    /** Returns the stamp of the last use, for the budget. */
+    long lastUse() {
+        return lastUse;
+    }
+
+    /** Returns whether the index and filter block are in memory now. */
+    public boolean metadataLoaded() {
+        return metadata != null;
     }
 
     // ---- reference counting ----------------------------------------------------------------
@@ -173,8 +243,27 @@ public final class SSTableReader {
             throw new IllegalStateException("table " + name + " released too often");
         }
         if (remaining == 0) {
-            file.close();
+            if (budget != null) {
+                budget.removed(this);
+            }
+            try {
+                file.close();
+            } finally {
+                Runnable action = whenUnused;
+                if (action != null) {
+                    action.run();
+                }
+            }
         }
+    }
+
+    /**
+     * Registers an action that runs once, right after the last reference is released and
+     * the file handle is closed. The engine uses it to delete a table that is no longer
+     * part of any version. The caller must hold a reference while it registers the action.
+     */
+    public void whenUnused(Runnable action) {
+        this.whenUnused = action;
     }
 
     /** Returns the current number of references. */
@@ -187,8 +276,8 @@ public final class SSTableReader {
     /**
      * Returns {@code false} only if the table certainly holds no entry for {@code userKey}.
      */
-    public boolean mayContain(byte[] userKey) {
-        return filter.mayContain(KeyHash.hash(userKey));
+    public boolean mayContain(byte[] userKey) throws IOException {
+        return metadata().filter().mayContain(KeyHash.hash(userKey));
     }
 
     /**
@@ -216,9 +305,10 @@ public final class SSTableReader {
      * Returns a new iterator, positioned before the first entry. It holds a reference to
      * this reader and must be closed.
      */
-    public TableIterator iterator() {
+    public TableIterator iterator() throws IOException {
+        Block index = metadata().index();
         retain();
-        return new TableIterator();
+        return new TableIterator(index);
     }
 
     // ---- description, for tools ------------------------------------------------------------
@@ -244,20 +334,20 @@ public final class SSTableReader {
     }
 
     /** Returns the number of buckets of the Bloom filter. */
-    public int filterBucketCount() {
-        return filter.bucketCount();
+    public int filterBucketCount() throws IOException {
+        return metadata().filter().bucketCount();
     }
 
     /** Returns the number of probes per key of the Bloom filter. */
-    public int filterProbeCount() {
-        return filter.probeCount();
+    public int filterProbeCount() throws IOException {
+        return metadata().filter().probeCount();
     }
 
     /** Returns every data block listed in the index, in file order. */
     public List<DataBlockInfo> dataBlocks() throws IOException {
         List<DataBlockInfo> blocks = new ArrayList<>();
         try {
-            Block.Iterator it = index.iterator(InternalKey.COMPARATOR);
+            Block.Iterator it = metadata().index().iterator(InternalKey.COMPARATOR);
             for (it.seekToFirst(); it.valid(); it.next()) {
                 blocks.add(new DataBlockInfo(it.key(), decodeHandle(it.value())));
             }
@@ -317,13 +407,14 @@ public final class SSTableReader {
      * use.
      */
     public final class TableIterator implements InternalIterator {
-        private final Block.Iterator indexIterator = index.iterator(InternalKey.COMPARATOR);
+        private final Block.Iterator indexIterator;
         private Block.Iterator dataIterator;
         private BlockCache.Pinned dataPin; // pin of the current data block, if it is cached
         private long dataBlockOffset = -1;
         private boolean closed;
 
-        private TableIterator() {
+        private TableIterator(Block index) {
+            this.indexIterator = index.iterator(InternalKey.COMPARATOR);
         }
 
         /** Returns whether the iterator is positioned at an entry. */

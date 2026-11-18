@@ -22,7 +22,7 @@ public final class ScanIterator implements Closeable {
     private final InternalIterator merged;
     private final long snapshot;
     private final byte[] end; // exclusive; null means no upper bound
-    private final Runnable onClose;
+    private final Closeable onClose;
 
     private byte[] key;
     private byte[] value;
@@ -33,10 +33,10 @@ public final class ScanIterator implements Closeable {
      * @param snapshot the sequence number to read at
      * @param start    first user key of the range, or {@code null} for the first key at all
      * @param end      user key at which the range ends (exclusive), or {@code null}
-     * @param onClose  run once when the iterator is closed
+     * @param onClose  closed once when the iterator is closed
      */
     ScanIterator(InternalIterator merged, long snapshot, byte[] start, byte[] end,
-                 Runnable onClose) throws IOException {
+                 Closeable onClose) throws IOException {
         this.merged = merged;
         this.snapshot = snapshot;
         this.end = end;
@@ -100,7 +100,7 @@ public final class ScanIterator implements Closeable {
         try {
             merged.close();
         } finally {
-            onClose.run();
+            onClose.close();
         }
     }
 

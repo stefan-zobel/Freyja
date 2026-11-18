@@ -31,7 +31,7 @@ class LsmEngineTest {
 
     private final MemoryFileSystem fs = new MemoryFileSystem();
     private final Path dir = Path.of("engine-test").toAbsolutePath();
-    private final EngineOptions options = new EngineOptions().blockCacheCapacity(1 << 20);
+    private final EngineOptions options = new EngineOptions().deterministic(true).blockCacheCapacity(1 << 20);
 
     private static byte[] b(String text) {
         return text.getBytes(StandardCharsets.UTF_8);
@@ -192,7 +192,7 @@ class LsmEngineTest {
 
     @Test
     void theMemTableIsFlushedWhenItReachesItsSize() throws IOException {
-        options.memTableSize(4096);
+        options.memTableSize(4096).level0StallTrigger(1000);
         try (LsmEngine engine = open()) {
             for (int i = 0; i < 400; i++) {
                 engine.write(new WriteBatch().put(b(String.format("key-%04d", i)), new byte[100]), false);

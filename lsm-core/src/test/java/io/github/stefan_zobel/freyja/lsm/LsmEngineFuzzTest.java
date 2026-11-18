@@ -25,7 +25,7 @@ import io.github.stefan_zobel.freyja.lsm.fs.MemoryFileSystem;
  * Differential fuzzing of the engine against a sorted-map model
  * (docs/spec/verification.md, section 2.1), for the operations the engine has so far:
  * {@code put}, {@code delete}, batches, {@code get}, {@code scan}, {@code snapshot},
- * {@code release snapshot}, {@code flush}, clean {@code reopen}, and crash. The MemTable
+ * {@code release snapshot}, {@code flush}, {@code compact}, clean {@code reopen}, and crash. The MemTable
  * limit is tiny, so automatic flushes happen all the time.
  *
  * <p>A snapshot is a copy of the model. Every {@code get} and {@code scan}, on the live state
@@ -39,6 +39,7 @@ class LsmEngineFuzzTest {
 
     private static final int OPERATIONS_PER_SEED = 4000;
     private static final int MAX_SNAPSHOTS = 4;
+    private static final int MAX_CHECKPOINTS = 3;
 
     /** An engine snapshot together with the model state it must show. */
     private record ModelSnapshot(Snapshot snapshot, TreeMap<byte[], byte[]> model) {
@@ -144,13 +145,22 @@ class LsmEngineFuzzTest {
 
     @Test
     void engineMatchesTheModelAcrossReopensAndCrashes() {
-        Seeds.forEach(LsmEngineFuzzTest.class, "engine-fuzz", 10, seed -> {
+        Seeds.forEach(LsmEngineFuzzTest.class, "engine-fuzz", 40, seed -> {
             Random random = new Random(seed);
             MemoryFileSystem fs = new MemoryFileSystem();
             Path dir = Path.of("fuzz-" + seed).toAbsolutePath();
-            EngineOptions options = new EngineOptions()
+            EngineOptions options = new EngineOptions().deterministic(true)
                     .memTableSize(1024 + random.nextInt(64 * 1024))
-                    .blockCacheCapacity(random.nextInt(4) == 0 ? 0 : 64 * 1024 * (1 + random.nextInt(8)));
+                    .blockCacheCapacity(random.nextInt(4) == 0 ? 0 : 64 * 1024 * (1 + random.nextInt(8)))
+                    // Small limits, so that data moves through several levels.
+                    .levelCount(2 + random.nextInt(4))
+                    .level0CompactionTrigger(1 + random.nextInt(4))
+                    .level1TargetSize(4096 + random.nextInt(64 * 1024))
+                    .targetFileSize(2048 + random.nextInt(32 * 1024))
+                    // Tight budgets, so that index blocks are reloaded and the manifest is
+                    // replaced many times.
+                    .tableMetadataBudget(random.nextInt(3) == 0 ? random.nextInt(600) : 1 << 20)
+                    .maxManifestSize(200 + random.nextInt(4000));
 
             // A small key universe makes overwrites and deletes of existing keys frequent.
             byte[][] universe = new byte[40 + random.nextInt(200)][];
@@ -170,6 +180,7 @@ class LsmEngineFuzzTest {
             List<Long> sequenceSinceSync = new ArrayList<>();
             sequenceSinceSync.add(0L);
             List<ModelSnapshot> snapshots = new ArrayList<>();
+            int checkpoints = 0;
 
             LsmEngine engine = LsmEngine.open(fs, dir, options);
             for (int op = 0; op < OPERATIONS_PER_SEED; op++) {
@@ -229,9 +240,25 @@ class LsmEngineFuzzTest {
                         snapshots.remove(random.nextInt(snapshots.size())).snapshot().close();
                     }
                     assertEquals(snapshots.size(), engine.liveSnapshotCount());
+                } else if (choice < 94) {
+                    // compact: changes where the data lives, never what a reader sees
+                    engine.compact();
                 } else if (choice < 96) {
-                    // flush: everything written so far becomes durable
-                    engine.flush();
+                    // flush or checkpoint: everything written so far becomes durable
+                    if (choice == 95 && checkpoints < MAX_CHECKPOINTS) {
+                        Path target = Path.of("fuzz-" + seed + "-checkpoint-" + checkpoints++).toAbsolutePath();
+                        engine.checkpoint(target);
+                        // The copy is a complete engine that shows exactly the current state.
+                        try (LsmEngine copy = LsmEngine.open(fs, target, options)) {
+                            if (!matches(copy, null, model, universe)) {
+                                fail("a checkpoint differs from the model " + when);
+                            }
+                            checkScan(copy, null, model, null, null, "in a checkpoint " + when);
+                            assertEquals(expectedSequence, copy.lastSequence());
+                        }
+                    } else {
+                        engine.flush();
+                    }
                     sinceSync.clear();
                     sequenceSinceSync.clear();
                     sinceSync.add(new TreeMap<>(model));
