@@ -68,19 +68,30 @@ deleted. This test must pass on Windows.
 
 - 3-, 5-, and 7-node clusters, virtual time driven by a priority queue.
 - Faults: message drops (5–15%), delays (1–100 ms), duplicates, reordering, symmetric and
-  asymmetric partitions, differing tick rates per node, crashes and restarts, delayed and
-  lost persistence (a crash discards everything not yet reported as persisted), log damage,
-  membership changes, leadership transfers, snapshots.
+  asymmetric partitions, differing tick rates per node, process pauses, crashes and
+  restarts, delayed and lost persistence (a crash discards everything not yet reported as
+  persisted), log damage, membership changes, leadership transfers, snapshots.
+  - A paused node processes nothing for a while and then everything that arrived in the
+    meantime at once. Even on a reliable network this produces leader changes, leaders of
+    terms the cluster has left behind, and truncated logs.
+  - Writes become durable in order after a random delay; one completion may cover several.
+  - The settings of a run (cluster size, delays, flow-control limits, load) are drawn from
+    its seed, so that the seed set covers many shapes of a cluster.
 - **Safety invariants, checked after every step:**
   - Election safety: at most one leader per term.
   - Log matching: equal `(index, term)` implies identical prefixes.
-  - Leader completeness: a committed entry is present in the log of every later leader.
+  - Leader completeness: a committed entry is present in the log of every leader of a later
+    term than the one in which it was committed.
   - State machine safety: no two nodes apply different entries at the same index.
   - No message that promises a state is sent before that state was reported persisted.
   - At most one uncommitted configuration change; any two quorums of consecutive
     configurations intersect.
 - **Liveness, checked only after the network has been healed for a bounded time:** a leader
-  exists and new proposals commit.
+  exists and new proposals commit. Once the load stops, all nodes hold the same log, fully
+  committed and applied, and every accepted proposal is either applied or known to be lost.
+- **The seed set must reach the interesting situations:** leader changes, log truncations,
+  overload rejections, lost proposals. A run of the full set that reaches none of one kind
+  fails.
 
 ### 2.5 Linearizability
 

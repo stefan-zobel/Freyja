@@ -33,8 +33,9 @@ Rules:
 ## Phase B — Raft Core
 
 - **B1.** `raft-core` with the batched `Ready` contract, asynchronous persistence, PreVote,
-  CheckQuorum, replication, and flow control. Purity test. `raft-sim` with a reliable network
-  and delayed persistence.
+  CheckQuorum, replication, and flow control. Purity test. `raft-sim` with a reliable network,
+  delayed persistence, and process pauses. The safety checks of the simulator are ordinary
+  code in this milestone; they move into the protected `SafetyInvariants` file in B2.
 - **B2.** Full fault injection. Safety invariants in the protected `SafetyInvariants` file
   with checksum test and negative tests. ReadIndex. Linearizability checker. TLA+ model for
   elections and replication. Trace recording and trace validation with mutation tests.

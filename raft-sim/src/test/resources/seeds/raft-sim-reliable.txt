@@ -1,0 +1,4 @@
+# Seeds that failed while the simulator was built. Each runs on every build.
+6    # accepted proposals beyond the final log end were not counted as lost
+8    # a narrow flow-control window needs time in proportion to the backlog
+154  # a paused candidate became leader of a term the cluster had left behind

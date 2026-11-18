@@ -20,14 +20,19 @@ on any reference to these.
 
 ## 2. API Shape
 
-The names are a sketch and may change. The semantics in §3 may not.
+The names are a sketch and may change. The semantics in §3 may not. The sketch shows the
+complete API. Events, `Ready` fields, and messages that belong to a later milestone
+(snapshots, membership change, leadership transfer, read index, log damage) enter the code
+with that milestone.
 
 ```java
 public final class RaftNode {
-    public static RaftNode create(RaftConfig config, PersistedState state, LogView log);
+    public static RaftNode create(RaftConfig config, PersistedState state, LogView log,
+                                  long appliedIndex);   // what the state machine has applied
     public void step(RaftEvent event);   // changes state only; performs nothing
     public boolean hasReady();
     public Ready takeReady();            // the work the runtime must do next
+    public ProtocolState view();         // read-only protocol state, see §9
 }
 
 public interface LogView {               // read-only access to durably stored entries
@@ -81,16 +86,33 @@ public record Ready(
    something (a vote, an append acknowledgment) only in a `Ready` that follows the `Persisted`
    event for the state the message depends on. Consequently every message in a `Ready` may be
    sent at once, and the runtime needs no ordering logic of its own.
+   - **Rule:** a promising message waits until the *complete* state the node had when it
+     created the message is durable, not only the part the message mentions. The node then
+     behaves exactly like one that persists instantly and whose messages are delayed on the
+     way, so the usual safety argument for Raft applies unchanged.
+   - **Messages that wait:** a granted vote, a successful append acknowledgment, and a
+     request for votes. The last one waits because a candidate that forgot its candidacy in
+     a crash could otherwise collect votes granted for a log it no longer has. A candidate
+     also counts its own vote only once that vote is durable.
+   - **Messages that leave at once:** pre-vote requests and answers, rejections, heartbeats
+     and their answers, and the appends of a leader. They state what the node thinks at that
+     moment and promise nothing about the future.
 3. **Runtime contract:**
    - Persist `hardState`, the suffix truncation, and `entries` of each `Ready` in sequence
      order. Several `Ready`s may be covered by one sync.
    - Feed `Persisted(sequence)` when everything up to and including that `Ready` is durable.
    - Sending messages, applying entries, and persisting may run concurrently.
+   - Within one `Ready` the order is: hard state, suffix truncation, entries. A truncation
+     removes the stored entries from the given index on. The entries of a `Ready` have
+     consecutive indexes and follow the stored log directly after the truncation.
+   - A write that is on its way when the core truncates its log in memory does not bring
+     the removed entries back: when that write is reported, the core counts as durable only
+     the part that is still in its log.
 4. **Leader replication runs in parallel with the leader's own disk write.** A leader may send
    new entries to followers before they are durable locally. It counts itself toward the
    commit quorum only up to its last persisted index.
 5. **Apply:** the core offers an entry for application only when it is committed and durable
-   locally.
+   locally. After a restart it continues after the `appliedIndex` given to `create`.
 6. **Reading the log:** the core reads the `LogView` only for indexes at or below its last
    persisted index; newer entries come from its own memory.
 7. **Proposals:** a leader answers `ClientPropose` with a notification carrying
@@ -113,17 +135,35 @@ public record Ready(
   replicating (pipelined), or snapshotting.
 - **In-flight window:** at most `maxInflightAppends` unacknowledged append messages per
   follower (default 256).
-- **Message size:** at most `maxAppendBytes` of entries per message (default 1 MiB).
+- **Message size:** at most `maxAppendBytes` of entries per message (default 1 MiB). The
+  size of an entry is the length of its payload. A message always carries at least one entry,
+  even if that entry alone exceeds the limit.
 - **Uncommitted cap:** when the uncommitted part of the leader's log exceeds
-  `maxUncommittedBytes` (default 64 MiB), new proposals are rejected as overloaded.
+  `maxUncommittedBytes` (default 64 MiB), new proposals are rejected as overloaded. A
+  proposal is always accepted when nothing is uncommitted, whatever its size.
+- **Finding the match point:** a follower that rejects an append names the last index at or
+  below the rejected one whose term is not above the term the leader offered. The leader
+  continues at the last index at or below that hint whose term in its own log is not above
+  the term the follower named. Whole terms are skipped this way.
+- **Heartbeats** are separate from appends, so that flow control never holds them back. A
+  heartbeat carries the commit index, limited to the match index of its receiver.
+- **Recovery from lost appends:** when a heartbeat answer arrives and the follower is behind,
+  a probing leader sends its probe again. A replicating leader that has appends in flight but
+  saw no progress since the previous heartbeat answer falls back to probing.
 
 ## 5. Mandatory Protocol Details
 
 - **PreVote:** a node starts a real election only after a majority indicated it would grant
-  the vote.
+  the vote. A pre-vote changes no state on either side. The answer to a pre-vote names the
+  election it is for, so a grant for an earlier election is not counted.
 - **CheckQuorum:** a leader steps down when it has not heard from a majority within one
   election timeout. A node that has heard from a leader within the minimum election timeout
-  does not grant votes, except for a leadership transfer.
+  does not grant votes, except for a leadership transfer. It does not answer such a request
+  at all, so that a node that lost contact cannot raise the term of the others.
+- **Old terms:** an append or heartbeat of an older term is answered with a rejection that
+  carries the current term, so that a deposed leader steps down. A node can still win the
+  election of a term the cluster has left behind (its votes arrive late). Such a leader can
+  commit nothing and steps down on the first answer.
 - **Leader no-op:** a new leader appends a no-op entry in its term immediately.
 - **ReadIndex:** a leader serves `ClientReadIndex` only after it has committed an entry in its
   current term. It records the commit index, confirms leadership with a heartbeat round to a
@@ -180,6 +220,7 @@ five nodes with bounded terms and log lengths. The specification is kept in `doc
 updated together with the protocol rules above.
 
 The model is tied to the implementation by trace validation (`verification.md` §2.7). For
-that purpose the core exposes a read-only view of its protocol state (term, role, vote, last
-log index and term, commit index, configuration, log-recovering flag). The view performs no
+that purpose the core exposes a read-only view of its protocol state (term, role, vote, known
+leader, last log index and term, durable index, commit index, configuration, log-recovering
+flag). The view performs no
 I/O and does not affect determinism.
