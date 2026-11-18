@@ -495,6 +495,48 @@ repair on the one path that is verified for a node that has lost what it acknowl
 - Separate listeners for peers, clients, and administration.
 - Not-leader responses carry the leader's client address if known.
 
+### 8.1 Client Protocol
+
+The types and their codec live in `kv-common`; the client needs nothing else.
+
+- Request: version (`uint8`, 1), type (`uint8`), request id (`uint64`), timeout in
+  milliseconds (`uint32`), body, CRC32C (`uint32`). Response: version, type, the request id,
+  body, CRC32C. A boolean is one byte; a byte string is a length (`uint32`) and its bytes.
+  A client may have several requests on one connection; a response names its request.
+- Requests:
+  - 1 execute: the command as a byte string in the encoding of the log (§4.1) with the time
+    stamp 0. The node that proposes it sets the time stamp. Accepted are batches,
+    conditional batches, and the commands of a session; the commands of an administrator
+    are refused as invalid.
+  - 2 get: key, stale. 3 scan: start, end (each empty for no bound), limit (`uint32`),
+    reverse, stale.
+- Responses:
+  - 65 result: log index (`uint64`), the encoded result as a byte string.
+  - 66 value: found, value, `ModIndex`, applied index of the node at the read.
+  - 67 pairs: applied index, number of pairs (`uint32`), and per pair key, value, `ModIndex`.
+  - 68 not leader: leader id (`uint32`, all bits set for none), its client address in UTF-8.
+  - 69 rejected: reason (`uint8`: 0 overloaded, 1 expired, 2 unavailable, 3 invalid,
+    4 unsupported).
+- A frame that is not a valid request gets no answer: without a request id there is nobody
+  to answer.
+
+### 8.2 Serving Requests
+
+- A command is answered when the node that took it has applied the entry the core gave it,
+  with the result of applying. If another entry is applied in that place, or a snapshot is
+  installed over it, the command was lost with a leadership: the answer is not-leader, and
+  the client sends the command again with the same sequence number.
+- A linearizable read asks the core for a read index and is answered from the state machine
+  once that index is applied. A stale read is answered at once from the node that is asked.
+- The time a request allows becomes a deadline in the time of the node (§7). A request that
+  is still waiting when its time has passed is dropped without an answer; the client reports
+  its outcome as unknown.
+- A node that is not running, or that stops while requests wait, answers unavailable.
+- The number of requests that wait on a node is bounded (default 10,000); beyond it a
+  request is refused as overloaded. A scan returns at most a bounded number of pairs
+  (default 1,000) and never more than its limit.
+- Reverse scans are refused as unsupported until the open decision of the roadmap is taken.
+
 ## 9. Client Library (`kv-client`)
 
 - Discovers the leader from any reachable node and follows redirects.

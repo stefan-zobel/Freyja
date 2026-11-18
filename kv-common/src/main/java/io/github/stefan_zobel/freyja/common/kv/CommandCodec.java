@@ -257,7 +257,7 @@ public final class CommandCodec {
 
     // ------------------------------------------------------------------ bytes
 
-    private static final class Out {
+    static final class Out {
         final ByteArrayOutputStream buffer = new ByteArrayOutputStream(64);
         private final byte[] scratch = new byte[8];
 
@@ -281,7 +281,7 @@ public final class CommandCodec {
         }
     }
 
-    private static final class In {
+    static final class In {
         private final byte[] bytes;
         private int at;
 

@@ -22,6 +22,7 @@ import io.github.stefan_zobel.freyja.common.kv.CommandResult.SessionRegistered;
 import io.github.stefan_zobel.freyja.lsm.EngineOptions;
 import io.github.stefan_zobel.freyja.lsm.fs.MemoryFileSystem;
 import io.github.stefan_zobel.freyja.lsm.fs.StorageFileSystem;
+import io.github.stefan_zobel.freyja.node.service.ClientService;
 import io.github.stefan_zobel.freyja.node.sm.StateMachineStore;
 import io.github.stefan_zobel.freyja.node.snapshot.SnapshotTransfers;
 import io.github.stefan_zobel.freyja.node.store.NodeIdentity;
@@ -58,10 +59,21 @@ final class KvCluster {
             Node.initialize(memory, DATA, new NodeIdentity(7, id), config, 1);
         }
 
+        /** Serves the requests of clients on this node, if the cluster has services. */
+        ClientService service;
+
         void start() throws IOException {
-            node = Node.open(fs, DATA, options, new StateMachineStore.Options(new EngineOptions()
+            StateMachineStore.Options machine = new StateMachineStore.Options(new EngineOptions()
                     .deterministic(true).reserveSize(0).minFreeSpace(0).memTableSize(32 * 1024)
-                    .blockCacheCapacity(1024 * 1024), 60_000), (to, message) -> network.add(message), this);
+                    .blockCacheCapacity(1024 * 1024), 60_000);
+            if (services) {
+                service = new ClientService(new ClientService.Options(100, 50, 64), () -> wallClock,
+                        node -> "node-" + node + ":7000", this);
+                node = Node.open(fs, DATA, options, machine, (to, message) -> network.add(message), service);
+                service.attach(node);
+            } else {
+                node = Node.open(fs, DATA, options, machine, (to, message) -> network.add(message), this);
+            }
         }
 
         boolean running() {
@@ -69,6 +81,9 @@ final class KvCluster {
         }
 
         void stop() throws IOException {
+            if (service != null) {
+                service.detach();
+            }
             node.close();
             node = null;
         }
@@ -77,6 +92,9 @@ final class KvCluster {
         void crash(Random random) {
             Node dead = node;
             node = null;
+            if (service != null) {
+                service.detach();
+            }
             memory.crash(random);
             try {
                 dead.close(); // only releases the memory of the dead instance
@@ -132,6 +150,10 @@ final class KvCluster {
     /** Members whose node stopped with a failure during the last steps. */
     final List<Member> failed = new ArrayList<>();
     long delivered;
+    /** Whether every node gets a service for the requests of clients. Set before the nodes start. */
+    boolean services;
+    /** The time of day the nodes see, in milliseconds; a tick moves it by 100. */
+    long wallClock = 1_000_000;
 
     private long time = 1_000;
     private long requestId;
@@ -157,8 +179,20 @@ final class KvCluster {
     }
 
     static KvCluster ofThree(Node.Options options) throws IOException {
+        return ofThree(options, false);
+    }
+
+    /** Three nodes, each with a service for the requests of clients. */
+    static KvCluster withServices() throws IOException {
+        return ofThree(new Node.Options(RaftConfig.defaults(0, 5), 4 * 1024, 256, 16 * 1024, 5,
+                new SnapshotTransfers.Options(700, 3, 40, 2), new Node.Limits(10_000, 1L << 30, 0, 10, 1L << 40),
+                () -> 0), true);
+    }
+
+    static KvCluster ofThree(Node.Options options, boolean services) throws IOException {
         KvCluster cluster = new KvCluster();
         cluster.options = options;
+        cluster.services = services;
         for (int i = 0; i < 3; i++) {
             cluster.add(ClusterConfig.ofVoters(0, 1, 2)).start();
         }
@@ -193,6 +227,9 @@ final class KvCluster {
                     while (member.running() && member.node.runOnce()) {
                         progress = true;
                     }
+                    if (member.running() && member.service != null) {
+                        member.service.afterStep();
+                    }
                 } catch (IOException e) {
                     failed.add(member);
                     try {
@@ -208,6 +245,7 @@ final class KvCluster {
 
     void ticks(int count) {
         for (int i = 0; i < count; i++) {
+            wallClock += 100;
             for (Member member : members) {
                 if (member.running()) {
                     member.node.tick();
