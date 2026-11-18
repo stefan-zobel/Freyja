@@ -37,10 +37,12 @@ import io.github.stefan_zobel.freyja.node.NodeListener;
 import io.github.stefan_zobel.freyja.node.sm.KvStateMachine;
 import io.github.stefan_zobel.freyja.node.sm.StateMachineStore;
 import io.github.stefan_zobel.freyja.node.snapshot.SnapshotTransfers;
+import io.github.stefan_zobel.freyja.node.store.LostIdentityException;
 import io.github.stefan_zobel.freyja.node.store.NodeIdentity;
 import io.github.stefan_zobel.freyja.node.store.RepairMarker;
 import io.github.stefan_zobel.freyja.node.wire.MessageCodec;
 import io.github.stefan_zobel.freyja.raft.ClusterConfig;
+import io.github.stefan_zobel.freyja.raft.ConfigChange;
 import io.github.stefan_zobel.freyja.raft.EntryType;
 import io.github.stefan_zobel.freyja.raft.LogEntry;
 import io.github.stefan_zobel.freyja.raft.Notification;
@@ -81,23 +83,30 @@ public final class SystemSimulation {
      *                    crashes or the network is cut
      * @param storage     whether stored data is damaged, disks run full or slow, and leaders
      *                    are asked to hand over
+     * @param spares      how many nodes stand by to take the place of members; with spares,
+     *                    members are replaced and identities are lost
      */
     public record Options(int nodes, int clients, int keys, long duration, int maxDelay, double drop,
-                          double duplicate, double chaos, boolean storage) {
+                          double duplicate, double chaos, boolean storage, int spares) {
 
         /** A reliable network and no crashes. */
         public static Options calm() {
-            return new Options(3, 3, 4, 30_000, 3, 0, 0, 0, false);
+            return new Options(3, 3, 4, 30_000, 3, 0, 0, 0, false, 0);
         }
 
         /** Lost and repeated messages, partitions, and crashes, also in the middle of a write. */
         public static Options faulty() {
-            return new Options(3, 4, 4, 60_000, 12, 0.03, 0.03, 0.25, false);
+            return new Options(3, 4, 4, 60_000, 12, 0.03, 0.03, 0.25, false, 0);
         }
 
         /** All of {@link #faulty}, and damaged files, full disks, slow disks, and hand-overs. */
         public static Options hostile() {
-            return new Options(3, 4, 4, 80_000, 12, 0.02, 0.02, 0.3, true);
+            return new Options(3, 4, 4, 80_000, 12, 0.02, 0.02, 0.3, true, 0);
+        }
+
+        /** All of {@link #hostile}, and members that are replaced, some after losing their identity. */
+        public static Options changing() {
+            return new Options(3, 4, 4, 100_000, 12, 0.02, 0.02, 0.25, true, 4);
         }
     }
 
@@ -136,6 +145,9 @@ public final class SystemSimulation {
         public long slowDiskStepDowns;
         public long transfers;
         public long transfersAborted;
+        public long replacements;
+        public long identitiesLost;
+        public long configurationsReverted;
 
         public void add(Stats other) {
             steps += other.steps;
@@ -171,6 +183,9 @@ public final class SystemSimulation {
             slowDiskStepDowns += other.slowDiskStepDowns;
             transfers += other.transfers;
             transfersAborted += other.transfersAborted;
+            replacements += other.replacements;
+            identitiesLost += other.identitiesLost;
+            configurationsReverted += other.configurationsReverted;
         }
 
         @Override
@@ -188,7 +203,8 @@ public final class SystemSimulation {
                     + " after a scrub), disks short " + disksShort + " (" + diskFullStops + " stops, "
                     + rejectedForSpace + " rejections, " + alarmsCleared + " alarms cleared), slow disks "
                     + slowDisks + " (" + slowDiskStepDowns + " step-downs), transfers " + transfers + " ("
-                    + transfersAborted + " aborted)";
+                    + transfersAborted + " aborted), members replaced " + replacements + " (" + identitiesLost
+                    + " after losing their identity), configurations reverted " + configurationsReverted;
         }
     }
 
@@ -201,8 +217,11 @@ public final class SystemSimulation {
     private static final int MAX_ATTEMPTS = 12;
     /** Clients stop when this many operations have an unknown outcome: the checker pays for each. */
     private static final int MAX_GIVEN_UP = 8;
-    /** Shorter than the time after which a client gives up, so that sessions expire under retries. */
-    private static final long SESSION_TIMEOUT = 10L * PATIENCE;
+    /**
+     * Less than half the time after which a client gives up, so that the session of a client
+     * that waits through a longer outage expires while its command is still on its way.
+     */
+    private static final long SESSION_TIMEOUT = 5L * PATIENCE;
 
     private static final int EVENT_TICK = 0;
     private static final int EVENT_DELIVER = 1;
@@ -249,6 +268,36 @@ public final class SystemSimulation {
         long slowUntil;
         /** What the clock of this node is ahead of simulated time. */
         long clockSkew;
+        /** Whether the node has ever been started; a spare has not. */
+        boolean started;
+        /** Whether the node is out of the cluster for good. */
+        boolean retired;
+        boolean identityLost;
+        long configIndex;
+
+        /** Whether the node is one of those that are meant to run. */
+        boolean active() {
+            return started && !retired;
+        }
+
+        /** Takes the node out of the cluster for good. */
+        void retire() {
+            retired = true;
+            if (node != null) {
+                Node last = node;
+                node = null;
+                stats.snapshotsCreated += last.snapshotsCreated();
+                stats.slowDiskStepDowns += last.slowSyncStepDowns();
+                accepted.clear();
+                reads.clear();
+                outbox.clear();
+                try {
+                    last.close();
+                } catch (IOException | RuntimeException | FaultyFileSystem.SimulatedCrash e) {
+                    memory.crash(random); // it died while it was stopped
+                }
+            }
+        }
 
         Host(int id, ClusterConfig config) throws IOException {
             this.id = id;
@@ -256,6 +305,7 @@ public final class SystemSimulation {
         }
 
         void start() throws IOException {
+            started = true;
             fs = new FaultyFileSystem(memory);
             // A slow disk: every sync takes long by the clock of this node.
             fs.setFault((operation, path, index) -> {
@@ -276,6 +326,9 @@ public final class SystemSimulation {
             if (node.repairedAtStart()) {
                 stats.repairs++;
             }
+            log("node " + id + " started" + (node.repairedAtStart() ? ", state machine rebuilt" : "")
+                    + (node.lostTailWitnessed() ? ", lost log tail witnessed" : "") + ": " + node.view()
+                    + " applied " + node.store().appliedIndex() + " snapshot " + node.snapshot().lastIncludedIndex());
             observeRecovering();
         }
 
@@ -284,8 +337,10 @@ public final class SystemSimulation {
             boolean now = node.view().logRecovering();
             if (now && !recovering) {
                 stats.recoveringEntered++;
+                log("node " + id + " is in log-recovering mode: " + node.view());
             } else if (!now && recovering) {
                 stats.recoveringLeft++;
+                log("node " + id + " left log-recovering mode: " + node.view());
             }
             recovering = now;
         }
@@ -298,6 +353,8 @@ public final class SystemSimulation {
         void down(boolean crashFirst) {
             Node dead = node;
             node = null;
+            // The state machine of a node that died in an installation is not to be asked.
+            log("node " + id + " down" + (crashFirst ? "" : " (crash in an operation)") + ": " + dead.view());
             stats.snapshotsCreated += dead.snapshotsCreated();
             stats.slowDiskStepDowns += dead.slowSyncStepDowns();
             accepted.clear();
@@ -311,7 +368,9 @@ public final class SystemSimulation {
             } catch (IOException | RuntimeException | FaultyFileSystem.SimulatedCrash expected) {
                 // its files are gone
             }
-            schedule(time + 5L * TICK + random.nextInt(60 * TICK), EVENT_RESTART, id, -1, null);
+            if (!retired) {
+                schedule(time + 5L * TICK + random.nextInt(60 * TICK), EVENT_RESTART, id, -1, null);
+            }
         }
 
         @Override
@@ -326,9 +385,21 @@ public final class SystemSimulation {
                     if (change.role() == Role.LEADER && role != Role.LEADER) {
                         stats.leaderChanges++;
                     }
+                    if (change.role() != role) {
+                        log("node " + id + " is " + change.role() + " of term " + change.term() + ": "
+                                + node.view());
+                    }
                     role = change.role();
                 }
                 case Notification.TransferAborted _ -> stats.transfersAborted++;
+                case Notification.ConfigChanged changed -> {
+                    // A configuration of an entry that was cut off again gives way to an
+                    // older one.
+                    if (changed.index() < configIndex) {
+                        stats.configurationsReverted++;
+                    }
+                    configIndex = changed.index();
+                }
                 default -> {
                 }
             }
@@ -353,6 +424,9 @@ public final class SystemSimulation {
                 }
             }
             long hash = hash(entry);
+            if (debug && entry.index() % 50 == 0) {
+                log("node " + id + " applied " + entry.index() + "@" + entry.term());
+            }
             observation.applied(new SystemObservation.Applied(id, entry.index(), entry.term(), hash, session,
                     sequence, result));
             long[] proposal = accepted.remove(entry.index());
@@ -369,6 +443,7 @@ public final class SystemSimulation {
         @Override
         public void snapshotInstalled(SnapshotMeta meta) {
             stats.snapshotsInstalled++;
+            log("node " + id + " installed the snapshot " + meta.lastIncludedIndex() + "@" + meta.lastIncludedTerm());
             // Proposals this node took may lie below the snapshot; their answers never come.
             accepted.headMap(meta.lastIncludedIndex(), true).clear();
         }
@@ -455,7 +530,7 @@ public final class SystemSimulation {
         private void send() {
             sentAt = time;
             if (target < 0 || !hosts.get(target).running()) {
-                target = random.nextInt(hosts.size());
+                target = randomActive().id;
             }
             Host host = hosts.get(target);
             if (!host.running()) {
@@ -562,7 +637,7 @@ public final class SystemSimulation {
                 // A copy of the request that was held up somewhere arrives much later, when
                 // the client has long moved on.
                 stats.lateDuplicates++;
-                schedule(time + random.nextInt(60 * TICK), EVENT_REPLAY, random.nextInt(hosts.size()), -1, sent);
+                schedule(time + random.nextInt(60 * TICK), EVENT_REPLAY, randomActive().id, -1, sent);
             }
         }
 
@@ -607,6 +682,14 @@ public final class SystemSimulation {
     private long requests;
     private boolean clientsMayStart = true;
     private boolean faults = true;
+    /** Set the environment variable FREYJA_SIM_DEBUG to see what a run does. */
+    private final boolean debug = System.getenv("FREYJA_SIM_DEBUG") != null;
+
+    private void log(String what) {
+        if (debug) {
+            System.out.println("[sim " + time + "] " + what);
+        }
+    }
 
     public SystemSimulation(long seed, Options options) {
         this.seed = seed;
@@ -754,14 +837,16 @@ public final class SystemSimulation {
         if (random.nextDouble() >= options.chaos()) {
             return;
         }
-        long down = hosts.stream().filter(h -> !h.running()).count();
-        int choice = random.nextInt(options.storage() ? 16 : 10);
-        if (choice >= 10) {
+        long down = active().stream().filter(h -> !h.running()).count();
+        int choice = random.nextInt(options.spares() > 0 ? 17 : options.storage() ? 16 : 10);
+        if (choice == 16) {
+            loseIdentity();
+        } else if (choice >= 10) {
             storageChaos(choice);
         } else if (choice < 5) {
             // Mostly a minority is down at one time, so that the cluster makes progress.
-            Host victim = hosts.get(random.nextInt(hosts.size()));
-            if (victim.running() && (down < (hosts.size() - 1) / 2 || random.nextInt(8) == 0)) {
+            Host victim = randomActive();
+            if (victim.running() && (down < (active().size() - 1) / 2 || random.nextInt(8) == 0)) {
                 if (random.nextBoolean()) {
                     stats.crashes++;
                     victim.down(true);
@@ -774,14 +859,33 @@ public final class SystemSimulation {
             }
         } else if (isolated.isEmpty()) {
             stats.partitions++;
-            isolated.add(random.nextInt(hosts.size()));
+            isolated.add(randomActive().id);
             schedule(time + 20L * TICK + random.nextInt(80 * TICK), EVENT_HEAL, -1, -1, null);
         }
     }
 
-    /** Whether every node runs and none is repairing anything. */
-    private boolean allHealthy() {
+    /** The nodes that are meant to run: started and not retired. */
+    private List<Host> active() {
+        List<Host> list = new ArrayList<>();
         for (Host host : hosts) {
+            if (host.active()) {
+                list.add(host);
+            }
+        }
+        return list;
+    }
+
+    private Host randomActive() {
+        List<Host> list = active();
+        return list.get(random.nextInt(list.size()));
+    }
+
+    /** Whether every node runs, none is repairing anything, and no member is being replaced. */
+    private boolean allHealthy() {
+        if (phase != Phase.IDLE) {
+            return false;
+        }
+        for (Host host : active()) {
             if (!host.running() || host.damaged || host.recovering || host.node.view().logRecovering()) {
                 return false;
             }
@@ -789,8 +893,117 @@ public final class SystemSimulation {
         return true;
     }
 
+    // ------------------------------------------------------------------ membership
+
+    private enum Phase {
+        IDLE, ADD, PROMOTE, REMOVE
+    }
+
+    private Phase phase = Phase.IDLE;
+    private int joining = -1;
+    private int leaving = -1;
+    private int nextSpare;
+
+    private Host leader() {
+        for (Host host : active()) {
+            if (host.running() && host.role == Role.LEADER) {
+                return host;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The administrator, played by the simulation, replaces a member: a spare joins as a
+     * learner, is promoted, and then the member is removed and retired. One step per turn;
+     * a step that the cluster refuses is asked for again at the next turn.
+     */
+    private void administer() throws IOException {
+        Host leader = leader();
+        if (leader == null) {
+            return;
+        }
+        ClusterConfig config = leader.node.store().machine().config();
+        switch (phase) {
+            case IDLE -> {
+                if (!faults || nextSpare >= hosts.size() || random.nextInt(8) != 0 || !allHealthy()) {
+                    return;
+                }
+                List<Integer> voters = new ArrayList<>(new java.util.TreeSet<>(config.voters()));
+                begin(voters.get(random.nextInt(voters.size())));
+            }
+            case ADD -> {
+                if (config.learners().contains(joining) || config.voters().contains(joining)) {
+                    phase = Phase.PROMOTE;
+                } else {
+                    change(leader, new ConfigChange.AddLearner(joining));
+                }
+            }
+            case PROMOTE -> {
+                if (config.voters().contains(joining)) {
+                    phase = Phase.REMOVE;
+                } else {
+                    change(leader, new ConfigChange.PromoteLearner(joining));
+                }
+            }
+            case REMOVE -> {
+                if (config.voters().contains(leaving)) {
+                    change(leader, new ConfigChange.RemoveVoter(leaving));
+                    return;
+                }
+                // The member goes when nobody who stays counts on it any more.
+                for (Host host : active()) {
+                    if (host.id != leaving && (!host.running()
+                            || host.node.store().machine().config().voters().contains(leaving))) {
+                        return;
+                    }
+                }
+                hosts.get(leaving).retire();
+                stats.replacements++;
+                phase = Phase.IDLE;
+            }
+        }
+    }
+
+    private void begin(int member) throws IOException {
+        joining = nextSpare++;
+        leaving = member;
+        hosts.get(joining).start();
+        pump(hosts.get(joining));
+        phase = Phase.ADD;
+    }
+
+    private void change(Host leader, ConfigChange change) {
+        leader.node.submit(new RaftEvent.ProposeConfigChange(++requests, change));
+        pump(leader);
+    }
+
+    /**
+     * A node loses the file that says who it is. It can never start again; the administrator
+     * replaces it.
+     */
+    private void loseIdentity() {
+        try {
+            if (nextSpare >= hosts.size() || !allHealthy()) {
+                return;
+            }
+            Host victim = randomActive();
+            victim.identityLost = true;
+            victim.down(true);
+            stats.crashes++;
+            stats.identitiesLost++;
+            Path file = DATA.resolve(NodeIdentity.FILE_NAME);
+            byte[] one = victim.memory.peek(file, 6, 1);
+            one[0] ^= 0x10;
+            victim.memory.overwrite(file, 6, one);
+            begin(victim.id);
+        } catch (IOException e) {
+            throw new AssertionError(e);
+        }
+    }
+
     private void storageChaos(int choice) {
-        Host victim = hosts.get(random.nextInt(hosts.size()));
+        Host victim = randomActive();
         try {
             switch (choice) {
                 case 10, 11 -> {
@@ -801,6 +1014,7 @@ public final class SystemSimulation {
                 }
                 case 12 -> {
                     if (victim.running() && !victim.diskShort) {
+                        log("node " + victim.id + ": disk short");
                         stats.disksShort++;
                         victim.diskShort = true;
                         long used = Long.MAX_VALUE - victim.memory.freeSpace(DATA);
@@ -816,14 +1030,12 @@ public final class SystemSimulation {
                     }
                 }
                 case 14 -> {
-                    for (Host host : hosts) {
-                        if (host.running() && host.role == Role.LEADER) {
-                            stats.transfers++;
-                            host.node.submit(new RaftEvent.TransferLeadership(++requests,
-                                    (host.id + 1 + random.nextInt(hosts.size() - 1)) % hosts.size()));
-                            pump(host);
-                            break;
-                        }
+                    Host host = leader();
+                    if (host != null && victim != host) {
+                        log("node " + host.id + " is asked to hand over to node " + victim.id);
+                        stats.transfers++;
+                        host.node.submit(new RaftEvent.TransferLeadership(++requests, victim.id));
+                        pump(host);
                     }
                 }
                 default -> scrub(victim);
@@ -881,6 +1093,7 @@ public final class SystemSimulation {
         one[0] ^= (byte) (1 << random.nextInt(8));
         victim.memory.overwrite(file, offset, one);
         victim.damaged = true;
+        log("node " + victim.id + ": a bit of " + file.getFileName() + " flipped at " + offset);
         if (log) {
             stats.damagedLogs++;
         } else {
@@ -951,6 +1164,13 @@ public final class SystemSimulation {
                 if (options.storage()) {
                     clearAlarm();
                 }
+                if (options.spares() > 0) {
+                    try {
+                        administer();
+                    } catch (IOException e) {
+                        throw new AssertionError("the administrator: " + e, e);
+                    }
+                }
                 if (faults) {
                     chaos();
                 }
@@ -963,9 +1183,15 @@ public final class SystemSimulation {
             }
             case EVENT_RESTART -> {
                 Host host = hosts.get(event.target());
-                if (!host.running()) {
+                if (!host.running() && !host.retired) {
                     try {
                         host.start();
+                    } catch (LostIdentityException e) {
+                        if (!host.identityLost) {
+                            throw new AssertionError("node " + host.id + " does not start: " + e, e);
+                        }
+                        host.retired = true; // it refuses to start, for good
+                        return;
                     } catch (IOException e) {
                         if (!host.diskShort) {
                             throw new AssertionError("node " + host.id + " does not start: " + e, e);
@@ -1043,6 +1269,12 @@ public final class SystemSimulation {
             host.start();
             schedule(random.nextInt(TICK), EVENT_TICK, i, -1, null);
         }
+        // Spares know nothing of the cluster; they run from the moment they are to join.
+        for (int i = options.nodes(); i < options.nodes() + options.spares(); i++) {
+            hosts.add(new Host(i, ClusterConfig.EMPTY));
+            schedule(random.nextInt(TICK), EVENT_TICK, i, -1, null);
+        }
+        nextSpare = options.nodes();
         for (int i = 0; i < options.clients(); i++) {
             clients.add(new Client(i));
             schedule(30L * TICK + random.nextInt(10 * TICK), EVENT_CLIENT, i, -1, null);
@@ -1077,8 +1309,11 @@ public final class SystemSimulation {
     }
 
     private boolean converged() throws IOException {
+        if (phase != Phase.IDLE) {
+            return false; // a member is still being replaced
+        }
         long applied = -1;
-        for (Host host : hosts) {
+        for (Host host : active()) {
             if (!host.running() || host.node.view().logRecovering()) {
                 return false;
             }
@@ -1111,8 +1346,11 @@ public final class SystemSimulation {
         StringBuilder text = new StringBuilder();
         for (Host host : hosts) {
             text.append("node ").append(host.id).append(host.running()
-                    ? " " + host.node.view() + " applied " + host.node.store().appliedIndex() : " down").append("; ");
+                    ? " " + host.node.view() + " applied " + host.node.store().appliedIndex()
+                    : host.retired ? " retired" : host.started ? " down" : " spare").append("; ");
         }
+        text.append("replacement ").append(phase).append(" joining ").append(joining).append(" leaving ")
+                .append(leaving).append("; ");
         for (Client client : clients) {
             text.append("client ").append(client.id).append(client.waiting ? " waits for " + client.kind : " idle")
                     .append("; ");
@@ -1123,11 +1361,14 @@ public final class SystemSimulation {
     private void finish() throws IOException {
         long digest = 0;
         long applied = 0;
-        for (Host host : hosts) {
+        Host first = null;
+        for (Host host : active()) {
             long own = host.node.store().machine().digest();
-            if (host.id > 0 && own != digest) {
-                throw new AssertionError("after healing node " + host.id + " is in another state than node 0");
+            if (first != null && own != digest) {
+                throw new AssertionError("after healing node " + host.id + " is in another state than node "
+                        + first.id);
             }
+            first = first == null ? host : first;
             digest = own;
             applied = host.node.store().appliedIndex();
             stats.snapshotsCreated += host.node.snapshotsCreated();
@@ -1148,8 +1389,10 @@ public final class SystemSimulation {
             throw new AssertionError("the history is not linearizable: " + violation);
         }
         for (Host host : hosts) {
-            host.node.close();
-            host.node = null;
+            if (host.running()) {
+                host.node.close();
+                host.node = null;
+            }
             if (host.memory.openHandleCount() != 0) {
                 throw new AssertionError("node " + host.id + " left " + host.memory.openHandleCount()
                         + " file handles open");

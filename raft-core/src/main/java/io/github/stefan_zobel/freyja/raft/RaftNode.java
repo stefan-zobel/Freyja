@@ -1040,9 +1040,14 @@ public final class RaftNode {
         }
         leaderId = from;
         electionElapsed = 0;
-        if (installing == null) {
+        if (installing == null && !logRecovering) {
             // While a snapshot is being installed, the state machine must not move: the
             // snapshot would set it back.
+            //
+            // The commit index of a heartbeat rests on what the leader believes this node
+            // holds. For a node in log-recovering mode that belief may predate the damage,
+            // and the log it has now may hold entries that are not those of the leader. Its
+            // commit index moves only through appends, which are checked against the log.
             commitIndex = Math.max(commitIndex, Math.min(heartbeat.commit(), lastIndex()));
         }
         send(from, new HeartbeatResponse(term, heartbeat.round(), logRecovering));

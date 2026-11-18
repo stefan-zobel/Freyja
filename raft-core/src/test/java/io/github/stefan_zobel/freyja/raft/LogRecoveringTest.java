@@ -14,6 +14,8 @@ import io.github.stefan_zobel.freyja.raft.RaftEvent.ClientPropose;
 import io.github.stefan_zobel.freyja.raft.RaftEvent.LogDamaged;
 import io.github.stefan_zobel.freyja.raft.RaftMessage.AppendEntries;
 import io.github.stefan_zobel.freyja.raft.RaftMessage.AppendResponse;
+import io.github.stefan_zobel.freyja.raft.RaftMessage.HeartbeatResponse;
+import io.github.stefan_zobel.freyja.raft.RaftMessage.Heartbeat;
 import io.github.stefan_zobel.freyja.raft.RaftMessage.RequestVote;
 import io.github.stefan_zobel.freyja.raft.RaftMessage.VoteResponse;
 
@@ -32,6 +34,11 @@ class LogRecoveringTest {
             list.add(entry(i, term));
         }
         return list;
+    }
+
+    /** Index and term of every entry: the payload of an entry is an array and compares by identity. */
+    private static List<String> shapes(List<LogEntry> list) {
+        return list.stream().map(e -> e.index() + "@" + e.term()).toList();
     }
 
     /** A follower of node 0 in term 1 with five durable entries, four of them applied. */
@@ -211,6 +218,44 @@ class LogRecoveringTest {
         }
         assertFalse(leader.view().logRecovering());
         assertEquals(successor.view().lastLogIndex(), leader.view().lastLogIndex());
+    }
+
+    @Test
+    void aHeartbeatDoesNotMakeANodeInTheModeApplyWhatItsLogHolds() {
+        // A follower of node 2 in term 2: entries 1 and 2 of term 1, entries 3 to 5 of term 2
+        // in the place of older ones of term 1; four entries applied.
+        TestNode node = new TestNode(RaftConfig.defaults(1, 7), THREE);
+        node.autoPersist = true;
+        node.receive(0, new AppendEntries(1, 0, 0, entries(1, 5, 1), 2, 0));
+        node.receive(2, new AppendEntries(2, 2, 1, entries(3, 5, 2), 4, 0));
+        assertEquals(List.of("1@1", "2@1", "3@2", "4@2"), shapes(node.applied));
+
+        // Its store loses the newer part of the log and hands back what it held before: the
+        // entries of term 1 that were cut off long ago are there again.
+        node.step(new LogDamaged(6));
+        node.log.entries.subList(2, 5).clear();
+        node.log.entries.addAll(entries(3, 5, 1));
+        node.restart();
+        node.outbox.clear();
+        assertTrue(node.view().logRecovering());
+        assertEquals(5, node.view().lastLogIndex());
+
+        // The leader does not know yet. Its heartbeat carries the commit index it believes
+        // the node to hold; the node must not take its own log for that.
+        node.receive(2, new Heartbeat(2, 5, 1));
+        assertEquals(new HeartbeatResponse(2, 1, true), node.outbox.getLast().message());
+        assertEquals(0, node.view().commitIndex());
+        assertEquals(4, node.applied.size(), "nothing of the old entries is applied");
+
+        // An append is checked against the log: the old entries go, and what is committed
+        // is applied from the entries of the leader.
+        node.receive(2, new AppendEntries(2, 2, 1, entries(3, 5, 2), 5, 1));
+        assertFalse(node.view().logRecovering());
+        assertEquals(List.of("1@1", "2@1", "3@2", "4@2", "5@2"), shapes(node.applied));
+        // Out of the mode, a heartbeat moves the commit index again.
+        node.receive(2, new AppendEntries(2, 5, 2, List.of(entry(6, 2)), 5, 1));
+        node.receive(2, new Heartbeat(2, 6, 2));
+        assertEquals(6, node.view().commitIndex());
     }
 
     @Test

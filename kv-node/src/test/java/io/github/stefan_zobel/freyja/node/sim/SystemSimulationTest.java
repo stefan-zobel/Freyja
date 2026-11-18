@@ -61,4 +61,17 @@ class SystemSimulationTest {
         assertTrue(total.slowDisks > 3 && total.slowDiskStepDowns > 0, total.toString());
         assertTrue(total.transfers > 3, total.toString());
     }
+
+    @Test
+    void aClusterWhoseMembersAreReplacedStaysOneCluster() {
+        SystemSimulation.Stats total = new SystemSimulation.Stats();
+        Seeds.forEach(SystemSimulationTest.class, "system-changing", 12, seed ->
+                total.add(new SystemSimulation(seed, SystemSimulation.Options.changing()).run()));
+        assertTrue(total.configurationsReverted > 0, total.toString());
+        assertTrue(total.acknowledged > 500, total.toString());
+        assertTrue(total.replacements > 12, total.toString());
+        assertTrue(total.identitiesLost > 3, total.toString());
+        assertTrue(total.snapshotsInstalled > 12, total.toString());
+        assertTrue(total.recoveringEntered > 0 && total.repairs > 0, total.toString());
+    }
 }

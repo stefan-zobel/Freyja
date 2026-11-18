@@ -184,6 +184,11 @@ only as that mode allows, and is refilled by the leader.
 - The store vouches for what the segments before the damaged one hold. Nothing of the
   damaged segment is kept, and nothing of the segments after it: the index it cannot vouch
   for is the one after the last entry of the segments before.
+- What it vouches for is a state the log once had, not necessarily a prefix of the log the
+  node had last. A cut of the log is a record; if that record is in a lost segment, the
+  entries it removed are in the log again, though the node had replaced them. They were
+  never committed. The core therefore treats nothing in the log of a node in log-recovering
+  mode as agreed with the leader until an append has checked it (`raft.md` §8).
 - If the first stored entry lies beyond the entry after the snapshot (the first segments
   are gone), the store vouches for nothing.
 - The store accepts no writes while damaged segments are in place. The node first makes its

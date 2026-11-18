@@ -71,9 +71,8 @@ Rules:
   - Done so far: the step-down of a leader with a slow disk; the simulation with clients,
     network faults, and crashes; `SystemInvariants` with its negative tests and its
     checksum; the mutation checks of `verification.md` §3; damaged logs and tables with
-    their repairs, short and slow disks, hand-overs.
-  - Open: membership changes, lost identity, the Raft invariants over complete nodes, the
-    remaining probes, traces.
+    their repairs, short and slow disks, hand-overs; replaced members and lost identities.
+  - Open: the Raft invariants over complete nodes, the remaining probes, traces.
 - **C4.** Real transport with virtual threads. Wire protocol with handshake. `kv-client`.
   Admin API and command-line tool. End-to-end test with real processes.
 

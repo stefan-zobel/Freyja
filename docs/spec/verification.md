@@ -403,11 +403,26 @@ after every step the invariants of `SystemInvariants` are checked.
 - *Hand-over:* a leader is asked to transfer its leadership to another node.
 - At the end every state machine is scrubbed and no alarm is set.
 
+**Membership.** Spare nodes stand by; they are prepared with an empty configuration and
+run from the moment they are to join. An administrator, played by the simulation, replaces
+a member in steps, one per turn: the spare joins as a learner, is promoted, then the member
+is removed. A step that the cluster refuses is asked for again. The removed member is
+retired when no node that stays counts on it any more; its id is never used again.
+
+- *Lost identity:* a node crashes and its identity file is damaged. It must refuse to start,
+  and it never runs again; the administrator replaces it in the same steps.
+- The nodes that are meant to run are those that were started and not retired. Faults pick
+  their victims among them, and the run must converge for them, with no replacement left
+  unfinished.
+
 **State of the work.** Injected so far: lost, delayed, and repeated messages; partitions;
 crashes between operations and in the middle of a file operation; restarts; damaged logs
-and tables; short and slow disks; hand-overs. Still to come in this milestone: membership
-changes, lost identity, the invariants of §2.4 over complete nodes, the remaining probes of
+and tables; short and slow disks; hand-overs; replaced members; lost identities. Still to
+come in this milestone: the invariants of §2.4 over complete nodes, the remaining probes of
 §3.1, and traces for the model.
+
+Seed sets, each run on every build: `system-calm`, `system-faulty` (network and crashes),
+`system-hostile` (plus storage faults), `system-changing` (plus replaced members).
 
 What the simulation found while it was built:
 
@@ -416,6 +431,13 @@ What the simulation found while it was built:
 - Damage after the last sync point of the newest log segment left a node with a state
   machine ahead of its log, and the node refused to start. It now takes the state machine as
   a witness and enters log-recovering mode (`node.md` §3.3).
+- A violation of state-machine equality (seed 11 of `system-hostile`, kept in the corpus): a
+  follower had replaced entries of an old term by those of a new leader; then a later
+  segment of its log was damaged, and with it the record of that cut. The store handed the
+  old entries back. The leader, which did not know of the damage yet, sent a heartbeat with
+  a commit index beyond them, and the node applied entries that were never committed. A
+  node in log-recovering mode now takes no commit index from a heartbeat (`raft.md` §8). The
+  Raft simulator could not find this: there a damaged log always keeps a true prefix.
 
 Mutations that the simulation catches: a repeated command applied again; an older command
 of a session applied; the log shortened without a flush before; the applied index not

@@ -311,6 +311,17 @@ acknowledged. The core then:
   reported is dropped: it would promise entries that are gone.
 - A node in the mode says so in its heartbeat answers, and the leader then sends an append
   even if it has nothing new; otherwise an idle cluster would never end the mode.
+- A node in the mode takes no commit index from a heartbeat. Its commit index moves only
+  through appends, which are checked against its log entry by entry.
+
+Why heartbeats are left out: the commit index of a heartbeat is bounded by what the leader
+believes the follower holds, and the follower takes it up to the end of its own log without
+any check. That is sound as long as the belief is true. After damage it is not: until the
+leader has seen the new epoch it still believes in the log the node had, and the log the
+node has now need not be a prefix of it. The store of a node vouches for what its undamaged
+files hold, and those may hold entries that the node had cut off again later, in a record
+that is lost (`node.md` §3.3). A heartbeat would make the node apply such entries although
+no leader ever committed them.
 
 Why rule 4 needs the epoch: without it, the node could leave the mode on an append that was
 sent before the leader knew of the damage. Such an append may carry an old commit index, and
