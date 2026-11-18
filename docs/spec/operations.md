@@ -21,7 +21,7 @@ in `kv-common`.
 - Requests: 1 status; 2 add learner (node id `uint32`, address for peers, address for
   clients); 3 promote learner, 4 remove member (node id, force as one byte); 5 transfer
   leadership (node id); 6 snapshot; 7 scrub; 8 compact; 9 clear the space alarm; 10 set
-  cluster version (`uint32`); 11 set address (as 2).
+  cluster version (`uint32`); 11 set address (as 2); 12 backup (the target directory).
 - Responses: 65 done (a detail for a person); 66 refused (the reason, and the id of the
   leader if the reason is that the node is not the leader); 67 status (node id, cluster id,
   software, role, term, leader id, last log index, commit index, applied index, the index the
@@ -62,7 +62,6 @@ join. `FreyjaNode run --data DIR --peer HOST:PORT --client HOST:PORT --admin HOS
 [--seed N=HOST:PORT]... [--tick-ms MILLIS]` runs the node and prints
 `READY node=N peer=PORT client=PORT admin=PORT` when it listens.
 
-Not there yet: the backup (milestone E3).
 
 ## 2. Observability
 
@@ -119,6 +118,44 @@ the node is started again, and the loss of its identity.
   the data directory of one surviving node. Acknowledged writes may be lost; the tool says so
   and requires confirmation.
 
+**A backup directory:**
+
+```
+BACKUP     the manifest, written last; a directory without it is not a backup
+engine/    a checkpoint of the storage engine of the state machine
+```
+
+- The manifest: magic `FRYK` (`uint32`), format version (`uint8`, 1), cluster id (`uint64`),
+  node id (`uint32`), cluster version (`uint32`), last included index and term (`uint64`
+  each), length of the encoded configuration (`uint32`) and the configuration, number of
+  files (`uint32`), and per file the length of its name (`uint32`), the name in UTF-8, its
+  length (`uint64`), and the CRC32C of its content (`uint32`); then the CRC32C of everything
+  before (`uint32`). Integers are little-endian.
+- **Taking it** (`FreyjaAdmin HOST:PORT backup DIRECTORY`, any node): the node takes a
+  checkpoint in `snap/backup-<n>/`, which is quick and holds nothing up. A thread beside the
+  node copies it into the target, with a checksum of every file, syncs, writes the manifest,
+  and removes the checkpoint. The target must not exist and lies on the machine of the node.
+- **Verifying it** (`BackupVerify DIRECTORY`): the manifest; every file against its length
+  and its checksum, and no file besides; then the engine by its own checksums.
+- **Restoring it** (`FreyjaNode restore --backup DIR --data DIR --cluster HEX --node N`):
+  the backup is verified first; nothing is made of one that is not whole. The new data
+  directory holds the files of the backup as its state machine, `SNAPSHOT` with what the
+  backup covers, and a log of one entry after that: a configuration entry that makes the
+  node the only voter. The node elects itself and commits it, and so the state machine
+  learns the new membership too. The hard state starts in the term of that entry.
+  - The cluster id must be new. Nodes of the old cluster that still exist somewhere must
+    not take the restored node for one of their own; the handshake keeps them apart.
+  - Sessions, alarms, and the addresses of the old members are part of the restored state.
+    Sessions expire; addresses are set anew as members are added.
+- **A lost majority** (`FreyjaNode recover-majority --data DIR --cluster HEX
+  --i-accept-data-loss yes`), on the data directory of the one node that is left, while it
+  is not running: its log gets one more entry, a configuration that makes it the only voter,
+  in a term above everything it has seen; its identity is replaced by one with the new
+  cluster id. Whatever the lost nodes had acknowledged and this node never received is
+  gone; entries this node holds without knowing them committed become part of the new
+  cluster. The tool says so and does nothing without the confirmation. It refuses a node
+  whose log is damaged or that was refilling its log.
+
 ## 4. Offline Tools (`kv-tools`)
 
 Each format gets its dump tool in the milestone that introduces the format.
@@ -126,7 +163,8 @@ Each format gets its dump tool in the milestone that introduces the format.
 - Dump an SSTable, a WAL, a manifest, a Raft log segment, the hard state.
 - Verify a data directory or a backup: every checksum, manifest consistency, log continuity.
   - The tools, all in `kv-tools`: `SstDump`, `WalDump`, `ManifestDump`, `RaftLogDump`,
-    `NodeStateDump` (the small files of a node), `DbVerify` (an engine directory), and
+    `NodeStateDump` (the small files of a node), `DbVerify` (an engine directory),
+    `BackupVerify` (a backup), and
     `NodeVerify` (the whole data directory of a node that is not running: the small files,
     every segment of the Raft log, the engine of the generation that counts). None of them
     changes anything. Each ends with 0 if all is well, 1 on damage, 2 on wrong usage, and

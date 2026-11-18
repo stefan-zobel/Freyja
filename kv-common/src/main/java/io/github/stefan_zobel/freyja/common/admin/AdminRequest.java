@@ -58,6 +58,16 @@ public sealed interface AdminRequest {
     record Compact() implements AdminRequest {
     }
 
+    /**
+     * Write a backup of the state machine of the node into a directory that does not exist
+     * yet, on the machine of the node.
+     */
+    record Backup(String directory) implements AdminRequest {
+        public Backup {
+            Objects.requireNonNull(directory, "directory");
+        }
+    }
+
     /** Clear the alarm for lack of space. */
     record ClearSpaceAlarm() implements AdminRequest {
     }

@@ -116,3 +116,7 @@ Rules:
 - **E2.** TLS for peers, clients, and administration. Authentication. Certificate reload.
 - **E3.** Backup and restore. Upgrade procedure with finalization. Compatibility suite.
   Lost-majority tool. Runbook, each procedure executed. Review against the exit criteria.
+  - Done so far: backup of a running node, its verification, restore as a new cluster, and
+    the recovery from a lost majority (`operations.md` §3).
+  - Open: the upgrade procedure and the compatibility suite, which need a second release;
+    the runbook, whose procedures are to be executed on a real cluster.

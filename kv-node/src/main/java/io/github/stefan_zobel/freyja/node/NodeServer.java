@@ -7,16 +7,23 @@ import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import io.github.stefan_zobel.freyja.common.DecodeException;
 import io.github.stefan_zobel.freyja.common.Version;
+import io.github.stefan_zobel.freyja.common.admin.AdminCodec;
+import io.github.stefan_zobel.freyja.common.admin.AdminRequest;
+import io.github.stefan_zobel.freyja.common.admin.AdminResponse;
 import io.github.stefan_zobel.freyja.common.wire.Handshake;
 import io.github.stefan_zobel.freyja.lsm.fs.StorageFileSystem;
+import io.github.stefan_zobel.freyja.node.backup.Backups;
 import io.github.stefan_zobel.freyja.node.metrics.MetricsRegistry;
 import io.github.stefan_zobel.freyja.node.net.ClientListener;
 import io.github.stefan_zobel.freyja.node.net.StatusEndpoint;
 import io.github.stefan_zobel.freyja.node.net.TcpTransport;
 import io.github.stefan_zobel.freyja.node.service.ClientService;
 import io.github.stefan_zobel.freyja.node.sm.StateMachineStore;
+import io.github.stefan_zobel.freyja.node.snapshot.SnapshotTransfers;
 import io.github.stefan_zobel.freyja.node.store.NodeIdentity;
+import io.github.stefan_zobel.freyja.raft.SnapshotMeta;
 
 /**
  * One node with everything around it: the runtime, the transport to its peers, and the
@@ -55,6 +62,9 @@ public final class NodeServer implements Closeable {
     private final ClientListener administrators;
     private final Map<Integer, String> clientAddresses = new ConcurrentHashMap<>();
     private final MetricsRegistry metrics = new MetricsRegistry();
+    private final StorageFileSystem fs;
+    private final Path dataDirectory;
+    private final java.util.concurrent.atomic.AtomicLong backups = new java.util.concurrent.atomic.AtomicLong();
     private StatusEndpoint status;
 
     private NodeServer(StorageFileSystem fs, Settings settings) throws IOException {
@@ -69,8 +79,10 @@ public final class NodeServer implements Closeable {
                 TcpTransport.Options.defaults(), runtime::peerFrame);
         clients = new ClientListener(identity.clusterId(), identity.nodeId(), Version.SOFTWARE, Handshake.CLIENT,
                 ClientListener.Options.defaults(), runtime::clientRequest);
+        this.fs = fs;
+        this.dataDirectory = settings.dataDirectory();
         administrators = new ClientListener(identity.clusterId(), identity.nodeId(), Version.SOFTWARE,
-                Handshake.ADMIN, ClientListener.Options.defaults(), runtime::adminRequest);
+                Handshake.ADMIN, ClientListener.Options.defaults(), this::adminRequest);
         runtime.measure(metrics);
         boolean started = false;
         try {
@@ -111,6 +123,69 @@ public final class NodeServer implements Closeable {
             } catch (IllegalArgumentException e) {
                 // An address that is no address is not used; the old one stays.
             }
+        }
+    }
+
+    /**
+     * A request of an administrator. A backup is made here, beside the node, because it
+     * copies files and must not hold the node up; everything else goes to the node.
+     */
+    private boolean adminRequest(byte[] frame, ClientService.Reply reply) {
+        AdminCodec.RequestEnvelope envelope;
+        try {
+            envelope = AdminCodec.decodeRequest(frame);
+        } catch (DecodeException e) {
+            return true; // without a request id there is nobody to answer
+        }
+        if (!(envelope.request() instanceof AdminRequest.Backup wanted)) {
+            return runtime.adminRequest(frame, reply);
+        }
+        Thread.ofVirtual().name("freyja-backup").start(() -> {
+            AdminResponse answer;
+            try {
+                Backups.Manifest manifest = backup(Path.of(wanted.directory()));
+                answer = new AdminResponse.Done("backup through index " + manifest.meta().lastIncludedIndex()
+                        + " in " + wanted.directory() + ", " + manifest.files().size() + " files");
+            } catch (IOException | RuntimeException e) {
+                answer = new AdminResponse.Refused("the backup failed: " + e.getMessage(), -1);
+            }
+            reply.send(AdminCodec.encode(envelope.requestId(), answer));
+        });
+        return true;
+    }
+
+    /**
+     * Writes a backup of the state machine into {@code target}, a directory that does not
+     * exist yet (docs/spec/operations.md, section 3). The node takes a checkpoint, which is
+     * quick and holds nothing up; the caller's thread copies it with checksums and writes the
+     * manifest last.
+     */
+    public Backups.Manifest backup(Path target) throws IOException {
+        Path checkpoint = dataDirectory.resolve(SnapshotTransfers.DIRECTORY)
+                .resolve("backup-" + backups.incrementAndGet());
+        Object[] taken;
+        try {
+            taken = runtime.onNode(node -> {
+                try {
+                    SnapshotMeta meta = node.store().meta();
+                    int version = node.store().machine().clusterVersion();
+                    node.store().checkpoint(checkpoint);
+                    return new Object[] {meta, version};
+                } catch (IOException e) {
+                    throw new java.io.UncheckedIOException(e);
+                }
+            }).get(60, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("interrupted while the node took its checkpoint", e);
+        } catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException e) {
+            throw new IOException("the node could not take a checkpoint: " + e.getMessage(), e);
+        }
+        try {
+            return Backups.write(fs, checkpoint, target, identity.clusterId(), identity.nodeId(),
+                    (Integer) taken[1], (SnapshotMeta) taken[0]);
+        } finally {
+            StateMachineStore.removeTree(fs, checkpoint);
         }
     }
 

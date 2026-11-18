@@ -14,6 +14,7 @@ import java.util.concurrent.CountDownLatch;
 import io.github.stefan_zobel.freyja.common.Clock;
 import io.github.stefan_zobel.freyja.lsm.EngineOptions;
 import io.github.stefan_zobel.freyja.lsm.fs.RealFileSystem;
+import io.github.stefan_zobel.freyja.node.backup.Backups;
 import io.github.stefan_zobel.freyja.node.sm.StateMachineStore;
 import io.github.stefan_zobel.freyja.node.snapshot.SnapshotTransfers;
 import io.github.stefan_zobel.freyja.node.store.NodeIdentity;
@@ -31,6 +32,16 @@ import io.github.stefan_zobel.freyja.raft.RaftConfig;
  *
  * <p>{@code --status} serves the metrics and the health of the node over HTTP: {@code /metrics},
  * {@code /health}, {@code /ready}.
+ *
+ * <pre>
+ * FreyjaNode restore --backup DIR --data DIR --cluster HEX --node N
+ * FreyjaNode recover-majority --data DIR --cluster HEX --i-accept-data-loss yes
+ * </pre>
+ *
+ * <p>{@code restore} makes the data directory of the first node of a new cluster from a
+ * backup. {@code recover-majority} starts a new cluster from the data directory of the one
+ * node that is left after the others are lost for good; it is not safe, says so, and wants
+ * to be told that this is understood.
  *
  * <p>{@code init} prepares an empty data directory. A node of a new cluster is given the
  * voters the cluster starts with, the same on every node; a node that is to join a cluster is
@@ -74,6 +85,8 @@ public final class FreyjaNode {
             return switch (args[0]) {
                 case "init" -> init(options, out);
                 case "run" -> start(options, out, block);
+                case "restore" -> restore(options, out);
+                case "recover-majority" -> recover(options, out, err);
                 default -> usage(err);
             };
         } catch (IllegalArgumentException e) {
@@ -88,6 +101,8 @@ public final class FreyjaNode {
     private static int usage(PrintStream err) {
         err.println("usage: FreyjaNode init --data DIR --cluster HEX --node N [--voters N,N,...]"
                 + " [--cluster-version V]");
+        err.println("       FreyjaNode restore --backup DIR --data DIR --cluster HEX --node N");
+        err.println("       FreyjaNode recover-majority --data DIR --cluster HEX --i-accept-data-loss yes");
         err.println("       FreyjaNode run --data DIR --peer HOST:PORT --client HOST:PORT --admin HOST:PORT"
                 + " [--seed N=HOST:PORT]... [--tick-ms MILLIS] [--status HOST:PORT]");
         return 2;
@@ -123,6 +138,36 @@ public final class FreyjaNode {
                 version);
         out.println("prepared " + data + " for node " + node + " of cluster " + Long.toHexString(cluster)
                 + (voters.isEmpty() ? ", to join a cluster" : ", voters " + voters));
+        return 0;
+    }
+
+    private static int restore(Map<String, List<String>> options, PrintStream out) throws IOException {
+        Path data = Path.of(one(options, "data", null));
+        long cluster = Long.parseUnsignedLong(one(options, "cluster", null), 16);
+        int node = Integer.parseInt(one(options, "node", null));
+        Backups.Manifest manifest = Backups.restore(new RealFileSystem(), Path.of(one(options, "backup", null)),
+                data, new NodeIdentity(cluster, node));
+        out.println("restored " + data + " as node " + node + ", the only voter of the new cluster "
+                + Long.toHexString(cluster) + ", from a backup of cluster " + Long.toHexString(manifest.clusterId())
+                + " through index " + manifest.meta().lastIncludedIndex());
+        out.println("add further members as learners");
+        return 0;
+    }
+
+    private static int recover(Map<String, List<String>> options, PrintStream out, PrintStream err)
+            throws IOException {
+        Path data = Path.of(one(options, "data", null));
+        long cluster = Long.parseUnsignedLong(one(options, "cluster", null), 16);
+        out.println("This starts a new cluster from the one node in " + data + ".");
+        out.println("It is NOT SAFE: whatever the lost nodes had acknowledged and this node never received");
+        out.println("is gone, and nobody can say whether there was such a thing.");
+        if (!one(options, "i-accept-data-loss", "no").equals("yes")) {
+            err.println("error: not done; say --i-accept-data-loss yes if this is understood");
+            return 1;
+        }
+        long last = Backups.recoverFromLostMajority(new RealFileSystem(), data, cluster);
+        out.println("done: the node is the only voter of the new cluster " + Long.toHexString(cluster)
+                + "; its log ended at index " + last);
         return 0;
     }
 

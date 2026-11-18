@@ -35,7 +35,7 @@ import io.github.stefan_zobel.freyja.common.kv.CommandCodec.Out;
  *       for clients); 3 promote learner, 4 remove member (node id, force); 5 transfer
  *       leadership (node id);
  *       6 snapshot; 7 scrub; 8 compact; 9 clear space alarm; 10 set cluster version
- *       ({@code uint32}); 11 set address (as 2).</li>
+ *       ({@code uint32}); 11 set address (as 2); 12 backup (the target directory).</li>
  *   <li>Responses: 65 done (detail); 66 refused (reason, leader id {@code uint32}); 67 status
  *       (node id, cluster id {@code uint64}, software, role, term, leader id, last log index,
  *       commit index, applied index, snapshot index, log recovering, cluster version, space
@@ -91,6 +91,7 @@ public final class AdminCodec {
             case ClearSpaceAlarm _ -> 9;
             case SetClusterVersion _ -> 10;
             case SetAddress _ -> 11;
+            case AdminRequest.Backup _ -> 12;
         });
         out.u64(requestId);
         switch (request) {
@@ -114,6 +115,7 @@ public final class AdminCodec {
             }
             case TransferLeadership t -> out.u32(t.nodeId());
             case SetClusterVersion v -> out.u32(v.version());
+            case AdminRequest.Backup b -> string(out, b.directory());
             default -> {
             }
         }
@@ -139,6 +141,7 @@ public final class AdminCodec {
             case 9 -> new ClearSpaceAlarm();
             case 10 -> new SetClusterVersion(in.u32());
             case 11 -> new SetAddress(in.u32(), string(in), string(in));
+            case 12 -> new AdminRequest.Backup(string(in));
             default -> throw new DecodeException("unknown request type " + type);
         };
         in.end();

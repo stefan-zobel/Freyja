@@ -19,7 +19,7 @@ class AdminCodecTest {
                 new AdminRequest.PromoteLearner(3, false), new AdminRequest.RemoveMember(0, true),
                 new AdminRequest.TransferLeadership(1), new AdminRequest.Snapshot(), new AdminRequest.Scrub(),
                 new AdminRequest.Compact(), new AdminRequest.ClearSpaceAlarm(), new AdminRequest.SetClusterVersion(2),
-                new AdminRequest.SetAddress(1, "", "h1:7001"));
+                new AdminRequest.SetAddress(1, "", "h1:7001"), new AdminRequest.Backup("/var/backups/monday"));
     }
 
     private static List<AdminResponse> responses() {

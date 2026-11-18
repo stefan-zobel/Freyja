@@ -30,6 +30,7 @@ import io.github.stefan_zobel.freyja.common.wire.Handshake;
  *   snapshot                           shorten the log of the node now
  *   scrub                              verify every block of the state machine of the node
  *   compact                            run the compactions that are due
+ *   backup DIRECTORY                   write a backup into a new directory on the machine of the node
  *   clear-alarm                        clear the alarm for lack of space
  *   set-version V                      raise the cluster version (the last step of an upgrade)
  *   set-address N PEER-ADDR CLIENT-ADDR  tell the cluster where node N listens now
@@ -63,7 +64,7 @@ public final class FreyjaAdmin {
         } catch (IllegalArgumentException e) {
             err.println("error: " + e.getMessage());
             err.println("usage: FreyjaAdmin HOST:PORT status | add-learner N PEER CLIENT | promote N [--force]"
-                    + " | remove N [--force]"
+                    + " | remove N [--force] | backup DIRECTORY"
                     + " | transfer N | snapshot | scrub | compact | clear-alarm | set-version V"
                     + " | set-address N PEER CLIENT");
             return 2;
@@ -100,7 +101,7 @@ public final class FreyjaAdmin {
         int given = args.length - 2 - (force ? 1 : 0);
         int needed = switch (command) {
             case "status", "snapshot", "scrub", "compact", "clear-alarm" -> 0;
-            case "promote", "remove", "transfer", "set-version" -> 1;
+            case "promote", "remove", "transfer", "set-version", "backup" -> 1;
             case "add-learner", "set-address" -> 3;
             default -> throw new IllegalArgumentException("unknown command " + command);
         };
@@ -113,6 +114,7 @@ public final class FreyjaAdmin {
             case "scrub" -> new AdminRequest.Scrub();
             case "compact" -> new AdminRequest.Compact();
             case "clear-alarm" -> new AdminRequest.ClearSpaceAlarm();
+            case "backup" -> new AdminRequest.Backup(args[2]);
             case "promote" -> new AdminRequest.PromoteLearner(Integer.parseInt(args[2]), force);
             case "remove" -> new AdminRequest.RemoveMember(Integer.parseInt(args[2]), force);
             case "transfer" -> new AdminRequest.TransferLeadership(Integer.parseInt(args[2]));

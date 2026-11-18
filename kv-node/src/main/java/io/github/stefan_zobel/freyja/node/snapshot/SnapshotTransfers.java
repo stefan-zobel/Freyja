@@ -143,7 +143,9 @@ public final class SnapshotTransfers implements Closeable {
         Path directory = dataDirectory.resolve(DIRECTORY);
         fs.createDirectories(directory);
         for (Path path : fs.list(directory)) {
-            if (path.getFileName().toString().startsWith("out-")) {
+            String name = path.getFileName().toString();
+            // Checkpoints that an earlier run took to send or to back up.
+            if (name.startsWith("out-") || name.startsWith("backup-")) {
                 StateMachineStore.removeTree(fs, path);
             }
         }

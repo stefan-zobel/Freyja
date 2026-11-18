@@ -138,6 +138,8 @@ public final class AdminService implements NodeListener {
                             + " has begun")));
                 }
             }
+            case AdminRequest.Backup _ -> reply.send(AdminCodec.encode(id, new Refused(
+                    "a backup copies files and is made beside the node, not on its thread", -1)));
             case AdminRequest.ClearSpaceAlarm _ -> command(new Waiting(id, reply, "the clearing of the alarm"),
                     new Command.ClearAlarm(Command.Alarm.NOSPACE));
             case AdminRequest.SetClusterVersion version -> command(
