@@ -584,3 +584,27 @@ The types and their codec live in `kv-common`; the client needs nothing else.
   session.
 - A request whose outcome is unknown at the deadline is reported as unknown, not as failed.
 - Depends only on `kv-common`.
+
+Details:
+
+- One request at a time per client; calls from several threads take turns. A session
+  allows no more, because the cluster keeps the answer to its last command only. Who needs
+  requests in parallel opens several clients.
+- The session is opened with the first command. A command gets the next sequence number of
+  its session and keeps it across all its attempts.
+- An attempt has its own, shorter time. Without an answer the client closes the connection
+  and asks the next node of its list. A not-leader answer with an address sends it there at
+  once; without one it asks the next node after a pause. Overloaded: the same node again
+  after a pause. Pauses double up to a limit.
+- What the client reports when the time of a request has passed:
+  - a command that was written to a connection at least once: unknown outcome;
+  - a command that no node ever got, and every read: timed out, nothing happened.
+- `NO_SUCH_SESSION`: the session has expired. If the command was sent only once, it had no
+  effect; the client opens a new session and sends it again as the first command of that
+  session. If it was sent before, an earlier attempt may have taken effect: unknown outcome.
+- `NO_SPACE` is reported as such; the sequence number is used again for the next command.
+  `INVALID` and requests the node does not offer are reported as refused.
+- An idle client tells the cluster that it is alive (default after 10 s), so that its
+  session does not expire. If the session has expired all the same, the next command opens a
+  new one.
+- Closing the client ends its session.
