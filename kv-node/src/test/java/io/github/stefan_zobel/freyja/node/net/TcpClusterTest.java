@@ -83,7 +83,7 @@ class TcpClusterTest {
                     60_000);
             runtime = new NodeRuntime(memory, new NodeRuntime.Config(DATA, options, machine,
                     ClientService.Options.defaults(), 20, 4096, 50, System::currentTimeMillis,
-                    node -> "127.0.0.1:" + clientPorts[node]));
+                    node -> "127.0.0.1:" + clientPorts[node], null));
             transport = new TcpTransport(CLUSTER, id, Version.SOFTWARE, new TcpTransport.Options(16 << 20, 1024,
                     1_000, 50, 2_000), runtime::peerFrame);
             peerPorts[id] = transport.listen(new InetSocketAddress(LOOPBACK, 0));

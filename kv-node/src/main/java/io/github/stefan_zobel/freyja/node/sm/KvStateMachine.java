@@ -29,6 +29,7 @@ import io.github.stefan_zobel.freyja.common.kv.Command.KeepAlive;
 import io.github.stefan_zobel.freyja.common.kv.Command.Mutation;
 import io.github.stefan_zobel.freyja.common.kv.Command.Put;
 import io.github.stefan_zobel.freyja.common.kv.Command.RegisterSession;
+import io.github.stefan_zobel.freyja.common.kv.Command.SetAddress;
 import io.github.stefan_zobel.freyja.common.kv.Command.SetAlarm;
 import io.github.stefan_zobel.freyja.common.kv.Command.SetClusterVersion;
 import io.github.stefan_zobel.freyja.common.kv.Command.Write;
@@ -85,6 +86,11 @@ public final class KvStateMachine implements StateMachine, Closeable {
     private static final byte[] ALARM_KEY = {SYSTEM, 'a'};
     private static final byte[] VERSION_KEY = {SYSTEM, 'v'};
     private static final byte SESSION = 's';
+    private static final byte ADDRESS = 'n';
+
+    /** Where a node listens: for peers and for clients, each as {@code host:port}. */
+    public record NodeAddress(String peer, String client) {
+    }
 
     /** What the state machine remembers of a session. */
     private static final class Session {
@@ -105,6 +111,8 @@ public final class KvStateMachine implements StateMachine, Closeable {
     private long configIndex;
     private final TreeMap<Long, Session> sessions = new TreeMap<>();
     private final EnumSet<Alarm> alarms = EnumSet.noneOf(Alarm.class);
+    private final TreeMap<Integer, NodeAddress> addresses = new TreeMap<>();
+    private long addressChanges;
     private int clusterVersion;
 
     private KvStateMachine(LsmEngine engine, long sessionTimeoutMillis, ClusterConfig initialConfig,
@@ -169,6 +177,16 @@ public final class KvStateMachine implements StateMachine, Closeable {
         if (storedVersion != null) {
             clusterVersion = LittleEndian.getInt32(storedVersion, 0);
         }
+        try (ScanIterator scan = engine.scan(new byte[] {SYSTEM, ADDRESS}, new byte[] {SYSTEM, ADDRESS + 1})) {
+            for (; scan.valid(); scan.next()) {
+                byte[] value = scan.value();
+                int peerLength = LittleEndian.getInt32(value, 0);
+                addresses.put(LittleEndian.getInt32(scan.key(), 2), new NodeAddress(
+                        new String(value, 4, peerLength, java.nio.charset.StandardCharsets.UTF_8),
+                        new String(value, 4 + peerLength, value.length - 4 - peerLength,
+                                java.nio.charset.StandardCharsets.UTF_8)));
+            }
+        }
         try (ScanIterator scan = engine.scan(new byte[] {SYSTEM, SESSION}, new byte[] {SYSTEM, SESSION + 1})) {
             for (; scan.valid(); scan.next()) {
                 Session session = new Session();
@@ -211,6 +229,16 @@ public final class KvStateMachine implements StateMachine, Closeable {
     /** The alarms that are set, as of the applied index. */
     public Set<Alarm> alarms() {
         return Collections.unmodifiableSet(alarms);
+    }
+
+    /** Where the nodes listen, by node id, as of the applied index. */
+    public Map<Integer, NodeAddress> addresses() {
+        return Collections.unmodifiableMap(addresses);
+    }
+
+    /** Counts the changes of {@link #addresses} since this state machine was opened. */
+    public long addressChanges() {
+        return addressChanges;
     }
 
     /** The cluster version as of the applied index. */
@@ -344,6 +372,24 @@ public final class KvStateMachine implements StateMachine, Closeable {
                     byte[] stored = new byte[4];
                     LittleEndian.putInt32(stored, 0, clusterVersion);
                     pending.batch.put(VERSION_KEY, stored);
+                }
+                yield new AdminApplied();
+            }
+            case SetAddress set -> {
+                NodeAddress address = new NodeAddress(set.peerAddress(), set.clientAddress());
+                if (!address.equals(addresses.put(set.nodeId(), address))) {
+                    addressChanges++;
+                    byte[] peer = set.peerAddress().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                    byte[] client = set.clientAddress().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                    byte[] stored = new byte[4 + peer.length + client.length];
+                    LittleEndian.putInt32(stored, 0, peer.length);
+                    System.arraycopy(peer, 0, stored, 4, peer.length);
+                    System.arraycopy(client, 0, stored, 4 + peer.length, client.length);
+                    byte[] key = new byte[6];
+                    key[0] = SYSTEM;
+                    key[1] = ADDRESS;
+                    LittleEndian.putInt32(key, 2, set.nodeId());
+                    pending.batch.put(key, stored);
                 }
                 yield new AdminApplied();
             }

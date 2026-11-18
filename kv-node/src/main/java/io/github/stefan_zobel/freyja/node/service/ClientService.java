@@ -169,7 +169,7 @@ public final class ClientService implements NodeListener {
 
     private void execute(Waiting w, Command command) {
         if (command instanceof Command.SetAlarm || command instanceof Command.ClearAlarm
-                || command instanceof Command.SetClusterVersion) {
+                || command instanceof Command.SetClusterVersion || command instanceof Command.SetAddress) {
             send(w, new Rejected(Reason.INVALID)); // commands of an administrator
             return;
         }

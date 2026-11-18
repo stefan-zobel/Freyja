@@ -1,0 +1,171 @@
+package io.github.stefan_zobel.freyja.node;
+
+import java.io.IOException;
+import java.io.PrintStream;
+import java.net.InetSocketAddress;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeSet;
+import java.util.concurrent.CountDownLatch;
+
+import io.github.stefan_zobel.freyja.common.Clock;
+import io.github.stefan_zobel.freyja.lsm.EngineOptions;
+import io.github.stefan_zobel.freyja.lsm.fs.RealFileSystem;
+import io.github.stefan_zobel.freyja.node.sm.StateMachineStore;
+import io.github.stefan_zobel.freyja.node.snapshot.SnapshotTransfers;
+import io.github.stefan_zobel.freyja.node.store.NodeIdentity;
+import io.github.stefan_zobel.freyja.raft.ClusterConfig;
+import io.github.stefan_zobel.freyja.raft.RaftConfig;
+
+/**
+ * The program that runs a node (docs/spec/operations.md).
+ *
+ * <pre>
+ * FreyjaNode init --data DIR --cluster HEX --node N [--voters N,N,...] [--cluster-version V]
+ * FreyjaNode run  --data DIR --peer HOST:PORT --client HOST:PORT --admin HOST:PORT
+ *                 [--seed N=HOST:PORT]... [--tick-ms MILLIS]
+ * </pre>
+ *
+ * <p>{@code init} prepares an empty data directory. A node of a new cluster is given the
+ * voters the cluster starts with, the same on every node; a node that is to join a cluster is
+ * given none. {@code run} starts the node of a prepared directory and prints one line when it
+ * listens, with the ports it has bound:
+ *
+ * <pre>
+ * READY node=N peer=PORT client=PORT admin=PORT
+ * </pre>
+ *
+ * <p>Exit code 0: done. 1: the node could not be prepared or started. 2: wrong usage.
+ */
+public final class FreyjaNode {
+
+    private FreyjaNode() {
+    }
+
+    public static void main(String[] args) {
+        int code = run(args, System.out, System.err, true);
+        if (code != 0) {
+            System.exit(code);
+        }
+    }
+
+    /**
+     * @param block whether {@code run} waits until the process is told to end; a test passes
+     *              {@code false} and gets the call back as soon as the node listens
+     */
+    public static int run(String[] args, PrintStream out, PrintStream err, boolean block) {
+        if (args.length == 0) {
+            return usage(err);
+        }
+        Map<String, List<String>> options = new HashMap<>();
+        for (int i = 1; i < args.length; i += 2) {
+            if (!args[i].startsWith("--") || i + 1 >= args.length) {
+                return usage(err);
+            }
+            options.computeIfAbsent(args[i].substring(2), _ -> new ArrayList<>()).add(args[i + 1]);
+        }
+        try {
+            return switch (args[0]) {
+                case "init" -> init(options, out);
+                case "run" -> start(options, out, block);
+                default -> usage(err);
+            };
+        } catch (IllegalArgumentException e) {
+            err.println("error: " + e.getMessage());
+            return usage(err);
+        } catch (IOException e) {
+            err.println("error: " + e.getMessage());
+            return 1;
+        }
+    }
+
+    private static int usage(PrintStream err) {
+        err.println("usage: FreyjaNode init --data DIR --cluster HEX --node N [--voters N,N,...]"
+                + " [--cluster-version V]");
+        err.println("       FreyjaNode run --data DIR --peer HOST:PORT --client HOST:PORT --admin HOST:PORT"
+                + " [--seed N=HOST:PORT]... [--tick-ms MILLIS]");
+        return 2;
+    }
+
+    private static String one(Map<String, List<String>> options, String name, String fallback) {
+        List<String> values = options.get(name);
+        if (values == null) {
+            if (fallback == null) {
+                throw new IllegalArgumentException("--" + name + " is missing");
+            }
+            return fallback;
+        }
+        if (values.size() != 1) {
+            throw new IllegalArgumentException("--" + name + " is given more than once");
+        }
+        return values.getFirst();
+    }
+
+    private static int init(Map<String, List<String>> options, PrintStream out) throws IOException {
+        Path data = Path.of(one(options, "data", null));
+        long cluster = Long.parseUnsignedLong(one(options, "cluster", null), 16);
+        int node = Integer.parseInt(one(options, "node", null));
+        TreeSet<Integer> voters = new TreeSet<>();
+        for (String voter : one(options, "voters", "").split(",")) {
+            if (!voter.isBlank()) {
+                voters.add(Integer.parseInt(voter.trim()));
+            }
+        }
+        int version = Integer.parseInt(one(options, "cluster-version", "1"));
+        Node.initialize(new RealFileSystem(), data, new NodeIdentity(cluster, node),
+                voters.isEmpty() ? ClusterConfig.EMPTY : ClusterConfig.ofVoters(voters.toArray(Integer[]::new)),
+                version);
+        out.println("prepared " + data + " for node " + node + " of cluster " + Long.toHexString(cluster)
+                + (voters.isEmpty() ? ", to join a cluster" : ", voters " + voters));
+        return 0;
+    }
+
+    private static int start(Map<String, List<String>> options, PrintStream out, boolean block) throws IOException {
+        Path data = Path.of(one(options, "data", null));
+        Map<Integer, String> seeds = new HashMap<>();
+        for (String seed : options.getOrDefault("seed", List.of())) {
+            int equals = seed.indexOf('=');
+            if (equals <= 0) {
+                throw new IllegalArgumentException("--seed takes N=HOST:PORT, not " + seed);
+            }
+            NodeServer.parse(seed.substring(equals + 1));
+            seeds.put(Integer.parseInt(seed.substring(0, equals)), seed.substring(equals + 1));
+        }
+        int tick = Integer.parseInt(one(options, "tick-ms", "100"));
+        Node.Options node = new Node.Options(RaftConfig.defaults(0, System.nanoTime()), 64L << 20, 4096, 1L << 30,
+                10_000, SnapshotTransfers.Options.defaults(), Node.Limits.defaults(), Clock.SYSTEM);
+        NodeServer server = NodeServer.start(new RealFileSystem(), new NodeServer.Settings(data,
+                resolve(one(options, "peer", null)), resolve(one(options, "client", null)),
+                resolve(one(options, "admin", null)), seeds, node,
+                new StateMachineStore.Options(new EngineOptions(), 60_000), tick));
+        out.println("READY node=" + server.identity().nodeId() + " peer=" + server.peerPort() + " client="
+                + server.clientPort() + " admin=" + server.adminPort());
+        out.flush();
+        if (!block) {
+            return 0;
+        }
+        CountDownLatch ended = new CountDownLatch(1);
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            try {
+                server.close();
+            } catch (IOException e) {
+                // the process ends anyway
+            }
+            ended.countDown();
+        }, "freyja-shutdown"));
+        try {
+            ended.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        return 0;
+    }
+
+    private static InetSocketAddress resolve(String address) {
+        InetSocketAddress parsed = NodeServer.parse(address);
+        return new InetSocketAddress(parsed.getHostString(), parsed.getPort());
+    }
+}

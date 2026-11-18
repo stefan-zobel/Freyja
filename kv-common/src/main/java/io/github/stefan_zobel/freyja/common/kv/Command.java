@@ -140,4 +140,22 @@ public sealed interface Command {
      */
     record SetClusterVersion(int version) implements Command {
     }
+
+    /**
+     * Tells the cluster where a node listens. Every node learns the addresses of the others
+     * from the replicated state, so a node that joins is announced once, through the log.
+     *
+     * @param nodeId        the node
+     * @param peerAddress   where it accepts connections of peers, as {@code host:port}
+     * @param clientAddress where it accepts connections of clients, as {@code host:port}
+     */
+    record SetAddress(int nodeId, String peerAddress, String clientAddress) implements Command {
+        public SetAddress {
+            Objects.requireNonNull(peerAddress, "peerAddress");
+            Objects.requireNonNull(clientAddress, "clientAddress");
+            if (nodeId < 0) {
+                throw new IllegalArgumentException("node id " + nodeId);
+            }
+        }
+    }
 }

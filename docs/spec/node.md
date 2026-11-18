@@ -261,6 +261,13 @@ no leader can be elected. Recovery then is a manual, explicitly unsafe procedure
     Absent until an alarm is first set.
   - `0x00 'v'`: the cluster version (`uint32`). Absent until it is first raised; until then
     the version the cluster was created with counts.
+  - `0x00 'n'` + node id (`uint32`): where the node listens: the length of the address for
+    peers (`uint32`), that address, then the address for clients, both UTF-8.
+- **Addresses.** Where the nodes listen is part of the replicated state, set by a command of
+  an administrator. Every node passes what its state machine says on to its transport and
+  uses it for the address in not-leader answers. So a node that joins, or that moves, is
+  announced once, through the log. Until a node has applied that, it uses the addresses it
+  was started with; a node that joins is started with the addresses of some members.
 - The state is a function of the applied entries alone. No clock, no random number, and no
   local circumstance of a node enters it. In particular, the results of a batch do not depend
   on how the committed entries were cut into batches.
@@ -281,13 +288,15 @@ no leader can be elected. Recovery then is a manual, explicitly unsafe procedure
 - Commands inside one batch of entries see the effects of the commands before them.
 - Encoding of a command in the log: version (`uint8`, 1), time stamp of the leader in
   milliseconds (`uint64`), type (`uint8`: 1 write, 2 conditional, 3 register session,
-  4 keep alive, 5 close session, 6 set alarm, 7 clear alarm, 8 set cluster version), body.
+  4 keep alive, 5 close session, 6 set alarm, 7 clear alarm, 8 set cluster version,
+  9 set address), body.
   - Write: session id, sequence number (`uint64` each), mutations.
   - Conditional: session id, sequence number, conditions, mutations if all hold, mutations
     otherwise.
   - Keep alive, close session: session id.
   - Set alarm, clear alarm: alarm (`uint8`: 0 `NOSPACE`). Set cluster version: version
-    (`uint32`).
+    (`uint32`). Set address: node id (`uint32`), the address for peers and the address for
+    clients, each `host:port` in UTF-8 as a byte string.
   - A list is a count (`uint32`) and its elements; a byte string is a length (`uint32`) and
     its bytes. Mutation: kind (`uint8`: 1 put, 2 delete), key, and for a put the value.
     Condition: kind (`uint8`: 0 exists, 1 does not exist, 2 value equals, 3 `ModIndex`

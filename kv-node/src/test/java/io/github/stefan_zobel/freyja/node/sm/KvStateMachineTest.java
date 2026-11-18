@@ -313,6 +313,28 @@ class KvStateMachineTest {
     }
 
     @Test
+    void theAddressesOfTheNodesAreInTheReplicatedState() throws IOException {
+        MemoryFileSystem fs = new MemoryFileSystem();
+        Log log = new Log();
+        try (KvStateMachine machine = open(fs)) {
+            assertTrue(machine.addresses().isEmpty());
+            assertEquals(new AdminApplied(), apply(machine, log.command(new Command.SetAddress(2, "h2:7000", "h2:7001"))));
+            assertEquals(new AdminApplied(), apply(machine, log.command(new Command.SetAddress(0, "h0:7000", "h0:7001"))));
+            assertEquals(2, machine.addressChanges());
+            apply(machine, log.command(new Command.SetAddress(2, "h2:7000", "h2:7001")));
+            assertEquals(2, machine.addressChanges(), "the same address again changes nothing");
+            apply(machine, log.command(new Command.SetAddress(2, "other:7000", "")));
+            assertEquals(3, machine.addressChanges());
+            assertEquals(new KvStateMachine.NodeAddress("other:7000", ""), machine.addresses().get(2));
+        }
+        try (KvStateMachine machine = open(fs)) {
+            assertEquals(Set.of(0, 2), machine.addresses().keySet());
+            assertEquals(new KvStateMachine.NodeAddress("h0:7000", "h0:7001"), machine.addresses().get(0));
+            assertEquals(new KvStateMachine.NodeAddress("other:7000", ""), machine.addresses().get(2));
+        }
+    }
+
+    @Test
     void theClusterVersionOnlyRises() throws IOException {
         MemoryFileSystem fs = new MemoryFileSystem();
         Log log = new Log();

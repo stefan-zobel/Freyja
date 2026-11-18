@@ -7,13 +7,16 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiConsumer;
 import java.util.function.Function;
 import java.util.function.IntFunction;
 import java.util.function.LongSupplier;
 
 import io.github.stefan_zobel.freyja.common.Clock;
 import io.github.stefan_zobel.freyja.lsm.fs.StorageFileSystem;
+import io.github.stefan_zobel.freyja.node.service.AdminService;
 import io.github.stefan_zobel.freyja.node.service.ClientService;
+import io.github.stefan_zobel.freyja.node.sm.KvStateMachine;
 import io.github.stefan_zobel.freyja.node.sm.StateMachineStore;
 import io.github.stefan_zobel.freyja.node.store.LostIdentityException;
 
@@ -42,10 +45,13 @@ public final class NodeRuntime implements Closeable {
      * @param restartMillis   the pause before a stopped node is started again
      * @param wallClockMillis the time of day; commands are stamped with it
      * @param clientAddress   the address for clients of a node, by its id; empty if not known
+     * @param addresses       is told where a node listens whenever the replicated state says
+     *                        so anew, on the thread of the node; {@code null} if nobody cares
      */
     public record Config(Path dataDirectory, Node.Options node, StateMachineStore.Options machine,
                          ClientService.Options service, int tickMillis, int inboundCapacity, int restartMillis,
-                         LongSupplier wallClockMillis, IntFunction<String> clientAddress) {
+                         LongSupplier wallClockMillis, IntFunction<String> clientAddress,
+                         BiConsumer<Integer, KvStateMachine.NodeAddress> addresses) {
         public Config {
             if (tickMillis < 1 || inboundCapacity < 1 || restartMillis < 0) {
                 throw new IllegalArgumentException("tick " + tickMillis + " ms, inbound " + inboundCapacity
@@ -56,6 +62,10 @@ public final class NodeRuntime implements Closeable {
 
     /** A request of a client on its way to the thread of the node. */
     private record ClientCall(byte[] frame, ClientService.Reply reply) {
+    }
+
+    /** A request of an administrator on its way to the thread of the node. */
+    private record AdminCall(byte[] frame, ClientService.Reply reply) {
     }
 
     /** A call that runs on the thread of the node. */
@@ -73,6 +83,10 @@ public final class NodeRuntime implements Closeable {
     private final Config config;
     private final Clock clock;
     private final ClientService service;
+    private final AdminService admin = new AdminService();
+    /** The state machine whose addresses were passed on last, and how many changes it had then. */
+    private KvStateMachine addressesOf;
+    private long addressChanges = -1;
     private final ArrayBlockingQueue<Object> inbound;
     private Transport transport;
     private Thread thread;
@@ -90,7 +104,7 @@ public final class NodeRuntime implements Closeable {
         this.fs = fs;
         this.config = config;
         this.clock = config.node().clock();
-        this.service = new ClientService(config.service(), config.wallClockMillis(), config.clientAddress(), null);
+        this.service = new ClientService(config.service(), config.wallClockMillis(), config.clientAddress(), admin);
         this.inbound = new ArrayBlockingQueue<>(config.inboundCapacity());
     }
 
@@ -122,6 +136,19 @@ public final class NodeRuntime implements Closeable {
      */
     public boolean clientRequest(byte[] frame, ClientService.Reply reply) {
         if (inbound.offer(new ClientCall(frame, reply))) {
+            return true;
+        }
+        refused.incrementAndGet();
+        return false;
+    }
+
+    /**
+     * A request of an administrator has arrived.
+     *
+     * @return {@code false} if it could not be taken: the node has too much to do
+     */
+    public boolean adminRequest(byte[] frame, ClientService.Reply reply) {
+        if (inbound.offer(new AdminCall(frame, reply))) {
             return true;
         }
         refused.incrementAndGet();
@@ -169,6 +196,7 @@ public final class NodeRuntime implements Closeable {
                     // work the queue of the node off
                 }
                 service.afterStep();
+                passAddressesOn();
                 if (inbound.isEmpty()) {
                     long wait = nextTick - clock.nanoTime();
                     if (wait > 0) {
@@ -207,12 +235,27 @@ public final class NodeRuntime implements Closeable {
     private void open() throws IOException {
         node = Node.open(fs, config.dataDirectory(), config.node(), config.machine(), transport, service);
         service.attach(node);
+        admin.attach(node, restarts);
         running = true;
+    }
+
+    /** Tells the owner of the network where the nodes listen, when the replicated state has news. */
+    private void passAddressesOn() {
+        if (config.addresses() == null) {
+            return;
+        }
+        KvStateMachine machine = node.store().machine();
+        if (machine != addressesOf || machine.addressChanges() != addressChanges) {
+            addressesOf = machine;
+            addressChanges = machine.addressChanges();
+            machine.addresses().forEach(config.addresses());
+        }
     }
 
     private void stopNode() {
         running = false;
         service.detach();
+        admin.detach();
         if (node != null) {
             try {
                 node.close();
@@ -227,6 +270,7 @@ public final class NodeRuntime implements Closeable {
         switch (item) {
             case byte[] frame -> node.offer(frame);
             case ClientCall call -> service.request(call.frame(), call.reply());
+            case AdminCall call -> admin.request(call.frame(), call.reply());
             case NodeCall<?> call -> call.run(node);
             default -> throw new IllegalStateException("item " + item.getClass());
         }

@@ -17,6 +17,7 @@ import io.github.stefan_zobel.freyja.common.kv.Command.KeepAlive;
 import io.github.stefan_zobel.freyja.common.kv.Command.Mutation;
 import io.github.stefan_zobel.freyja.common.kv.Command.Put;
 import io.github.stefan_zobel.freyja.common.kv.Command.RegisterSession;
+import io.github.stefan_zobel.freyja.common.kv.Command.SetAddress;
 import io.github.stefan_zobel.freyja.common.kv.Command.SetAlarm;
 import io.github.stefan_zobel.freyja.common.kv.Command.SetClusterVersion;
 import io.github.stefan_zobel.freyja.common.kv.Command.Write;
@@ -37,7 +38,7 @@ import io.github.stefan_zobel.freyja.common.kv.CommandResult.Written;
  * version    uint8    1
  * timestamp  uint64   the clock of the leader when it proposed the command, in milliseconds
  * type       uint8    1 Write, 2 Conditional, 3 RegisterSession, 4 KeepAlive, 5 CloseSession,
- *                     6 SetAlarm, 7 ClearAlarm, 8 SetClusterVersion
+ *                     6 SetAlarm, 7 ClearAlarm, 8 SetClusterVersion, 9 SetAddress
  * body       ...
  * </pre>
  *
@@ -48,6 +49,8 @@ import io.github.stefan_zobel.freyja.common.kv.CommandResult.Written;
  *   <li>KeepAlive, CloseSession: session id.</li>
  *   <li>SetAlarm, ClearAlarm: alarm ({@code uint8}; 0 NOSPACE).</li>
  *   <li>SetClusterVersion: version ({@code uint32}).</li>
+ *   <li>SetAddress: node id ({@code uint32}), the address for peers and the address for
+ *       clients, each in UTF-8 as a byte string.</li>
  *   <li>A list is a count ({@code uint32}) and its elements. A byte string is a length
  *       ({@code uint32}) and its bytes.</li>
  *   <li>Mutation: kind ({@code uint8}; 1 put, 2 delete), key, and for a put the value.</li>
@@ -117,6 +120,12 @@ public final class CommandCodec {
                 out.u8(8);
                 out.u32(v.version());
             }
+            case SetAddress a -> {
+                out.u8(9);
+                out.u32(a.nodeId());
+                out.bytes(a.peerAddress().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                out.bytes(a.clientAddress().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
         }
         return out.buffer.toByteArray();
     }
@@ -173,6 +182,14 @@ public final class CommandCodec {
             case 6 -> new SetAlarm(alarm(in));
             case 7 -> new ClearAlarm(alarm(in));
             case 8 -> new SetClusterVersion(in.u32());
+            case 9 -> {
+                int node = in.u32();
+                if (node < 0) {
+                    throw new DecodeException("a negative node id");
+                }
+                yield new SetAddress(node, new String(in.bytes(), java.nio.charset.StandardCharsets.UTF_8),
+                        new String(in.bytes(), java.nio.charset.StandardCharsets.UTF_8));
+            }
             default -> throw new DecodeException("unknown command type " + type);
         };
         in.end();
@@ -257,35 +274,37 @@ public final class CommandCodec {
 
     // ------------------------------------------------------------------ bytes
 
-    static final class Out {
-        final ByteArrayOutputStream buffer = new ByteArrayOutputStream(64);
+    /** Writes the little-endian encodings of this project. For the codecs of kv-common. */
+    public static final class Out {
+        public final ByteArrayOutputStream buffer = new ByteArrayOutputStream(64);
         private final byte[] scratch = new byte[8];
 
-        void u8(int value) {
+        public void u8(int value) {
             buffer.write(value);
         }
 
-        void u32(int value) {
+        public void u32(int value) {
             LittleEndian.putInt32(scratch, 0, value);
             buffer.write(scratch, 0, 4);
         }
 
-        void u64(long value) {
+        public void u64(long value) {
             LittleEndian.putUint64(scratch, 0, value);
             buffer.write(scratch, 0, 8);
         }
 
-        void bytes(byte[] bytes) {
+        public void bytes(byte[] bytes) {
             u32(bytes.length);
             buffer.write(bytes, 0, bytes.length);
         }
     }
 
-    static final class In {
+    /** Reads what {@link Out} writes, and rejects what does not fit. For the codecs of kv-common. */
+    public static final class In {
         private final byte[] bytes;
         private int at;
 
-        In(byte[] bytes) {
+        public In(byte[] bytes) {
             this.bytes = bytes;
         }
 
@@ -295,19 +314,19 @@ public final class CommandCodec {
             }
         }
 
-        int u8() {
+        public int u8() {
             need(1);
             return bytes[at++] & 0xFF;
         }
 
-        long u64() {
+        public long u64() {
             need(8);
             long value = LittleEndian.getUint64(bytes, at);
             at += 8;
             return value;
         }
 
-        int u32() {
+        public int u32() {
             need(4);
             int value = LittleEndian.getInt32(bytes, at);
             at += 4;
@@ -315,7 +334,7 @@ public final class CommandCodec {
         }
 
         /** A count of elements that each take at least {@code minimumSize} bytes. */
-        int count(int minimumSize) {
+        public int count(int minimumSize) {
             need(4);
             int count = LittleEndian.getInt32(bytes, at);
             at += 4;
@@ -325,7 +344,7 @@ public final class CommandCodec {
             return count;
         }
 
-        byte[] bytes() {
+        public byte[] bytes() {
             need(4);
             int length = LittleEndian.getInt32(bytes, at);
             at += 4;
@@ -336,7 +355,7 @@ public final class CommandCodec {
             return value;
         }
 
-        void end() {
+        public void end() {
             if (at != bytes.length) {
                 throw new DecodeException((bytes.length - at) + " bytes after the end");
             }

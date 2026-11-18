@@ -13,6 +13,44 @@ Served on the administration listener and used by the command-line tool in `kv-t
 Membership changes are refused when they would leave the cluster without a healthy majority,
 unless forced.
 
+**Protocol.** The administration listener speaks frames with the handshake role 3
+(`node.md` §8). A message: version (`uint8`, 1), type (`uint8`), request id (`uint64`), body,
+CRC32C (`uint32`); a string is a length (`uint32`) and UTF-8. The types and their codec live
+in `kv-common`.
+
+- Requests: 1 status; 2 add learner (node id `uint32`, address for peers, address for
+  clients); 3 promote learner, 4 remove member, 5 transfer leadership (node id); 6 snapshot;
+  7 scrub; 8 compact; 9 clear the space alarm; 10 set cluster version (`uint32`); 11 set
+  address (as 2).
+- Responses: 65 done (a detail for a person); 66 refused (the reason, and the id of the
+  leader if the reason is that the node is not the leader); 67 status (node id, cluster id,
+  software, role, term, leader id, last log index, commit index, applied index, the index the
+  log starts after, log-recovering, cluster version, space alarm, restarts, snapshots
+  installed, and per member its id, whether it votes, and its two addresses).
+
+**What an answer means.**
+
+- Status, snapshot, scrub, and compact concern the node that is asked and are done at once.
+- A change of the cluster goes to the leader and is answered when the core has taken or
+  refused it. Taken means: it is in the log of the leader at the index the answer names. The
+  status shows when it has taken effect.
+- Add learner is two entries: where the node listens, then the node as a learner.
+- A node that stops while a change waits says so; the change may be in the log.
+
+**The tool.** `FreyjaAdmin HOST:PORT COMMAND [ARGUMENT]...` in `kv-tools` sends one request
+to one node and prints the answer: `status`, `add-learner N PEER CLIENT`, `promote N`,
+`remove N`, `transfer N`, `snapshot`, `scrub`, `compact`, `clear-alarm`, `set-version V`,
+`set-address N PEER CLIENT`. Exit code 0: done; 1: refused or not reachable; 2: wrong usage.
+
+**The node program.** `FreyjaNode init --data DIR --cluster HEX --node N [--voters N,...]
+[--cluster-version V]` prepares a data directory; without voters, for a node that is to
+join. `FreyjaNode run --data DIR --peer HOST:PORT --client HOST:PORT --admin HOST:PORT
+[--seed N=HOST:PORT]... [--tick-ms MILLIS]` runs the node and prints
+`READY node=N peer=PORT client=PORT admin=PORT` when it listens.
+
+Not there yet: the match index and the repair state of every member in the status, the
+check for a healthy majority before a membership change, and the backup (milestone E3).
+
 ## 2. Observability
 
 No third-party libraries.

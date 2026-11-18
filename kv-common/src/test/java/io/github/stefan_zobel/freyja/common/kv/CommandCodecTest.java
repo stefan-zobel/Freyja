@@ -29,6 +29,7 @@ class CommandCodecTest {
                 new Command.SetAlarm(Command.Alarm.NOSPACE),
                 new Command.ClearAlarm(Command.Alarm.NOSPACE),
                 new Command.SetClusterVersion(7),
+                new Command.SetAddress(4, "node-4.example:7000", "node-4.example:7001"),
                 new Command.Write(5, 9, List.of()),
                 new Command.Write(5, 10, List.of(new Put(b("k"), b("value")), new Delete(b("gone")),
                         new Put(b("empty"), new byte[0]))),
