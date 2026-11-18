@@ -44,6 +44,38 @@ snap/             checkpoints being sent, snapshots being received
 - An in-memory index maps entry indexes to segment offsets.
 - Sealed segments are included in background scrubbing.
 
+Details:
+
+- **Files:** `raft/NNNNNNNNNN.rlog`, numbered upward from 1. The number is the file number
+  of the record checksums. A number is never used twice.
+- **Logical records** (the first byte is the type):
+  - Header (type 1), the first record of every segment: format version (`uint8`, 1), index
+    of the next entry at the time the segment was started (`uint64`), number of the
+    preceding segment (`uint64`, 0 for none), valid length of the preceding segment
+    (`uint64`), length and bytes of the configuration at the end of the log.
+  - Entries (type 2): index of the first entry (`uint64`), count (`uint32`), then per entry
+    term (`uint64`), type (`uint8`), payload length (`uint32`), payload.
+  - Truncation (type 3): the index from which all entries are discarded (`uint64`).
+- **A segment is used only after its header is synced** and the directory is synced. A
+  last segment without a complete header was never used; it is removed when the log is
+  opened.
+- **Rolling:** when a segment has reached the target size, it is closed at the next sync
+  and a new one is started.
+- **A torn tail is not cut off.** The header of the next segment records how much of its
+  predecessor counts, and a sealed segment is read up to that length only. Every open
+  starts a new segment, so nothing is ever appended after a torn tail.
+- **Chain:** each header names its predecessor. A segment that does not follow the one
+  before it (a file in the middle is missing) is damage. A missing last segment cannot be
+  told from a log that ends earlier; the loss of whole files is outside the fault model.
+- **Reading:** the entries of the segment being written are kept in memory (bounded by the
+  segment size); entries of sealed segments are read from their file, one record at a
+  time, and checked against the index.
+- **Prefix truncation** deletes the oldest segment as long as all entries it still
+  contributes to the log are at or below the given index. The store may therefore hold
+  entries a snapshot covers. A truncation record that reaches below the first stored index
+  (its entries were in deleted segments) restarts the index there.
+- A failed write or sync is fatal for the store.
+
 ### 3.2 Hard State
 
 Term, vote, and the state of the log-recovering mode (flag, log epoch, and the end of the
@@ -89,8 +121,18 @@ checksum   uint32   CRC32C over everything before it, bound to the file and to o
 
 On open, damage in a segment (`storage-format.md` §3.2) is never truncated away. The store
 determines the first entry index it can no longer vouch for and feeds `LogDamaged` to the
-core, which enters log-recovering mode (`raft.md` §8). The node stays in the cluster, does not
-vote, and is refilled by the leader.
+core, which enters log-recovering mode (`raft.md` §8). The node stays in the cluster, votes
+only as that mode allows, and is refilled by the leader.
+
+- The store vouches for what the segments before the damaged one hold. Nothing of the
+  damaged segment is kept, and nothing of the segments after it: the index it cannot vouch
+  for is the one after the last entry of the segments before.
+- If the first stored entry lies beyond the entry after the snapshot (the first segments
+  are gone), the store vouches for nothing.
+- The store accepts no writes while damaged segments are in place. The node first makes its
+  hard state say that it is in log-recovering mode; only then the damaged segments are moved
+  into `raft/damaged/` and a new segment is started. A crash in between finds the damage
+  again. Nothing is deleted: the files stay as evidence until an operator removes them.
 
 A torn tail is not damage: those entries were never acknowledged.
 

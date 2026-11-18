@@ -220,6 +220,67 @@ public final class LogReader {
         return new Result(kind, lastGood, true, failureOffset, failure);
     }
 
+    /**
+     * Reads one logical record.
+     *
+     * @param offset where to start: the offset of the first fragment of the record, or the
+     *               size the file had before the record was added (block padding and a sync
+     *               point may then lie before the first fragment; they are skipped)
+     * @return the record
+     * @throws CorruptionException if what is stored there is not one complete, valid record
+     */
+    public static byte[] readRecord(ReadableFile file, String name, long fileNumber, long offset)
+            throws IOException {
+        long size = file.size();
+        byte[] fragment = new byte[LogFormat.BLOCK_SIZE];
+        byte[] record = new byte[256];
+        int recordLength = 0;
+        boolean inRecord = false;
+        long position = offset;
+        while (true) {
+            int room = LogFormat.BLOCK_SIZE - (int) (position % LogFormat.BLOCK_SIZE);
+            if (room < LogFormat.HEADER_LENGTH) {
+                position += room; // block padding
+                room = LogFormat.BLOCK_SIZE;
+            }
+            if (size - position < LogFormat.HEADER_LENGTH) {
+                throw new CorruptionException(name, position, "the record is cut off");
+            }
+            file.readFully(position, fragment, 0, LogFormat.HEADER_LENGTH);
+            int length = LittleEndian.getUint16(fragment, 4);
+            int type = fragment[6] & 0xFF;
+            if (type < LogFormat.TYPE_FULL || type > LogFormat.TYPE_SYNC_POINT
+                    || length > room - LogFormat.HEADER_LENGTH
+                    || length > size - position - LogFormat.HEADER_LENGTH) {
+                throw new CorruptionException(name, position, "invalid fragment header");
+            }
+            file.readFully(position + LogFormat.HEADER_LENGTH, fragment, LogFormat.HEADER_LENGTH, length);
+            if (!checksumMatches(fragment, 0, length, fileNumber, position)) {
+                throw new CorruptionException(name, position, "fragment checksum mismatch");
+            }
+            long next = position + LogFormat.HEADER_LENGTH + length;
+            if (type == LogFormat.TYPE_SYNC_POINT) {
+                position = next;
+                continue;
+            }
+            boolean starts = (type == LogFormat.TYPE_FULL || type == LogFormat.TYPE_FIRST);
+            if (starts == inRecord) {
+                throw new CorruptionException(name, position, inRecord
+                        ? "a record starts inside another record" : "no record starts here");
+            }
+            inRecord = true;
+            if (recordLength + length > record.length) {
+                record = Arrays.copyOf(record, Math.max(recordLength + length, record.length * 2));
+            }
+            System.arraycopy(fragment, LogFormat.HEADER_LENGTH, record, recordLength, length);
+            recordLength += length;
+            if (type == LogFormat.TYPE_FULL || type == LogFormat.TYPE_LAST) {
+                return Arrays.copyOf(record, recordLength);
+            }
+            position = next;
+        }
+    }
+
     /** Checks the header record: magic number, file kind, format version. */
     private static FileKind parseHeader(byte[] payload, String name, FileKind expectedKind)
             throws IOException {
