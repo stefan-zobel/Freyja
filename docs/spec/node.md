@@ -40,19 +40,42 @@ The event loop:
 - Start: identity, hard state, log. If the log is damaged, the core is started in
   log-recovering mode and told of the damage; its hard state is stored; then the damaged
   segments are set aside (§3.3).
-- Until the state machine stores the configuration of its snapshot (milestone C2), the
-  runtime passes the configuration the cluster started with at every start.
+- A data directory is prepared once, with the configuration and the cluster version the
+  cluster starts with; a node that is to join a cluster is prepared with an empty
+  configuration. After that a start needs nothing but the directory.
+- Start of a complete node: identity, hard state, an interrupted installation (§5.3), the
+  state machine, `SNAPSHOT`, the log.
+- If damage of the log begins at or before the index of `SNAPSHOT`, the core is told that
+  the entries after that index are lost: what the snapshot covers is not missed. If what is
+  left of the log ends before that index, the log starts anew after it.
 
 ## 2. Data Directory
 
 ```
 NODE              identity: cluster id, node id, format version (written once)
 HARDSTATE-A/-B    term, vote, state of the log-recovering mode (§3.2)
+SNAPSHOT          what the stored log starts after: index, term, configuration (§5)
+INSTALL           present only while a snapshot is being installed (§5)
 raft/             Raft log segments
-sm/CURRENT        name of the active state-machine generation
-sm/<generation>/  an lsm-core engine directory
-snap/             checkpoints being sent, snapshots being received
+sm/CURRENT        the active state-machine generation and what it started from
+sm/<generation>/  an lsm-core engine directory; a snapshot is received into a new one
+snap/out-<n>/     a checkpoint being sent
 ```
+
+The small files (`NODE`, `HARDSTATE-*`, `SNAPSHOT`, `INSTALL`, `sm/CURRENT`) share one layout:
+magic (`uint32`), format version (`uint8`), body, CRC32C over everything before it, bound to
+a number that stands for the file. Each is replaced as a whole: written to a temporary file,
+synced, renamed, and the directory is synced.
+
+| File | Magic | Body |
+|---|---|---|
+| `SNAPSHOT` | `FRYS` | index, term (`uint64` each), encoded configuration |
+| `INSTALL` | `FRYI` | flags (`uint8`: bit 0 keep the log suffix, bit 1 replace the state machine), generation (`uint64`), cluster version (`uint32`), then as `SNAPSHOT` |
+| `sm/CURRENT` | `FRYC` | generation (`uint64`), cluster version (`uint32`), then as `SNAPSHOT`: the origin of the generation |
+
+The origin of a generation is what it held when it became the state machine: nothing for
+the first generation of a node, a snapshot of another node later. Its configuration and its
+cluster version count until the generation applies an entry that changes them.
 
 ## 3. Raft Log Store
 
@@ -281,16 +304,72 @@ no leader can be elected. Recovery then is a manual, explicitly unsafe procedure
 
 ## 5. Snapshots
 
-- A Raft snapshot is an engine checkpoint (`storage-engine.md` §9) plus a metadata file with
-  `SnapshotMeta`. Creating one does not block writes.
-- Triggers: log size above a threshold (default 1 GiB), or on request.
-- **Transfer:** file by file in chunks of 1 MiB, each chunk with a checksum. The receiver
-  keeps partial files and resumes at `(file, offset)` after a connection loss. Every received
-  file is verified through its own checksums before the snapshot is offered to the core.
-- **Install:** the received directory becomes a new state-machine generation; `sm/CURRENT`
-  is switched by atomic replace; the old generation is deleted afterward.
-- A checkpoint being sent is kept until the transfer ends or times out. The number of
-  concurrent outgoing transfers is bounded.
+Two things are called a snapshot, and they are separate:
+
+- **Shortening the log.** The node makes its state machine durable (a flush of the engine)
+  and lets the log start after an applied entry. Nothing is copied.
+- **Sending the state machine.** A leader sends an engine checkpoint
+  (`storage-engine.md` §9) to a node whose next entry its log no longer holds.
+
+### 5.1 Shortening the Log
+
+- Triggers: the log takes more than a threshold on disk (default 1 GiB), or on request.
+- The log keeps a number of applied entries (default 10,000) for followers that are a little
+  behind; on request it keeps none.
+- Order: flush the engine; replace `SNAPSHOT`; tell the core; delete the segments that hold
+  only entries up to that index. The log gives up only what the state machine holds
+  durably, and `SNAPSHOT` never names an index before the first one the log needs.
+- Segments are deleted as a whole, so the stored log may reach back before the index in
+  `SNAPSHOT`.
+- At a start, the core is given the content of `SNAPSHOT` as its snapshot. If the file is
+  missing or damaged, the state machine itself stands in: its applied index, the term of
+  that entry, and its configuration. That is a valid start of the log for the same reason.
+
+### 5.2 Transfer
+
+- The sender takes a checkpoint when the transfer starts, in `snap/out-<n>/`. The snapshot
+  therefore covers what the sender has applied at that moment, which may be more than the
+  core asked for. The checkpoint is removed when the transfer ends or times out. The number
+  of outgoing transfers is bounded (default 2); beyond it a request fails at once.
+- The receiver drives the transfer. Messages:
+  - `Offer`: transfer id, term of the leader, `SnapshotMeta`, cluster version, and the files
+    of the checkpoint with their sizes.
+  - `Fetch`: the receiver asks for the bytes of one file from an offset on.
+  - `Chunk`: at most 1 MiB of a file. The frame around every message carries a CRC32C.
+  - `Done`: the receiver has every file and found the snapshot intact, or damaged.
+  - `Abort`: one side gives the transfer up.
+- The receiver writes into the directory of a new generation. It asks for the next bytes
+  only after it has stored the ones before, so a lost or repeated message costs a repeated
+  request and nothing else: a chunk that is not the one asked for is ignored.
+- A request without an answer is repeated (default after 5 ticks). A transfer without
+  progress is given up (default after 100 ticks), and the other side is told.
+- A receiver accepts file names that are plain names of files only. It refuses an offer it
+  has no use for: of a term below its own, or not beyond its commit index.
+- One snapshot is received at a time. An offer of the same sender replaces the one being
+  received; an offer of another sender does so only with a higher term.
+- When every file is there, the generation is verified by its own checksums: it must open as
+  a state machine, hold exactly the index and term of the offer, and every block of every
+  table must be intact. Only then the core is told. A damaged snapshot is discarded and the
+  sender is told; nothing of it is ever installed.
+- Partial files do not survive a restart of the receiver: a generation that `sm/CURRENT`
+  does not name is removed at the start.
+
+### 5.3 Installation
+
+The core decides: install or reject, whether the stored entries after the snapshot stay,
+and whether the state machine is replaced (`raft.md` §9). The steps:
+
+1. Write `INSTALL`.
+2. If the state machine is replaced: close it, replace `sm/CURRENT`, open the new generation,
+   delete the old one. Otherwise delete the received generation.
+3. Replace `SNAPSHOT`.
+4. If the entries after the snapshot stay, delete the segments before it; otherwise delete
+   every segment and start the log after the snapshot.
+5. Delete `INSTALL`, then tell the core.
+
+A node that finds `INSTALL` at its start repeats steps 2 to 5 before it opens anything.
+Each step has no effect if it was done already. A damaged `INSTALL` stops the start: the
+node cannot know how far the installation went.
 
 ## 6. Replica Repair
 
@@ -328,6 +407,15 @@ A node that is repairing reports that state through the admin API and the metric
     boolean is one byte.
   - A receiver rejects what it does not know: another version, an unknown type, a length
     that does not fit the type, a wrong checksum.
+  - The messages of a snapshot transfer use the same frame with the types from 32 on
+    (32 offer, 33 fetch, 34 chunk, 35 done, 36 abort) and the transfer id in the place of
+    the term.
+    - Offer: term of the leader, last included index, last included term (`uint64` each),
+      cluster version (`uint32`), length of the encoded configuration (`uint32`) and the
+      configuration, number of files (`uint32`), and per file the length of its name
+      (`uint32`), the name in UTF-8, and its size (`uint64`).
+    - Fetch: file number (`uint32`), offset (`uint64`). Chunk: file number, offset, number
+      of bytes (`uint32`), the bytes. Done: accepted (one byte). Abort: nothing.
 - Separate listeners for peers, clients, and administration.
 - Not-leader responses carry the leader's client address if known.
 

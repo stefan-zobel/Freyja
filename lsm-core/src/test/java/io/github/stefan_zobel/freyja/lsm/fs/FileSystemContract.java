@@ -209,6 +209,22 @@ abstract class FileSystemContract {
     }
 
     @Test
+    void anEmptyDirectoryIsRemoved() throws IOException {
+        Path dir = root().resolve("gone");
+        fs().createDirectories(dir);
+        write(dir.resolve("file"), "x", true);
+        assertThrows(java.nio.file.DirectoryNotEmptyException.class, () -> fs().deleteDirectory(dir));
+        fs().delete(dir.resolve("file"));
+        fs().deleteDirectory(dir);
+        assertFalse(fs().exists(dir));
+        assertThrows(java.nio.file.NoSuchFileException.class, () -> fs().deleteDirectory(dir));
+        assertThrows(java.nio.file.NoSuchFileException.class, () -> fs().create(dir.resolve("file")).close());
+        // The name is free again.
+        fs().createDirectories(dir);
+        write(dir.resolve("file"), "y", true);
+    }
+
+    @Test
     void freeSpaceIsReported() throws IOException {
         assertTrue(fs().freeSpace(root()) > 0);
     }

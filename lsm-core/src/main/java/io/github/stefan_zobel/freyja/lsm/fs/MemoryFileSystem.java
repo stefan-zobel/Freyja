@@ -4,6 +4,7 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
+import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.FileSystemException;
 import java.nio.file.NoSuchFileException;
@@ -301,6 +302,28 @@ public final class MemoryFileSystem implements StorageFileSystem {
             requireNotOpen(name);
             entries.remove(name);
             pendingNameChanges.add(new NameChange(NameChange.REMOVE, name, null, null));
+        }
+    }
+
+    @Override
+    public void deleteDirectory(Path dir) throws IOException {
+        synchronized (lock) {
+            Path name = key(dir);
+            requireDirectory(name);
+            for (Path p : entries.keySet()) {
+                if (name.equals(p.getParent())) {
+                    throw new DirectoryNotEmptyException(name.toString());
+                }
+            }
+            for (Path p : directories) {
+                if (name.equals(p.getParent())) {
+                    throw new DirectoryNotEmptyException(name.toString());
+                }
+            }
+            // With the directory, the removal of its names is durable.
+            pendingNameChanges.removeIf(change -> name.equals(change.name().getParent()));
+            durableEntries.keySet().removeIf(p -> name.equals(p.getParent()));
+            directories.remove(name);
         }
     }
 

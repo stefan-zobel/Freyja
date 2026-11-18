@@ -5,7 +5,8 @@ Behavior rules for the LSM engine. On-disk layouts are in `storage-format.md`.
 ## 1. File-System Abstraction
 
 Every file operation goes through `StorageFileSystem` (create, open, positional read, append,
-sync, truncate, rename, hard link, delete, list, directory sync, free space). Files are
+sync, truncate, rename, hard link, delete, remove an empty directory, list, directory sync,
+free space). Files are
 append-only: an existing file is never reopened for writing. `truncate` cuts a closed file
 and makes its remaining contents and its length durable. It exists from the first
 milestone with three implementations:

@@ -94,6 +94,11 @@ final class HookedFileSystem implements StorageFileSystem {
     }
 
     @Override
+    public void deleteDirectory(Path dir) throws IOException {
+        delegate.deleteDirectory(dir);
+    }
+
+    @Override
     public boolean exists(Path path) throws IOException {
         return delegate.exists(path);
     }

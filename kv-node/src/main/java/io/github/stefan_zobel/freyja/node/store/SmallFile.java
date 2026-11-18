@@ -17,7 +17,7 @@ import io.github.stefan_zobel.freyja.lsm.fs.WritableFile;
  * <pre>
  * magic        uint32   identifies the kind of file
  * version      uint8    format version
- * body         bytes    fixed length per kind and version
+ * body         bytes    fixed length per kind and version, or of any length up to 4 KiB
  * checksum     uint32   CRC32C over everything before it, bound to the file and to offset 0
  * </pre>
  *
@@ -28,6 +28,8 @@ final class SmallFile {
 
     private static final int HEAD = 5;
     private static final int CHECKSUM = 4;
+    /** For {@link #read}: the body may have any length. */
+    static final int ANY_LENGTH = -1;
 
     private SmallFile() {
     }
@@ -46,6 +48,7 @@ final class SmallFile {
     /**
      * Reads the body of the record in {@code path}.
      *
+     * @param bodyLength the length the body must have, or {@link #ANY_LENGTH}
      * @return the body, or {@code null} if the file does not exist or does not hold a valid
      *         record of this kind
      * @throws UnsupportedFormatException if the record is valid but of another format version
@@ -72,11 +75,11 @@ final class SmallFile {
             throw new UnsupportedFormatException(path.getFileName() + " has format version "
                     + (bytes[4] & 0xFF) + "; this software reads version " + version);
         }
-        if (end - HEAD != bodyLength) {
+        if (bodyLength != ANY_LENGTH && end - HEAD != bodyLength) {
             return null;
         }
-        byte[] body = new byte[bodyLength];
-        System.arraycopy(bytes, HEAD, body, 0, bodyLength);
+        byte[] body = new byte[end - HEAD];
+        System.arraycopy(bytes, HEAD, body, 0, body.length);
         return body;
     }
 

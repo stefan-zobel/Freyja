@@ -229,6 +229,11 @@ public final class FaultyFileSystem implements StorageFileSystem {
     }
 
     @Override
+    public void deleteDirectory(Path dir) throws IOException {
+        atomic(Operation.DELETE, dir, () -> delegate.deleteDirectory(dir));
+    }
+
+    @Override
     public boolean exists(Path path) throws IOException {
         checkAlive();
         return delegate.exists(path);

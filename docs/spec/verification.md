@@ -288,6 +288,33 @@ must finish in seconds.
   levels: the retained versions show every snapshot and the present exactly what the full
   history shows, and no version is retained that no reader can see.
 
+### 2.9 Node Components
+
+Fast tests of the parts of a node, with complete nodes on in-memory file systems and a
+network that the test steps. They come before the whole-system simulation and do not
+replace it.
+
+- **State machine replay:** a random log (sessions, repeated commands, conditional batches,
+  alarms, other entries) is applied once without any fault; that gives the expected results
+  and the expected digest of the state. The same log is then applied in batches of random
+  size with crashes in between, each time continuing at the applied index the engine still
+  has. Every result and the final digest must be the same.
+- **Replicated store:** three nodes with random crashes. Every node gives the same result
+  for every entry, every time it applies it, and all end with the same digest.
+- **Snapshots:** logs are shortened and the cluster restarts from what is left; a node that
+  is too far behind and a node that joins receive the state machine; a transfer with lost
+  and repeated messages completes without starting again; a transfer without answers is
+  given up on both sides and started again; a snapshot that arrives damaged in a block that
+  opening does not read is discarded.
+- **Interrupted installation:** the installation of a snapshot is failed at its first file
+  operation, then at its second, and so on until one runs through. After each failure the
+  node crashes and starts again; it must complete the installation, leave neither the
+  intent file nor a second generation behind, and converge with the others.
+- Mutations that these tests catch: no flush before the log is shortened; `SNAPSHOT` written
+  after the log is shortened; an interrupted installation not completed; the log not reset
+  by a completed installation; the intent not written; a received snapshot not scrubbed; a
+  repeated chunk appended again; a request that is never repeated.
+
 ## 3. Whole-System Simulation (primary oracle)
 
 Complete nodes and clients run in one deterministic process on the simulated clock,

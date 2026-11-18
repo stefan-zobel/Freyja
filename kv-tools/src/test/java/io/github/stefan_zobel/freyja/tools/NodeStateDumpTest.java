@@ -16,7 +16,11 @@ import io.github.stefan_zobel.freyja.lsm.fs.MemoryFileSystem;
 import io.github.stefan_zobel.freyja.node.Node;
 import io.github.stefan_zobel.freyja.node.store.HardStateStore;
 import io.github.stefan_zobel.freyja.node.store.NodeIdentity;
+import io.github.stefan_zobel.freyja.node.store.InstallIntent;
+import io.github.stefan_zobel.freyja.node.store.SnapshotMetaFile;
+import io.github.stefan_zobel.freyja.raft.ClusterConfig;
 import io.github.stefan_zobel.freyja.raft.HardState;
+import io.github.stefan_zobel.freyja.raft.SnapshotMeta;
 
 /** The dump tool for the identity and the hard state of a node. */
 class NodeStateDumpTest {
@@ -60,6 +64,35 @@ class NodeStateDumpTest {
         assertTrue(out().contains(HardStateStore.FILE_B + " counts; the other file is written again"), out());
         assertArrayEquals(damaged, fs.peek(a, 0, (int) fs.size(a)));
         assertEquals(before.length, damaged.length);
+        assertEquals(0, fs.openHandleCount());
+    }
+
+    @Test
+    void theSmallFilesOfACompleteNodeArePrinted() throws IOException {
+        ClusterConfig config = ClusterConfig.ofVoters(0, 1, 2);
+        Node.initialize(fs, DIR, new NodeIdentity(1, 2), config, 4);
+        assertEquals(0, run(DIR.toString()), out());
+        assertTrue(out().contains("log start:    after index 0 of term 0, voters [0, 1, 2], learners []"), out());
+        assertTrue(out().contains("generation:   1, cluster version 4, started from index 0"), out());
+        assertTrue(!out().contains("installation:"), out());
+
+        SnapshotMeta meta = new SnapshotMeta(90, 3, config);
+        SnapshotMetaFile.write(fs, DIR, meta);
+        new InstallIntent(meta, 2, 4, false, true).write(fs, DIR);
+        assertEquals(0, run(DIR.toString()), out());
+        assertTrue(out().contains("log start:    after index 90 of term 3"), out());
+        assertTrue(out().contains("installation: INTERRUPTED, of index 90 of term 3"), out());
+        assertTrue(out().contains("in generation 2, dropping the log after it; completed"), out());
+
+        Path intent = DIR.resolve(InstallIntent.FILE_NAME);
+        byte[] one = fs.peek(intent, 8, 1);
+        one[0] ^= 1;
+        fs.overwrite(intent, 8, one);
+        Path snapshot = DIR.resolve(SnapshotMetaFile.FILE_NAME);
+        fs.overwrite(snapshot, 8, one);
+        assertEquals(1, run(DIR.toString()), out());
+        assertTrue(out().contains("is damaged; the node will not start"), out());
+        assertTrue(out().contains("log start:    DAMAGED"), out());
         assertEquals(0, fs.openHandleCount());
     }
 

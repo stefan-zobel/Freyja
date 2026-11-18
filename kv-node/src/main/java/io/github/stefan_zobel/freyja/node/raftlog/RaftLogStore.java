@@ -91,7 +91,7 @@ public final class RaftLogStore implements LogView, Closeable {
     private int[] ordinalOf = new int[64];
 
     // ---- the configuration at the end of the log, for the header of the next segment
-    private final ClusterConfig baseConfig;
+    private ClusterConfig baseConfig;
     private final List<Long> configIndexes = new ArrayList<>();
     private final List<ClusterConfig> configValues = new ArrayList<>();
 
@@ -496,6 +496,66 @@ public final class RaftLogStore implements LogView, Closeable {
         if (deleted) {
             fs.syncDirectory(directory);
         }
+    }
+
+    /**
+     * Gives up every stored entry: the log starts anew after a snapshot that the stored
+     * entries do not lead up to. The next entry to append is the one after
+     * {@code snapshotIndex}.
+     *
+     * <p>The caller records durably that it is about to do this, and repeats it with
+     * {@link #deleteSegments} if it finds that record at its next start.
+     */
+    public void reset(long snapshotIndex, ClusterConfig snapshotConfig) throws IOException {
+        requireWritable();
+        failed = true;
+        close();
+        for (int i = segments.size() - 1; i >= 0; i--) {
+            fs.delete(segments.get(i).path);
+        }
+        fs.syncDirectory(directory);
+        segments.clear();
+        activeRecords.clear();
+        activeNumber = -1;
+        cachedSegment = -1;
+        cachedRecord = null;
+        count = 0;
+        firstIndex = snapshotIndex + 1;
+        baseConfig = snapshotConfig;
+        configIndexes.clear();
+        configValues.clear();
+        startSegment();
+        failed = false;
+    }
+
+    /**
+     * Deletes every segment of a log that is not open. What was set aside as damaged stays.
+     */
+    public static void deleteSegments(StorageFileSystem fs, Path directory) throws IOException {
+        if (!fs.exists(directory)) {
+            return;
+        }
+        List<Path> paths = new ArrayList<>();
+        for (Path path : fs.list(directory)) {
+            String file = path.getFileName().toString();
+            if (file.endsWith(SUFFIX) && file.length() == 10 + SUFFIX.length()) {
+                paths.add(path);
+            }
+        }
+        // The newest first: whatever a crash leaves is a log that ends earlier.
+        for (int i = paths.size() - 1; i >= 0; i--) {
+            fs.delete(paths.get(i));
+        }
+        fs.syncDirectory(directory);
+    }
+
+    /** The bytes the segments of the log take on disk. */
+    public long storedBytes() {
+        long bytes = 0;
+        for (Segment segment : segments) {
+            bytes += segment.number == activeNumber && writer != null ? writer.size() : segment.validLength;
+        }
+        return bytes;
     }
 
     @Override

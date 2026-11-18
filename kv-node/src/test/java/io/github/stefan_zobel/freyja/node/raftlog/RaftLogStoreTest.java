@@ -387,6 +387,49 @@ class RaftLogStoreTest {
     }
 
     @Test
+    void theLogStartsAnewAfterASnapshot() throws IOException {
+        MemoryFileSystem fs = new MemoryFileSystem();
+        ClusterConfig other = ClusterConfig.ofVoters(3, 4, 5);
+        try (RaftLogStore store = open(fs)) {
+            for (int i = 0; i < 8; i++) {
+                store.append(batch(1 + 5 * i, 5, 1, 300));
+                store.sync();
+            }
+            assertTrue(store.segmentCount() > 3);
+            assertTrue(store.storedBytes() > 40 * 300);
+            long highest = Long.parseLong(segmentFiles(fs).getLast().getFileName().toString().substring(0, 10));
+
+            store.reset(500, other);
+            assertEquals(501, store.firstIndex());
+            assertEquals(500, store.lastIndex());
+            assertEquals(1, store.segmentCount());
+            assertEquals(other, store.configAtEnd());
+            assertTrue(store.storedBytes() < 300);
+            assertEquals(List.of(String.format("%010d.rlog", highest + 1)),
+                    segmentFiles(fs).stream().map(p -> p.getFileName().toString()).toList(),
+                    "segment numbers are not used again");
+            store.append(batch(501, 10, 7, 300));
+            store.sync();
+            assertEquals(shapes(batch(501, 10, 7, 300)), content(store, 501));
+        }
+        try (RaftLogStore store = RaftLogStore.open(fs, DIR, SEGMENT, 500, other)) {
+            assertEquals(-1, store.firstDamagedIndex());
+            assertEquals(501, store.firstIndex());
+            assertEquals(510, store.lastIndex());
+            assertEquals(shapes(batch(501, 10, 7, 300)), content(store, 501));
+        }
+        // What a node does at its start if it crashed during an installation.
+        RaftLogStore.deleteSegments(fs, DIR);
+        assertEquals(List.of(), segmentFiles(fs));
+        RaftLogStore.deleteSegments(fs, DIR);
+        try (RaftLogStore store = RaftLogStore.open(fs, DIR, SEGMENT, 900, THREE)) {
+            assertEquals(901, store.firstIndex());
+            assertEquals(900, store.lastIndex());
+        }
+        assertEquals(0, fs.openHandleCount());
+    }
+
+    @Test
     void aMissingSegmentIsDamage() throws IOException {
         MemoryFileSystem fs = new MemoryFileSystem();
         try (RaftLogStore store = open(fs)) {

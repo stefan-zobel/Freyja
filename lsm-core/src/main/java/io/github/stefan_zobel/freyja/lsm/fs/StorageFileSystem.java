@@ -57,6 +57,15 @@ public interface StorageFileSystem {
      */
     void delete(Path path) throws IOException;
 
+    /**
+     * Removes the empty directory {@code dir}. The removal of the names it held is durable
+     * with it.
+     *
+     * @throws java.nio.file.NoSuchFileException if {@code dir} does not exist
+     * @throws java.nio.file.DirectoryNotEmptyException if it still has entries
+     */
+    void deleteDirectory(Path dir) throws IOException;
+
     /** Returns whether a file or directory with this name exists. */
     boolean exists(Path path) throws IOException;
 

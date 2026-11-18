@@ -10,9 +10,15 @@ import io.github.stefan_zobel.freyja.common.DecodeException;
 import io.github.stefan_zobel.freyja.common.kv.CommandResult;
 import io.github.stefan_zobel.freyja.lsm.fs.StorageFileSystem;
 import io.github.stefan_zobel.freyja.node.raftlog.RaftLogStore;
+import io.github.stefan_zobel.freyja.node.sm.StateMachineStore;
+import io.github.stefan_zobel.freyja.node.snapshot.SnapshotTransfers;
 import io.github.stefan_zobel.freyja.node.store.HardStateStore;
+import io.github.stefan_zobel.freyja.node.store.InstallIntent;
 import io.github.stefan_zobel.freyja.node.store.NodeIdentity;
+import io.github.stefan_zobel.freyja.node.store.SnapshotMetaFile;
 import io.github.stefan_zobel.freyja.node.wire.MessageCodec;
+import io.github.stefan_zobel.freyja.node.wire.TransferCodec;
+import io.github.stefan_zobel.freyja.node.wire.TransferMessage;
 import io.github.stefan_zobel.freyja.raft.ClusterConfig;
 import io.github.stefan_zobel.freyja.raft.HardState;
 import io.github.stefan_zobel.freyja.raft.LogEntry;
@@ -24,6 +30,7 @@ import io.github.stefan_zobel.freyja.raft.RaftConfig;
 import io.github.stefan_zobel.freyja.raft.RaftEvent;
 import io.github.stefan_zobel.freyja.raft.RaftNode;
 import io.github.stefan_zobel.freyja.raft.Ready;
+import io.github.stefan_zobel.freyja.raft.SnapshotDirective;
 import io.github.stefan_zobel.freyja.raft.SnapshotMeta;
 
 /**
@@ -41,6 +48,11 @@ import io.github.stefan_zobel.freyja.raft.SnapshotMeta;
  * truncation, entries, then one sync of the log; only then the core is told that the work is
  * durable. A failed write is fatal: the node stops and must be started again.
  *
+ * <p>A node comes in two forms. The complete one owns the generations of the key-value state
+ * machine and with them everything about snapshots: it shortens its log, sends snapshots to
+ * nodes that are too far behind, and installs the ones it receives (section 5). The plain one
+ * is given a state machine by its caller and has no snapshots; its log only grows.
+ *
  * <p>An instance is confined to one thread.
  */
 public final class Node implements Closeable {
@@ -51,17 +63,29 @@ public final class Node implements Closeable {
     /**
      * The settings of a node.
      *
-     * @param raft          the settings of the Raft core; its node id is replaced by the one of
-     *                      the identity file
-     * @param segmentSize   target size of a segment of the Raft log
-     * @param queueCapacity how many events may wait for the event loop
+     * @param raft                  the settings of the Raft core; its node id is replaced by
+     *                              the one of the identity file
+     * @param segmentSize           target size of a segment of the Raft log
+     * @param queueCapacity         how many events may wait for the event loop
+     * @param snapshotLogBytes      when the log takes more than this on disk, the state
+     *                              machine is made durable and the log is shortened
+     * @param snapshotRetainEntries how many applied entries the log keeps then, for followers
+     *                              that are a little behind
+     * @param transfers             the settings of snapshot transfers
      */
-    public record Options(RaftConfig raft, long segmentSize, int queueCapacity) {
+    public record Options(RaftConfig raft, long segmentSize, int queueCapacity, long snapshotLogBytes,
+                          long snapshotRetainEntries, SnapshotTransfers.Options transfers) {
         public Options {
-            if (segmentSize < 1 || queueCapacity < 1) {
+            if (segmentSize < 1 || queueCapacity < 1 || snapshotLogBytes < 1 || snapshotRetainEntries < 0) {
                 throw new IllegalArgumentException("segment size " + segmentSize + ", queue capacity "
-                        + queueCapacity);
+                        + queueCapacity + ", snapshot at " + snapshotLogBytes + " bytes, retaining "
+                        + snapshotRetainEntries);
             }
+        }
+
+        /** Snapshots as by default: at 1 GiB of log, keeping 10,000 entries. */
+        public Options(RaftConfig raft, long segmentSize, int queueCapacity) {
+            this(raft, segmentSize, queueCapacity, 1L << 30, 10_000, SnapshotTransfers.Options.defaults());
         }
 
         /** The defaults: 64 MiB segments, 4096 waiting events. */
@@ -70,35 +94,58 @@ public final class Node implements Closeable {
         }
     }
 
+    /** A received snapshot that waits for the verdict of the core. */
+    private record Staged(TransferMessage.Offer offer, long generation) {
+    }
+
+    /** The queue item that asks for a snapshot now. */
+    private static final Object SNAPSHOT_REQUEST = new Object();
+
+    private final StorageFileSystem fs;
+    private final Path dataDirectory;
+    private final Options options;
     private final NodeIdentity identity;
     private final HardStateStore hardState;
     private final RaftLogStore log;
     private final RaftNode raft;
     private final StateMachine stateMachine;
+    /** The generations of the state machine; {@code null} for a plain node. */
+    private final StateMachineStore store;
     private final Transport transport;
     private final NodeListener listener;
-    private final ArrayDeque<RaftEvent> queue = new ArrayDeque<>();
-    private final int queueCapacity;
+    private final ArrayDeque<Object> queue = new ArrayDeque<>();
+    private SnapshotTransfers transfers;
+    /** What the stored log starts after. */
+    private SnapshotMeta snapshot;
+    private Staged staged;
+    private long snapshotsCreated;
+    private long snapshotsInstalled;
     private long rejectedEvents;
     private long invalidMessages;
     private boolean stopped;
 
-    private Node(NodeIdentity identity, HardStateStore hardState, RaftLogStore log, RaftNode raft,
-                 StateMachine stateMachine, Transport transport, NodeListener listener,
-                 int queueCapacity) {
+    private Node(StorageFileSystem fs, Path dataDirectory, Options options, NodeIdentity identity,
+                 HardStateStore hardState, RaftLogStore log, RaftNode raft, StateMachine stateMachine,
+                 StateMachineStore store, Transport transport, NodeListener listener, SnapshotMeta snapshot) {
+        this.fs = fs;
+        this.dataDirectory = dataDirectory;
+        this.options = options;
         this.identity = identity;
         this.hardState = hardState;
         this.log = log;
         this.raft = raft;
         this.stateMachine = stateMachine;
+        this.store = store;
         this.transport = transport;
         this.listener = listener;
-        this.queueCapacity = queueCapacity;
+        this.snapshot = snapshot;
     }
 
+    // ------------------------------------------------------------------ start
+
     /**
-     * Prepares an empty data directory for a node that has never run: writes its identity and
-     * its first hard state.
+     * Prepares an empty data directory for a plain node that has never run: writes its
+     * identity and its first hard state.
      */
     public static void initialize(StorageFileSystem fs, Path dataDirectory, NodeIdentity identity)
             throws IOException {
@@ -112,14 +159,30 @@ public final class Node implements Closeable {
     }
 
     /**
-     * Starts the node from its data directory.
+     * Prepares an empty data directory for a complete node that has never run: its first hard
+     * state, an empty state machine, and its identity.
      *
-     * <p>If the log is damaged, the node first makes its hard state say that it is in
-     * log-recovering mode and only then sets the damaged segments aside (section 3.3).
+     * @param config         the configuration the cluster starts with, the same on every node
+     *                       of a new cluster; empty for a node that is to join a cluster
+     * @param clusterVersion the cluster version the cluster starts with
+     */
+    public static void initialize(StorageFileSystem fs, Path dataDirectory, NodeIdentity identity,
+                                  ClusterConfig config, int clusterVersion) throws IOException {
+        fs.createDirectories(dataDirectory);
+        if (NodeIdentity.exists(fs, dataDirectory)) {
+            throw new IOException(dataDirectory + " holds a node already");
+        }
+        HardStateStore.initialize(fs, dataDirectory);
+        SnapshotMetaFile.write(fs, dataDirectory, SnapshotMeta.none(config));
+        StateMachineStore.initialize(fs, dataDirectory, config, clusterVersion);
+        // The identity comes last: a directory without it was never completely prepared.
+        identity.write(fs, dataDirectory);
+    }
+
+    /**
+     * Starts a plain node from its data directory, with a state machine of the caller.
      *
-     * @param initialConfig the configuration the cluster started with; an empty one for a
-     *                      node that is to join. (The state machine will hold the
-     *                      configuration of its snapshot once it stores one.)
+     * @param initialConfig the configuration the cluster started with
      * @param listener      is told what the core reports: answers to proposals, changes of role
      * @throws io.github.stefan_zobel.freyja.node.store.LostIdentityException if the node cannot
      *         know who it is or what it has promised (section 3.4)
@@ -129,8 +192,66 @@ public final class Node implements Closeable {
                             NodeListener listener) throws IOException {
         NodeIdentity identity = NodeIdentity.read(fs, dataDirectory);
         HardStateStore hardState = HardStateStore.open(fs, dataDirectory);
+        return start(fs, dataDirectory, options, identity, hardState, SnapshotMeta.none(initialConfig),
+                stateMachine, null, transport, listener);
+    }
+
+    /**
+     * Starts a complete node from its data directory.
+     *
+     * <p>An installation of a snapshot that a crash interrupted is completed first. If the log
+     * is damaged, the node makes its hard state say that it is in log-recovering mode and only
+     * then sets the damaged segments aside (section 3.3).
+     *
+     * @throws io.github.stefan_zobel.freyja.node.store.LostIdentityException if the node cannot
+     *         know who it is or what it has promised (section 3.4)
+     */
+    public static Node open(StorageFileSystem fs, Path dataDirectory, Options options,
+                            StateMachineStore.Options machine, Transport transport, NodeListener listener)
+            throws IOException {
+        NodeIdentity identity = NodeIdentity.read(fs, dataDirectory);
+        HardStateStore hardState = HardStateStore.open(fs, dataDirectory);
+        InstallIntent intent = InstallIntent.read(fs, dataDirectory);
+        if (intent != null) {
+            // Every step has no effect if it was done before the crash.
+            if (intent.replaceStateMachine()) {
+                StateMachineStore.adopt(fs, dataDirectory, intent.generation(), intent.meta(),
+                        intent.clusterVersion());
+            }
+            SnapshotMetaFile.write(fs, dataDirectory, intent.meta());
+            if (!intent.keepSuffix()) {
+                RaftLogStore.deleteSegments(fs, dataDirectory.resolve(RAFT_DIRECTORY));
+            }
+            InstallIntent.clear(fs, dataDirectory);
+        }
+        StateMachineStore store = StateMachineStore.open(fs, dataDirectory, machine);
+        boolean opened = false;
+        try {
+            SnapshotMeta snapshot = SnapshotMetaFile.read(fs, dataDirectory);
+            if (snapshot == null) {
+                // The file is lost. The state machine itself is a snapshot the log leads up
+                // to: the log gave up only entries that the state machine held durably.
+                snapshot = store.meta();
+                SnapshotMetaFile.write(fs, dataDirectory, snapshot);
+            }
+            Node node = start(fs, dataDirectory, options, identity, hardState, snapshot, store, store,
+                    transport, listener);
+            opened = true;
+            return node;
+        } finally {
+            if (!opened) {
+                store.close();
+            }
+        }
+    }
+
+    private static Node start(StorageFileSystem fs, Path dataDirectory, Options options, NodeIdentity identity,
+                              HardStateStore hardState, SnapshotMeta snapshot, StateMachine stateMachine,
+                              StateMachineStore store, Transport transport, NodeListener listener)
+            throws IOException {
+        long snapshotIndex = snapshot.lastIncludedIndex();
         RaftLogStore log = RaftLogStore.open(fs, dataDirectory.resolve(RAFT_DIRECTORY), options.segmentSize(),
-                0, initialConfig);
+                snapshotIndex, snapshot.config());
         boolean opened = false;
         try {
             // Every node gets its own jitter: with one seed for all, the election timers of
@@ -145,14 +266,23 @@ public final class Node implements Closeable {
             HardState stored = hardState.get();
             HardState start = damagedFrom == -1 ? stored : new HardState(stored.term(), stored.votedFor(), true,
                     stored.logEpoch(), stored.lostLogIndex(), stored.lostLogTerm());
-            RaftNode raft = RaftNode.create(config, new PersistedState(start, SnapshotMeta.none(initialConfig)),
-                    log, applied);
-            Node node = new Node(identity, hardState, log, raft, stateMachine, transport, listener,
-                    options.queueCapacity());
+            RaftNode raft = RaftNode.create(config, new PersistedState(start, snapshot), log, applied);
+            Node node = new Node(fs, dataDirectory, options, identity, hardState, log, raft, stateMachine, store,
+                    transport, listener, snapshot);
             if (damagedFrom != -1) {
-                raft.step(new RaftEvent.LogDamaged(damagedFrom));
+                // Entries that the snapshot covers are not missed, wherever the damage begins.
+                raft.step(new RaftEvent.LogDamaged(Math.max(damagedFrom, snapshotIndex + 1)));
                 node.drain();
                 log.quarantineDamaged();
+                if (log.lastIndex() < snapshotIndex) {
+                    // What is left ends before the snapshot: nothing of it is needed, and the
+                    // next entry to store is the one after the snapshot.
+                    log.reset(snapshotIndex, snapshot.config());
+                }
+            }
+            if (store != null) {
+                node.transfers = SnapshotTransfers.open(fs, dataDirectory, store, options.transfers(),
+                        node.new TransferHost());
             }
             opened = true;
             return node;
@@ -177,18 +307,25 @@ public final class Node implements Closeable {
      *         node, or does not fit into the queue is dropped
      */
     public boolean offer(byte[] message) {
-        MessageCodec.Envelope envelope;
         try {
-            envelope = MessageCodec.decode(message);
+            if (TransferCodec.isTransfer(message)) {
+                TransferCodec.Envelope envelope = TransferCodec.decode(message);
+                if (envelope.to() != identity.nodeId() || transfers == null) {
+                    invalidMessages++;
+                    return false;
+                }
+                return enqueue(envelope);
+            }
+            MessageCodec.Envelope envelope = MessageCodec.decode(message);
+            if (envelope.to() != identity.nodeId()) {
+                invalidMessages++;
+                return false;
+            }
+            return enqueue(new RaftEvent.MessageReceived(envelope.from(), envelope.message()));
         } catch (DecodeException e) {
             invalidMessages++;
             return false;
         }
-        if (envelope.to() != identity.nodeId()) {
-            invalidMessages++;
-            return false;
-        }
-        return enqueue(new RaftEvent.MessageReceived(envelope.from(), envelope.message()));
     }
 
     /** Hands an event of a client or an administrator to the core. */
@@ -196,12 +333,22 @@ public final class Node implements Closeable {
         return enqueue(event);
     }
 
-    private boolean enqueue(RaftEvent event) {
-        if (stopped || queue.size() >= queueCapacity) {
+    /**
+     * Asks the node to make its state machine durable and to shorten its log now, without
+     * keeping entries for followers.
+     *
+     * @return whether the request was accepted; a plain node has no snapshots
+     */
+    public boolean requestSnapshot() {
+        return store != null && enqueue(SNAPSHOT_REQUEST);
+    }
+
+    private boolean enqueue(Object item) {
+        if (stopped || queue.size() >= options.queueCapacity()) {
             rejectedEvents++;
             return false;
         }
-        queue.addLast(event);
+        queue.addLast(item);
         return true;
     }
 
@@ -217,58 +364,196 @@ public final class Node implements Closeable {
         if (stopped) {
             throw new IOException("the node has stopped after a storage failure");
         }
-        RaftEvent event = queue.pollFirst();
-        if (event == null) {
+        Object item = queue.pollFirst();
+        if (item == null) {
             return false;
         }
-        raft.step(event);
-        drain();
-        return true;
-    }
-
-    /** Does the work the core has ready, until it has none. */
-    private void drain() throws IOException {
         try {
-            while (raft.hasReady()) {
-                Ready ready = raft.takeReady();
-                if (ready.hasPersistentWork()) {
-                    if (ready.hardState() != null) {
-                        hardState.put(ready.hardState());
-                    }
-                    boolean logChanged = false;
-                    if (ready.truncateSuffixFrom() != -1) {
-                        log.truncateSuffix(ready.truncateSuffixFrom());
-                        logChanged = true;
-                    }
-                    if (!ready.entries().isEmpty()) {
-                        log.append(ready.entries());
-                        logChanged = true;
-                    }
-                    if (logChanged) {
-                        log.sync();
-                    }
-                    raft.step(new RaftEvent.Persisted(ready.sequence()));
+            if (item instanceof RaftEvent event) {
+                if (event instanceof RaftEvent.Tick && transfers != null) {
+                    transfers.tick();
                 }
-                for (Outbound outbound : ready.messages()) {
-                    transport.send(outbound.toNode(),
-                            MessageCodec.encode(identity.nodeId(), outbound.toNode(), outbound.message()));
-                }
-                if (ready.hasEntriesToApply()) {
-                    List<LogEntry> entries = log.entries(ready.applyFrom(), ready.applyTo() + 1, Integer.MAX_VALUE);
-                    List<CommandResult> results = stateMachine.apply(entries);
-                    for (int i = 0; i < entries.size(); i++) {
-                        listener.applied(entries.get(i), results.get(i));
-                    }
-                }
-                for (Notification note : ready.notifications()) {
-                    listener.notification(note);
-                }
+                raft.step(event);
+            } else if (item instanceof TransferCodec.Envelope envelope) {
+                transfers.handle(envelope.from(), envelope.message());
+            }
+            work();
+            if (item == SNAPSHOT_REQUEST) {
+                createSnapshot(0);
+            } else if (store != null && log.segmentCount() > 1
+                    && log.storedBytes() > options.snapshotLogBytes()
+                    && store.appliedIndex() - options.snapshotRetainEntries()
+                    >= snapshot.lastIncludedIndex() + Math.max(1, options.snapshotRetainEntries())) {
+                createSnapshot(options.snapshotRetainEntries());
+            }
+            if (staged != null) {
+                // The core gave no verdict on a received snapshot; it has no use for it.
+                store.discard(staged.generation());
+                staged = null;
             }
         } catch (IOException | RuntimeException e) {
             // Whatever failed, the state in memory may be ahead of the state on disk.
             stopped = true;
             queue.clear();
             throw e;
+        }
+        return true;
+    }
+
+    /** Does the work the core has ready, until it has none; a failure stops the node. */
+    private void drain() throws IOException {
+        try {
+            work();
+        } catch (IOException | RuntimeException e) {
+            stopped = true;
+            queue.clear();
+            throw e;
+        }
+    }
+
+    private void work() throws IOException {
+        while (raft.hasReady()) {
+            Ready ready = raft.takeReady();
+            if (ready.hasPersistentWork()) {
+                if (ready.hardState() != null) {
+                    hardState.put(ready.hardState());
+                }
+                boolean logChanged = false;
+                if (ready.truncateSuffixFrom() != -1) {
+                    log.truncateSuffix(ready.truncateSuffixFrom());
+                    logChanged = true;
+                }
+                if (!ready.entries().isEmpty()) {
+                    log.append(ready.entries());
+                    logChanged = true;
+                }
+                if (logChanged) {
+                    log.sync();
+                }
+                raft.step(new RaftEvent.Persisted(ready.sequence()));
+            }
+            for (Outbound outbound : ready.messages()) {
+                transport.send(outbound.toNode(),
+                        MessageCodec.encode(identity.nodeId(), outbound.toNode(), outbound.message()));
+            }
+            if (ready.hasEntriesToApply()) {
+                List<LogEntry> entries = log.entries(ready.applyFrom(), ready.applyTo() + 1, Integer.MAX_VALUE);
+                List<CommandResult> results = stateMachine.apply(entries);
+                for (int i = 0; i < entries.size(); i++) {
+                    listener.applied(entries.get(i), results.get(i));
+                }
+            }
+            for (Notification note : ready.notifications()) {
+                listener.notification(note);
+            }
+            if (ready.truncatePrefixThrough() != -1) {
+                // The file SNAPSHOT names this index or a later one already.
+                log.truncatePrefix(ready.truncatePrefixThrough());
+            }
+            for (SnapshotDirective directive : ready.snapshots()) {
+                switch (directive) {
+                    case SnapshotDirective.Send send -> {
+                        if (transfers == null) {
+                            raft.step(new RaftEvent.SnapshotSendFinished(send.toNode(), false));
+                        } else {
+                            transfers.send(send.toNode(), send.term());
+                        }
+                    }
+                    case SnapshotDirective.Install install -> install(install);
+                    case SnapshotDirective.Reject reject -> {
+                        if (staged != null && staged.offer().meta().equals(reject.meta())) {
+                            store.discard(staged.generation());
+                            staged = null;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ snapshots
+
+    /**
+     * Makes the state machine durable and lets the log start after an applied entry.
+     *
+     * @param retain how many applied entries the log keeps
+     */
+    private void createSnapshot(long retain) throws IOException {
+        // A node whose log was damaged can have applied more than its log holds.
+        long index = Math.min(store.appliedIndex(), log.lastIndex()) - retain;
+        if (index <= snapshot.lastIncludedIndex()) {
+            return;
+        }
+        // The log gives up only what the state machine holds durably: first the state
+        // machine, then the file that says where the log starts, then the log.
+        store.flush();
+        SnapshotMeta meta = raft.snapshotMeta(index);
+        SnapshotMetaFile.write(fs, dataDirectory, meta);
+        snapshot = meta;
+        snapshotsCreated++;
+        raft.step(new RaftEvent.SnapshotCreated(meta));
+        work();
+    }
+
+    /**
+     * Installs the received snapshot the core has decided for (section 5). The intent is
+     * durable before the first step and removed after the last, so a node that crashes in
+     * between completes the installation when it starts.
+     */
+    private void install(SnapshotDirective.Install install) throws IOException {
+        Staged received = staged;
+        SnapshotMeta meta = install.meta();
+        if (received == null || !received.offer().meta().equals(meta)) {
+            throw new IllegalStateException("no received snapshot for " + meta);
+        }
+        staged = null;
+        int clusterVersion = received.offer().clusterVersion();
+        new InstallIntent(meta, received.generation(), clusterVersion, install.keepSuffix(),
+                install.replaceStateMachine()).write(fs, dataDirectory);
+        if (install.replaceStateMachine()) {
+            store.install(received.generation(), meta, clusterVersion);
+        } else {
+            store.discard(received.generation());
+        }
+        SnapshotMetaFile.write(fs, dataDirectory, meta);
+        if (install.keepSuffix()) {
+            log.truncatePrefix(meta.lastIncludedIndex());
+        } else {
+            log.reset(meta.lastIncludedIndex(), meta.config());
+        }
+        InstallIntent.clear(fs, dataDirectory);
+        snapshot = meta;
+        snapshotsInstalled++;
+        raft.step(new RaftEvent.SnapshotInstalled(meta));
+        if (install.replaceStateMachine()) {
+            listener.snapshotInstalled(meta);
+        }
+    }
+
+    /** What the snapshot transfers need from the node. */
+    private final class TransferHost implements SnapshotTransfers.Host {
+
+        @Override
+        public void send(int toNode, TransferMessage message) {
+            transport.send(toNode, TransferCodec.encode(identity.nodeId(), toNode, message));
+        }
+
+        @Override
+        public boolean wanted(int fromNode, TransferMessage.Offer offer) {
+            ProtocolState state = raft.view();
+            return staged == null && offer.leaderTerm() >= state.term()
+                    && offer.meta().lastIncludedIndex() > state.commitIndex();
+        }
+
+        @Override
+        public void received(int fromNode, TransferMessage.Offer offer, long generation) {
+            staged = new Staged(offer, generation);
+            raft.step(new RaftEvent.SnapshotOffered(fromNode, offer.leaderTerm(), offer.meta()));
+        }
+
+        @Override
+        public void sendFinished(int toNode, boolean success) {
+            raft.step(new RaftEvent.SnapshotSendFinished(toNode, success));
         }
     }
 
@@ -281,6 +566,41 @@ public final class Node implements Closeable {
     /** The protocol state of the Raft core. */
     public ProtocolState view() {
         return raft.view();
+    }
+
+    /** The generations of the state machine; {@code null} for a plain node. */
+    public StateMachineStore store() {
+        return store;
+    }
+
+    /** What the stored log starts after. */
+    public SnapshotMeta snapshot() {
+        return snapshot;
+    }
+
+    /** The snapshot transfers; {@code null} for a plain node. */
+    public SnapshotTransfers transfers() {
+        return transfers;
+    }
+
+    /** How often the node has shortened its log after making the state machine durable. */
+    public long snapshotsCreated() {
+        return snapshotsCreated;
+    }
+
+    /** How often the node has installed a snapshot of another node. */
+    public long snapshotsInstalled() {
+        return snapshotsInstalled;
+    }
+
+    /** The first index the log store holds. */
+    public long firstStoredIndex() {
+        return log.firstIndex();
+    }
+
+    /** The number of segment files of the log. */
+    public int logSegmentCount() {
+        return log.segmentCount();
     }
 
     /** The number of events that wait for the event loop. */
@@ -303,10 +623,33 @@ public final class Node implements Closeable {
         return stopped;
     }
 
+    /** Closes the log, the transfers, and the state machine if the node owns it. */
     @Override
     public void close() throws IOException {
         stopped = true;
         queue.clear();
-        log.close();
+        IOException first = null;
+        try {
+            if (transfers != null) {
+                transfers.close();
+            }
+        } catch (IOException e) {
+            first = e;
+        }
+        try {
+            log.close();
+        } catch (IOException e) {
+            first = first == null ? e : first;
+        }
+        try {
+            if (store != null) {
+                store.close();
+            }
+        } catch (IOException e) {
+            first = first == null ? e : first;
+        }
+        if (first != null) {
+            throw first;
+        }
     }
 }

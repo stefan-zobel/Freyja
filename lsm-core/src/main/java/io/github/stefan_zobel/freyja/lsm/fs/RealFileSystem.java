@@ -116,6 +116,14 @@ public final class RealFileSystem implements StorageFileSystem {
     }
 
     @Override
+    public void deleteDirectory(Path dir) throws IOException {
+        if (!Files.isDirectory(dir)) {
+            throw new NoSuchFileException(dir.toString());
+        }
+        delete(dir);
+    }
+
+    @Override
     public void syncDirectory(Path dir) throws IOException {
         if (WINDOWS) {
             return; // Windows offers no directory sync.

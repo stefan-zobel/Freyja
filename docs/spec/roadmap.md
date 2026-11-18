@@ -59,9 +59,10 @@ Rules:
   transfer. Replica repair. Overload rules.
   - Done so far: commands and results with their codec (`kv-common`), the state machine
     with namespaces, applied index, configuration, sessions, and conditional batches.
-    Alarms and the cluster version in the replicated state.
+    Alarms and the cluster version in the replicated state. Generations of the state
+    machine, shortening of the log, snapshot transfer and crash-safe installation.
     Open: raising the alarm from the quota and from low space, reverse scans (the engine
-    iterates forward only), snapshots, repair, overload.
+    iterates forward only), repair of a damaged state machine, overload.
 - **C3.** Whole-system simulation with all faults and the reachability probes. Protected
   `SystemInvariants` file. Trace validation of whole-system traces.
 - **C4.** Real transport with virtual threads. Wire protocol with handshake. `kv-client`.

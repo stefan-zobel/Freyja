@@ -26,7 +26,8 @@ import io.github.stefan_zobel.freyja.raft.RaftMessage.VoteResponse;
  * <pre>
  * version   uint8    1
  * type      uint8    1 RequestVote, 2 VoteResponse, 3 AppendEntries, 4 AppendResponse,
- *                    5 Heartbeat, 6 HeartbeatResponse, 7 TimeoutNow
+ *                    5 Heartbeat, 6 HeartbeatResponse, 7 TimeoutNow; the types from 32 on
+ *                    belong to the transfer of snapshots ({@link TransferCodec})
  * from      uint32   the sending node
  * to        uint32   the node the message is meant for
  * term      uint64
@@ -41,8 +42,8 @@ import io.github.stefan_zobel.freyja.raft.RaftMessage.VoteResponse;
 public final class MessageCodec {
 
     public static final int VERSION = 1;
-    private static final int HEAD = 1 + 1 + 4 + 4 + 8;
-    private static final int CHECKSUM = 4;
+    static final int HEAD = 1 + 1 + 4 + 4 + 8;
+    static final int CHECKSUM = 4;
 
     /** A decoded message with its sender and its addressee. */
     public record Envelope(int from, int to, RaftMessage message) {
@@ -117,6 +118,14 @@ public final class MessageCodec {
     }
 
     /**
+     * The node a frame is meant for, without any check of the frame; -1 if the frame is too
+     * short to say. For whoever routes frames without reading them.
+     */
+    public static int addressee(byte[] frame) {
+        return frame.length < HEAD ? -1 : LittleEndian.getInt32(frame, 6);
+    }
+
+    /**
      * @throws DecodeException if the bytes are not one valid message of this format version
      */
     public static Envelope decode(byte[] frame) {
@@ -178,7 +187,7 @@ public final class MessageCodec {
         return new Envelope(from, to, message);
     }
 
-    private static final class Writer {
+    static final class Writer {
         final ByteArrayOutputStream out = new ByteArrayOutputStream(64);
         private final byte[] scratch = new byte[8];
 
@@ -205,7 +214,7 @@ public final class MessageCodec {
         }
     }
 
-    private static final class Reader {
+    static final class Reader {
         private final byte[] bytes;
         private final int end;
         private int at;
