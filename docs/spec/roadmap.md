@@ -57,6 +57,9 @@ Rules:
 - **C2.** State machine on `lsm-core`: namespaces, applied index, sessions, conditional
   batches, quota and alarms, cluster version. Checkpoint snapshots with chunked, resumable
   transfer. Replica repair. Overload rules.
+  - Done so far: commands and results with their codec (`kv-common`), the state machine
+    with namespaces, applied index, configuration, sessions, and conditional batches.
+    Open: quota and alarms, cluster version, reverse scans, snapshots, repair, overload.
 - **C3.** Whole-system simulation with all faults and the reachability probes. Protected
   `SystemInvariants` file. Trace validation of whole-system traces.
 - **C4.** Real transport with virtual threads. Wire protocol with handshake. `kv-client`.

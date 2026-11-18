@@ -186,6 +186,19 @@ no leader can be elected. Recovery then is a manual, explicitly unsafe procedure
   that wrote them.
 - **System state:** applied index and term, cluster configuration, cluster version
   (`operations.md`), session table, alarms.
+- System keys (all integers little-endian):
+  - `0x00 'm'`: applied index, applied term, state-machine time, time of the last session
+    sweep (`uint64` each).
+  - `0x00 'c'`: index of the CONFIG entry (`uint64`), then the encoded configuration. Absent
+    until the first CONFIG entry is applied; until then the configuration the cluster
+    started with counts.
+  - `0x00 's'` + session id (`uint64`): last activity, last sequence number (`uint64` each),
+    then the encoded result of the command with that sequence number.
+- The state is a function of the applied entries alone. No clock, no random number, and no
+  local circumstance of a node enters it. In particular, the results of a batch do not depend
+  on how the committed entries were cut into batches.
+- An entry whose bytes are not a valid command changes nothing but the applied index and is
+  answered with `INVALID`. Every node decides that alike.
 - The Raft log is truncated only through the index of a completed checkpoint, never through
   an index that is merely applied.
 
@@ -196,7 +209,25 @@ no leader can be elected. Recovery then is a manual, explicitly unsafe procedure
   batch applied otherwise. Conditions per key: exists, does not exist, value equals,
   `ModIndex` equals.
 - Session commands: register, keep alive, close.
-- Limits: key 64 KiB, value 1 MiB, one request 4 MiB.
+- Limits: key 64 KiB, value 1 MiB, one request 4 MiB. A key is not empty. A command that
+  breaks a limit is applied as a whole or not at all: it fails with `INVALID`.
+- Commands inside one batch of entries see the effects of the commands before them.
+- Encoding of a command in the log: version (`uint8`, 1), time stamp of the leader in
+  milliseconds (`uint64`), type (`uint8`: 1 write, 2 conditional, 3 register session,
+  4 keep alive, 5 close session), body.
+  - Write: session id, sequence number (`uint64` each), mutations.
+  - Conditional: session id, sequence number, conditions, mutations if all hold, mutations
+    otherwise.
+  - Keep alive, close session: session id.
+  - A list is a count (`uint32`) and its elements; a byte string is a length (`uint32`) and
+    its bytes. Mutation: kind (`uint8`: 1 put, 2 delete), key, and for a put the value.
+    Condition: kind (`uint8`: 0 exists, 1 does not exist, 2 value equals, 3 `ModIndex`
+    equals), key, value, `ModIndex` (`uint64`).
+- Encoding of a result: kind (`uint8`: 1 written, 2 conditional applied, 3 session
+  registered, 4 session ok, 5 failed), then for kind 2 whether the conditions held
+  (`uint8`), for kind 3 the session id (`uint64`), for kind 5 the failure (`uint8`:
+  0 no such session, 1 sequence too old, 2 no space, 3 invalid).
+- The command types and their codec live in `kv-common`, because the client needs them too.
 
 ### 4.2 Sessions and Exactly-Once
 
@@ -209,6 +240,14 @@ no leader can be elected. Recovery then is a manual, explicitly unsafe procedure
 - A session expires when state-machine time exceeds its last activity by the session timeout
   (default 60 s). Commands for an expired session fail with a dedicated error; the client
   must not retry them blindly.
+- A command whose sequence number is below the highest applied one of its session fails
+  with `SEQUENCE_TOO_OLD`: its answer is no longer kept. A client therefore has at most one
+  command outstanding per session.
+- An expired session is closed when a command names it, and by a sweep over all sessions
+  that runs when state-machine time has advanced by a quarter of the session timeout since
+  the last sweep. Both depend only on applied entries.
+- The session timeout is part of the configuration of the cluster and must be the same on
+  all nodes.
 
 ### 4.3 Reads
 

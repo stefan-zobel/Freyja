@@ -16,6 +16,7 @@ import java.util.Random;
 
 import org.junit.jupiter.api.Test;
 
+import io.github.stefan_zobel.freyja.common.kv.CommandResult;
 import io.github.stefan_zobel.freyja.lsm.fs.FaultyFileSystem;
 import io.github.stefan_zobel.freyja.lsm.fs.MemoryFileSystem;
 import io.github.stefan_zobel.freyja.lsm.fs.StorageFileSystem;
@@ -54,11 +55,16 @@ class NodeTest {
         }
 
         @Override
-        public void apply(LogEntry entry) {
-            assertEquals(index + 1, entry.index(), "entries are applied in order, each once");
-            index = entry.index();
-            applied.add(entry.index() + "@" + entry.term() + ":" + entry.type() + ":"
-                    + Arrays.hashCode(entry.payload()));
+        public List<CommandResult> apply(List<LogEntry> entries) {
+            List<CommandResult> results = new ArrayList<>();
+            for (LogEntry entry : entries) {
+                assertEquals(index + 1, entry.index(), "entries are applied in order, each once");
+                index = entry.index();
+                applied.add(entry.index() + "@" + entry.term() + ":" + entry.type() + ":"
+                        + Arrays.hashCode(entry.payload()));
+                results.add(null);
+            }
+            return results;
         }
     }
 

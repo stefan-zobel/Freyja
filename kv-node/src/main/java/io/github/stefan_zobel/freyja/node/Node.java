@@ -4,9 +4,10 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
-import java.util.function.Consumer;
+import java.util.List;
 
 import io.github.stefan_zobel.freyja.common.DecodeException;
+import io.github.stefan_zobel.freyja.common.kv.CommandResult;
 import io.github.stefan_zobel.freyja.lsm.fs.StorageFileSystem;
 import io.github.stefan_zobel.freyja.node.raftlog.RaftLogStore;
 import io.github.stefan_zobel.freyja.node.store.HardStateStore;
@@ -75,7 +76,7 @@ public final class Node implements Closeable {
     private final RaftNode raft;
     private final StateMachine stateMachine;
     private final Transport transport;
-    private final Consumer<Notification> listener;
+    private final NodeListener listener;
     private final ArrayDeque<RaftEvent> queue = new ArrayDeque<>();
     private final int queueCapacity;
     private long rejectedEvents;
@@ -83,7 +84,7 @@ public final class Node implements Closeable {
     private boolean stopped;
 
     private Node(NodeIdentity identity, HardStateStore hardState, RaftLogStore log, RaftNode raft,
-                 StateMachine stateMachine, Transport transport, Consumer<Notification> listener,
+                 StateMachine stateMachine, Transport transport, NodeListener listener,
                  int queueCapacity) {
         this.identity = identity;
         this.hardState = hardState;
@@ -125,7 +126,7 @@ public final class Node implements Closeable {
      */
     public static Node open(StorageFileSystem fs, Path dataDirectory, Options options,
                             ClusterConfig initialConfig, StateMachine stateMachine, Transport transport,
-                            Consumer<Notification> listener) throws IOException {
+                            NodeListener listener) throws IOException {
         NodeIdentity identity = NodeIdentity.read(fs, dataDirectory);
         HardStateStore hardState = HardStateStore.open(fs, dataDirectory);
         RaftLogStore log = RaftLogStore.open(fs, dataDirectory.resolve(RAFT_DIRECTORY), options.segmentSize(),
@@ -253,12 +254,14 @@ public final class Node implements Closeable {
                             MessageCodec.encode(identity.nodeId(), outbound.toNode(), outbound.message()));
                 }
                 if (ready.hasEntriesToApply()) {
-                    for (LogEntry entry : log.entries(ready.applyFrom(), ready.applyTo() + 1, Integer.MAX_VALUE)) {
-                        stateMachine.apply(entry);
+                    List<LogEntry> entries = log.entries(ready.applyFrom(), ready.applyTo() + 1, Integer.MAX_VALUE);
+                    List<CommandResult> results = stateMachine.apply(entries);
+                    for (int i = 0; i < entries.size(); i++) {
+                        listener.applied(entries.get(i), results.get(i));
                     }
                 }
                 for (Notification note : ready.notifications()) {
-                    listener.accept(note);
+                    listener.notification(note);
                 }
             }
         } catch (IOException | RuntimeException e) {
