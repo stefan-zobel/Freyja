@@ -54,6 +54,16 @@ class LogTest {
         return dir.resolve("log-" + (nextName++));
     }
 
+    /**
+     * Deletes a file for good. The file system keeps a deleted file until the removal of its
+     * name is durable, because a crash before that would bring it back; a test that writes
+     * many files would hold all of them in memory.
+     */
+    private void discard(Path path) throws IOException {
+        fs.delete(path);
+        fs.syncDirectory(dir);
+    }
+
     private byte[] readAll(Path path) throws IOException {
         try (ReadableFile file = fs.open(path)) {
             byte[] bytes = new byte[(int) file.size()];
@@ -311,7 +321,7 @@ class LogTest {
         if (expectSyncPoint) {
             assertEquals(syncedLength, replay.syncPoints.get(0)[1], what);
         }
-        fs.delete(path);
+        discard(path);
     }
 
     /** In-block offsets a writer can be at: 0, and 7 or more bytes into a block. */
@@ -452,7 +462,7 @@ class LogTest {
             for (int i = 0; i < replay.syncPoints.size(); i++) {
                 assertEquals(syncedLengths.get(i), replay.syncPoints.get(i)[1]);
             }
-            fs.delete(path);
+            discard(path);
         });
     }
 
@@ -592,7 +602,7 @@ class LogTest {
                     "bit " + bit);
             assertTrue(e.offset() <= (bit >>> 3), "reported offset " + e.offset() + " for byte " + (bit >>> 3));
             assertThrows(CorruptionException.class, () -> replay(path, true));
-            fs.delete(path);
+            discard(path);
         }
     }
 
@@ -757,7 +767,7 @@ class LogTest {
     @Test
     void aWriterNeedsAnEmptyFile() throws IOException {
         Path path = writeBytes(new byte[] {1});
-        fs.delete(path);
+        discard(path);
         WritableFile file = fs.create(path);
         file.append(new byte[] {1}, 0, 1);
         assertThrows(IllegalArgumentException.class, () -> new LogWriter(file, 1, FileKind.WAL));

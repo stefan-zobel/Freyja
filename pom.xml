@@ -55,13 +55,16 @@
                     </configuration>
                 </plugin>
 
-                <!-- Run tests with preview features enabled as well -->
+                <!-- Run tests with preview features enabled as well. The heap is fixed, so that
+                     a test needs the same memory on every machine: without the option the JVM
+                     takes a quarter of the RAM, which differs between a developer's machine
+                     and a hosted CI runner. -->
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>3.6.0</version>
                     <configuration>
-                        <argLine>--enable-preview</argLine>
+                        <argLine>--enable-preview -Xmx1700m</argLine>
                     </configuration>
                 </plugin>
 

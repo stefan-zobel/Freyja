@@ -12,6 +12,8 @@ No milestone is complete without its oracles passing.
 - The default `./mvnw test` runs a bounded number of seeds and finishes in a few minutes.
   Separate profiles run the large counts.
 - Test dependencies: JUnit. The benchmark module may use JMH. Nothing else.
+- Tests run with a fixed heap of 1,700 MB on every machine (the `argLine` of the build), so
+  that a test that passes on one machine does not run out of memory on a smaller one.
 
 ## 2. Component Oracles (fast, first line)
 
