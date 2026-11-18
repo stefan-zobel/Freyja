@@ -198,8 +198,10 @@ public final class RaftNode {
             throw new IllegalArgumentException("applied index " + appliedIndex + " outside "
                     + snapshotIndex + ".." + durableIndex);
         }
-        // Whatever was applied was committed.
-        this.commitIndex = Math.min(appliedIndex, durableIndex);
+        // Whatever was applied was committed. A node in log-recovering mode starts from what
+        // its snapshot covers: its log may end before what it has applied, and it learns
+        // from the leader how far the log it holds now is committed.
+        this.commitIndex = logRecovering ? snapshotIndex : appliedIndex;
         this.applyOffered = appliedIndex;
         this.prngState = config.seed();
         // The configuration in force is the newest one in the log, committed or not.
@@ -313,7 +315,7 @@ public final class RaftNode {
     /** A read-only view of the protocol state. */
     public ProtocolState view() {
         return new ProtocolState(id, term, role, votedFor, leaderId, lastIndex(), lastTerm(),
-                durableIndex, commitIndex, cluster, logRecovering);
+                durableIndex, commitIndex, cluster, logRecovering, logEpoch);
     }
 
     // ------------------------------------------------------------------ the log
@@ -1067,7 +1069,7 @@ public final class RaftNode {
 
     private void handleTimeoutNow(int from, TimeoutNow message) {
         // Only a voter that follows the sender in this term acts on it.
-        if (role == Role.FOLLOWER && voter && leaderId == from) {
+        if (role == Role.FOLLOWER && voter && !logRecovering && leaderId == from) {
             becomeCandidate(true);
         }
     }

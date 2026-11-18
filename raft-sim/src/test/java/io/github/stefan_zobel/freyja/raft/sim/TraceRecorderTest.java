@@ -155,7 +155,7 @@ class TraceRecorderTest {
             String type = (String) event.get("type");
             eventTypes.add(type);
             Map<String, Object> state = object(step.get("state"));
-            assertEquals(11, state.size());
+            assertEquals(12, state.size());
             long term = (Long) state.get("term");
             if (!type.equals("Restart")) {
                 assertTrue(term >= lastTerm.getOrDefault(node, 0L), "the term of a running node never goes back");

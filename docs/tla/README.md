@@ -2,12 +2,24 @@
 
 | File | Content |
 |---|---|
-| `Raft.tla` | Elections with PreVote, log replication, and asynchronous persistence |
-| `Raft.cfg` | Exhaustive check of three nodes within small bounds |
+| `Raft.tla` | Elections with PreVote, log replication with asynchronous persistence, membership change with learners, leadership transfer, log-recovering mode |
+| `Raft.cfg` | Exhaustive check of three voters within small bounds, without membership change and log damage |
+| `RaftMembership.cfg` | One voter and two nodes that may join, with one log damage; a bounded search, not exhaustive |
 | `RaftTrace.tla`, `RaftTrace.cfg` | Trace validation: constrains `Raft` to one recorded run |
 
-The model covers what milestone B2 of the roadmap names. ReadIndex, membership change,
-leadership transfer, and the log-recovering mode are added with their milestones.
+ReadIndex and snapshots are not in the model yet.
+
+**State of the checks (B3):**
+
+- `Raft.cfg`: exhaustive, no error.
+- `RaftMembership.cfg`: a breadth-first search of nine minutes (14.7 million distinct states,
+  depth 14) found no error. It did not finish. A run with smaller bounds that was meant to
+  be exhaustive was stopped by the machine for lack of memory and has to be repeated.
+- Trace validation: the runs under the full fault model and all mutated runs behave as
+  required with the extended model. The runs with membership changes, transfers, and log
+  damage (`trace-validation-membership`) have not been validated yet: that run was stopped
+  for lack of memory as well. Until it has passed, the mapping of those events (section 3.2)
+  is untested.
 
 TLC is an external development tool and not a dependency of the build. The commands below
 expect `tla2tools.jar` in `tools/` of the repository directory (which is not under version
@@ -30,8 +42,18 @@ control).
   more behaviors than the implementation has, which is the safe direction.
 - A log is a sequence of terms. Payloads do not matter to the protocol.
 
-Checked invariants: `ElectionSafety`, `LogMatching`, `StateMachineSafety`,
-`CommittedIsDurable` (a committed entry is durable on a majority), `NodeSanity`.
+- A log entry is a term and, for a `CONFIG` entry, the complete new configuration. The
+  configuration in force is the newest one in the log.
+- Log damage cuts the log of a node, also its durable log and the snapshots on their way.
+  The damage marks itself (it is found again at every start), so the log-recovering state
+  counts as durable from the moment of the damage. Damage is allowed only while a majority
+  of the voters holds an intact log.
+
+Checked invariants: `ElectionSafety`, `LogMatching`, `StateMachineSafety` (no two nodes ever
+see different entries as committed at an index), `LeaderCompleteness` (an entry seen as
+committed is in the log of every leader of a later term), `OneChangeAtATime`,
+`CommittedIsDurable` (without damage and membership change, a committed entry is durable on
+a majority), `NodeSanity`.
 
 ## 2. Model Checking
 
@@ -112,7 +134,12 @@ state of the node does not change). An event that fits no row fails validation.
 | `Persisted` | `PersistK` with the number of writes covered |
 | `ClientPropose` | `Propose` if accepted, else none |
 | `ClientReadIndex` | none (ReadIndex is not in the model yet) |
+| `ProposeConfigChange` | `ProposeCfg` if accepted, else none |
+| `TransferLeadership` | none (the order to the target is a message) |
+| `MessageReceived` with the order to start an election (`TimeoutNow`) | `RecvTimeoutNow`, or none if the node ignores it |
+| `LogDamaged` | the damage of the model (`DamageNode`) at the reported index; none if the index is beyond the log |
 | restart of a node | `Restart` |
+| restart of a node that finds its damage again | `Restart` (one step: for the model the damage was durable from the moment it happened; the write of the repeated report is not counted) |
 
 Where the table allows "none", `RaftTrace` allows it only if the implementation does not act
 on the message in the state of the receiver (`ActsOn`). Otherwise a step that changes only
@@ -130,5 +157,9 @@ and a leader advances its commit index within `RecvAppendResponse` or `PersistK`
   recorded values or makes a released message invalid.
 - At a restart the trace does not say how many writes on their way had reached the disk. TLC
   tries every number that gives the recorded state.
+- A node that joins reports the empty configuration until the first `CONFIG` entry reaches
+  it; the model has the initial configuration there. The comparison allows for that.
+- Whether a majority holds an intact log when damage is injected is not checked in trace
+  validation; it is a condition on whoever injects the damage, not on a node.
 - Heartbeat answers and ReadIndex are outside the model. Their messages are accepted as they
   are.

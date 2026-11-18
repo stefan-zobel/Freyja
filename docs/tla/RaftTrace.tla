@@ -19,9 +19,9 @@ EXTENDS Raft, TraceData
 
 VARIABLE pos        \* the step of the trace to take next
 
-tvars == <<st, msgs, elected, pos>>
+tvars == <<st, msgs, elected, chosen, damages, pos>>
 
-Stutter == UNCHANGED <<st, elected>>
+Stutter == UNCHANGED <<st, elected, chosen, damages>>
 
 \* The recorded state of the node after the step.
 Matches(e) ==
@@ -33,6 +33,12 @@ Matches(e) ==
        /\ LastTerm(n.log) = e.lterm
        /\ n.commit = e.commit
        /\ Agree(n.d.log, n.log) = e.durable
+       /\ n.rec = e.rec
+       /\ n.epoch = e.epoch
+       \* A node that joins knows of no configuration before the first CONFIG entry reaches it.
+       /\ IF CfgIndex(n.log) = 0 /\ e.node \notin InitVoters
+          THEN e.voters = {} /\ e.learners = {}
+          ELSE CfgOf(n.log) = [v |-> e.voters, l |-> e.learners]
 
 \* A promise that waited for several snapshots is backed by one of them.
 ValidRelease(m, e) ==
@@ -53,7 +59,7 @@ ActsOn(m) ==
                               \/ ~(m.pre /\ m.granted) /\ m.term > s.term
          [] m.type = "AE"  -> m.term >= s.term
          [] m.type = "HB"  -> m.term >= s.term
-         [] m.type = "AER" -> (m.ok /\ s.role = "L" /\ m.term = s.term) \/ m.term > s.term
+         [] m.type = "AER" -> (s.role = "L" /\ m.term = s.term) \/ m.term > s.term
          [] m.type = "HBR" -> m.term > s.term
          [] OTHER -> FALSE
 
@@ -63,16 +69,25 @@ StepOf(e) ==
               \* A node that starts a pre-vote asks the others; a single node has no one to ask.
               IF \E m \in e.rel : m.type = "RV" /\ m.pre
               THEN Timeout(i)
-              ELSE StepDown(i) \/ Stutter \/ (Quorum({i}) /\ Timeout(i))
+              ELSE StepDown(i) \/ Stutter \/ (QuorumOf({i}, Voters(st[i])) /\ Timeout(i))
          [] e.ev = "Recv" ->
               /\ e.msg \in msgs
               /\ e.msg.to = i
               /\ IF ActsOn(e.msg) THEN Receive(e.msg)
-                 ELSE IF e.msg.type = "RV" /\ ~e.msg.pre THEN Receive(e.msg) \/ Stutter
+                 ELSE IF (e.msg.type = "RV" /\ ~e.msg.pre) \/ e.msg.type = "TN"
+                 THEN Receive(e.msg) \/ Stutter
                  ELSE Stutter
          [] e.ev = "Persist" -> IF e.k = 0 THEN Stutter ELSE PersistK(i, e.k)
          [] e.ev = "Propose" -> Propose(i) \/ Stutter
          [] e.ev = "Read"    -> Stutter
+         [] e.ev = "Config"  -> ProposeCfg(i) \/ Stutter
+         [] e.ev = "Transfer" -> Stutter
+         \* Damage beyond the log changes nothing. Whether a majority is intact is the
+         \* business of whoever injects the damage, not of the node.
+         [] e.ev = "Damage"  -> IF e.k > Len(st[i].log) THEN Stutter
+                                ELSE /\ st' = [st EXCEPT ![i] = DamageNode(st[i], e.k)]
+                                     /\ damages' = damages + 1
+                                     /\ UNCHANGED <<elected, chosen>>
          [] e.ev = "Restart" -> Restart(i)
 
 TraceInit == Init /\ pos = 1

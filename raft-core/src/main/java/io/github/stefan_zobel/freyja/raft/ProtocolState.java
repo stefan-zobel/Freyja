@@ -19,5 +19,6 @@ public record ProtocolState(
         long durableIndex,
         long commitIndex,
         ClusterConfig config,
-        boolean logRecovering) {
+        boolean logRecovering,
+        long logEpoch) {
 }

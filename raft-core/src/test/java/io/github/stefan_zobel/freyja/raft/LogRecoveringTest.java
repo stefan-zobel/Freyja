@@ -198,7 +198,7 @@ class LogRecoveringTest {
         node.step(new LogDamaged(3));
         node.restart();
         assertTrue(node.view().logRecovering());
-        assertEquals(2, node.view().commitIndex());
+        assertEquals(0, node.view().commitIndex(), "it learns from the leader what is committed");
         assertEquals(4, node.applied.size());
 
         TestNode.MemoryLog empty = new TestNode.MemoryLog();

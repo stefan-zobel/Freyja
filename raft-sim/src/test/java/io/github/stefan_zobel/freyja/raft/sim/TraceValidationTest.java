@@ -10,6 +10,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
@@ -18,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import io.github.stefan_zobel.freyja.common.testing.Seeds;
+import io.github.stefan_zobel.freyja.raft.ClusterConfig;
 
 /**
  * Trace validation against the TLA+ model (docs/spec/verification.md, section 2.7): TLC must
@@ -113,7 +116,12 @@ class TraceValidationTest {
 
     private static TlaTraceWriter record(SimOptions options, long millis) {
         Simulation sim = new Simulation(options);
-        TlaTraceWriter writer = new TlaTraceWriter(options.nodes());
+        Set<Integer> voters = new TreeSet<>();
+        for (int i = 0; i < options.nodes(); i++) {
+            voters.add(i);
+        }
+        TlaTraceWriter writer = new TlaTraceWriter(options.nodes() + options.spareNodes(),
+                new ClusterConfig(voters, Set.of()));
         sim.setStepListener(writer);
         sim.run(millis);
         return writer;
@@ -131,6 +139,22 @@ class TraceValidationTest {
                 steps.subList(MAX_STEPS, steps.size()).clear();
             }
             Verdict verdict = validate("seed-" + seed, trace);
+            assertTrue(verdict.accepted(), "seed " + seed + ", " + verdict.steps() + " steps: " + verdict.reason());
+            validated[0] += verdict.steps();
+        });
+        assertTrue(validated[0] > 5_000, "steps validated: " + validated[0]);
+    }
+
+    @Test
+    void tracesOfRunsWithMembershipChangesTransfersAndLogDamageAreBehaviorsOfTheModel() {
+        int[] validated = new int[1];
+        Seeds.forEach(TraceValidationTest.class, "trace-validation-membership", 10, seed -> {
+            TlaTraceWriter trace = record(SimOptions.reconfiguring(seed), 2_500);
+            List<TlaTraceWriter.Step> steps = trace.steps();
+            if (steps.size() > MAX_STEPS) {
+                steps.subList(MAX_STEPS, steps.size()).clear();
+            }
+            Verdict verdict = validate("membership-seed-" + seed, trace);
             assertTrue(verdict.accepted(), "seed " + seed + ", " + verdict.steps() + " steps: " + verdict.reason());
             validated[0] += verdict.steps();
         });

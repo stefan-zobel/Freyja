@@ -140,6 +140,7 @@ public final class TraceRecorder implements Simulation.StepListener {
                 .append(",\"voters\":").append(ids(state.config().voters()))
                 .append(",\"learners\":").append(ids(state.config().learners()))
                 .append(",\"logRecovering\":").append(state.logRecovering())
+                .append(",\"logEpoch\":").append(state.logEpoch())
                 .append('}');
     }
 

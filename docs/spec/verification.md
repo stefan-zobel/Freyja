@@ -220,6 +220,10 @@ the two.
     term, and a vote granted without comparing logs. These two are covered by unit tests of
     the core and by the simulator.
   - The variants are produced by hand when the model changes.
+- **State of the model for membership change, transfer, and log-recovering mode:** see
+  `docs/tla/README.md`. The exhaustive check covers three voters without these features; the
+  configuration with them has only been searched for a limited time, and the traces of runs
+  with them have not been validated yet. Both are open items of milestone B3.
 - TLC is an external development tool, not a dependency. Trace validation runs in its own
   profile (`-Ptrace-validation`), not in the default `./mvnw test`, on a fixed set of seeds
   plus the failing-seed corpus. The profile expects `tla2tools.jar` in `tools/` of the

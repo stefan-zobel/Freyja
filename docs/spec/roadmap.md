@@ -41,6 +41,8 @@ Rules:
   elections and replication. Trace recording and trace validation with mutation tests.
 - **B3.** Membership change with learners. Leadership transfer. Log-recovering mode. TLA+
   model and trace mapping extended to these parts.
+  - Open: the trace validation of runs with these parts, and an exhaustive check of a
+    configuration with them (`docs/tla/README.md`).
 - **B4.** Log compaction and snapshot directives, verified in the simulator with an in-memory
   state machine.
 

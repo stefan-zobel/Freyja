@@ -8,6 +8,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import io.github.stefan_zobel.freyja.raft.ClusterConfig;
+import io.github.stefan_zobel.freyja.raft.EntryType;
 import io.github.stefan_zobel.freyja.raft.HardState;
 import io.github.stefan_zobel.freyja.raft.LogEntry;
 import io.github.stefan_zobel.freyja.raft.Outbound;
@@ -37,7 +39,10 @@ public final class TlaTraceWriter implements Simulation.StepListener {
         public int node;
         /** Tick, Recv, Persist, Propose, Read, or Restart. */
         public String event;
-        /** For Persist: the number of writes that became durable. */
+        /**
+         * For Persist: the number of writes that became durable. For Damage: the first index
+         * that cannot be read.
+         */
         public int persisted;
         /** For Recv: the message as a TLA+ record. */
         public String message = "[type |-> \"none\"]";
@@ -48,17 +53,30 @@ public final class TlaTraceWriter implements Simulation.StepListener {
         public long lastLogTerm;
         public long commitIndex;
         public long durableIndex;
+        /** The voters and learners of the configuration in force, as TLA+ sets. */
+        public String voters = "{}";
+        public String learners = "{}";
+        public boolean logRecovering;
+        public long logEpoch;
         /** The released messages as TLA+ records. */
         public final Set<String> released = new LinkedHashSet<>();
     }
 
     private final int nodes;
+    private final ClusterConfig initialConfig;
     private final List<Step> steps = new ArrayList<>();
+    /** Per node: the latest step, to recognize damage that is found again at a restart. */
+    private final Map<Integer, Step> latest = new HashMap<>();
     /** Per node: the sequences of the writes handed out and not yet reported durable. */
     private final Map<Integer, ArrayDeque<Long>> pending = new HashMap<>();
 
-    public TlaTraceWriter(int nodes) {
+    /**
+     * @param nodes         the number of nodes that exist or may join
+     * @param initialConfig the configuration the cluster starts with
+     */
+    public TlaTraceWriter(int nodes, ClusterConfig initialConfig) {
         this.nodes = nodes;
+        this.initialConfig = initialConfig;
     }
 
     /** The recorded steps, in order. */
@@ -68,9 +86,23 @@ public final class TlaTraceWriter implements Simulation.StepListener {
 
     @Override
     public void stepped(long time, int node, RaftEvent event, ProtocolState state, List<Ready> readies) {
+        ArrayDeque<Long> waiting = pending.computeIfAbsent(node, _ -> new ArrayDeque<>());
+        Step previous = latest.get(node);
+        if (event instanceof RaftEvent.LogDamaged && previous != null && previous.event.equals("Restart")) {
+            // The damage was found again at the start: the truncation had not reached the
+            // disk before the crash. For the model the damage is durable from the moment it
+            // happens, so this is still the restart; the write of this step repeats what the
+            // model already holds as durable and is not counted.
+            state(previous, state);
+            for (Ready ready : readies) {
+                for (Outbound outbound : ready.messages()) {
+                    previous.released.add(message(node, outbound.toNode(), outbound.message()));
+                }
+            }
+            return;
+        }
         Step step = new Step();
         step.node = node;
-        ArrayDeque<Long> waiting = pending.computeIfAbsent(node, _ -> new ArrayDeque<>());
         switch (event) {
             case RaftEvent.Tick _ -> step.event = "Tick";
             case RaftEvent.MessageReceived m -> {
@@ -88,7 +120,10 @@ public final class TlaTraceWriter implements Simulation.StepListener {
             case RaftEvent.ClientReadIndex _ -> step.event = "Read";
             case RaftEvent.ProposeConfigChange _ -> step.event = "Config";
             case RaftEvent.TransferLeadership _ -> step.event = "Transfer";
-            case RaftEvent.LogDamaged _ -> step.event = "Damage";
+            case RaftEvent.LogDamaged d -> {
+                step.event = "Damage";
+                step.persisted = (int) d.firstDamagedIndex();
+            }
         }
         for (Ready ready : readies) {
             if (ready.hasPersistentWork()) {
@@ -100,6 +135,7 @@ public final class TlaTraceWriter implements Simulation.StepListener {
         }
         state(step, state);
         steps.add(step);
+        latest.put(node, step);
     }
 
     @Override
@@ -110,6 +146,7 @@ public final class TlaTraceWriter implements Simulation.StepListener {
         pending.remove(node);
         state(step, state);
         steps.add(step);
+        latest.put(node, step);
     }
 
     private static void state(Step step, ProtocolState state) {
@@ -125,6 +162,31 @@ public final class TlaTraceWriter implements Simulation.StepListener {
         step.lastLogTerm = state.lastLogTerm();
         step.commitIndex = state.commitIndex();
         step.durableIndex = state.durableIndex();
+        step.voters = set(state.config().voters());
+        step.learners = set(state.config().learners());
+        step.logRecovering = state.logRecovering();
+        step.logEpoch = state.logEpoch();
+    }
+
+    private static String set(Iterable<Integer> ids) {
+        StringBuilder text = new StringBuilder("{");
+        for (int id : ids) {
+            if (text.length() > 1) {
+                text.append(", ");
+            }
+            text.append(id);
+        }
+        return text.append('}').toString();
+    }
+
+    /** An entry as the model sees it: its term and, for a CONFIG entry, the configuration. */
+    private static String entry(LogEntry entry) {
+        if (entry.type() != EntryType.CONFIG) {
+            return "[term |-> " + entry.term() + ", cfg |-> [v |-> {}, l |-> {}]]";
+        }
+        ClusterConfig config = ClusterConfig.decode(entry.payload());
+        return "[term |-> " + entry.term() + ", cfg |-> [v |-> " + set(config.voters()) + ", l |-> "
+                + set(config.learners()) + "]]";
     }
 
     private static String bool(boolean value) {
@@ -145,13 +207,14 @@ public final class TlaTraceWriter implements Simulation.StepListener {
                     if (terms.length() > 2) {
                         terms.append(", ");
                     }
-                    terms.append(entry.term());
+                    terms.append(entry(entry));
                 }
                 yield "[type |-> \"AE\", " + head + ", prev |-> " + m.prevLogIndex() + ", pterm |-> "
-                        + m.prevLogTerm() + ", ents |-> " + terms + ">>, commit |-> " + m.leaderCommit() + "]";
+                        + m.prevLogTerm() + ", ents |-> " + terms + ">>, commit |-> " + m.leaderCommit()
+                        + ", fep |-> " + (m.followerEpoch() + 1) + "]";
             }
             case RaftMessage.AppendResponse m -> "[type |-> \"AER\", " + head + ", ok |-> " + bool(m.success())
-                    + ", idx |-> " + m.index() + "]";
+                    + ", idx |-> " + m.index() + ", ep |-> " + m.logEpoch() + "]";
             case RaftMessage.Heartbeat m -> "[type |-> \"HB\", " + head + ", commit |-> " + m.commit() + "]";
             case RaftMessage.HeartbeatResponse _ -> "[type |-> \"HBR\", " + head + "]";
             case RaftMessage.TimeoutNow _ -> "[type |-> \"TN\", " + head + "]";
@@ -171,6 +234,10 @@ public final class TlaTraceWriter implements Simulation.StepListener {
                 + ", lterm |-> " + step.lastLogTerm
                 + ", commit |-> " + step.commitIndex
                 + ", durable |-> " + step.durableIndex
+                + ", voters |-> " + step.voters
+                + ", learners |-> " + step.learners
+                + ", rec |-> " + bool(step.logRecovering)
+                + ", epoch |-> " + step.logEpoch
                 + ", rel |-> {" + String.join(", ", step.released) + "}]";
     }
 
@@ -183,7 +250,8 @@ public final class TlaTraceWriter implements Simulation.StepListener {
         for (int i = 0; i < nodes; i++) {
             s.append(i == 0 ? "" : ", ").append(i);
         }
-        s.append("}\n\nTrace == <<\n");
+        s.append("}\nTraceInitVoters == ").append(set(initialConfig.voters()));
+        s.append("\n\nTrace == <<\n");
         for (int i = 0; i < steps.size(); i++) {
             s.append("  ").append(record(steps.get(i))).append(i + 1 < steps.size() ? ",\n" : "\n");
         }
