@@ -17,6 +17,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 import io.github.stefan_zobel.freyja.common.DecodeException;
+import io.github.stefan_zobel.freyja.common.wire.Frames;
+import io.github.stefan_zobel.freyja.common.wire.Handshake;
 import io.github.stefan_zobel.freyja.common.LittleEndian;
 import io.github.stefan_zobel.freyja.node.Transport;
 import io.github.stefan_zobel.freyja.node.concurrent.Scopes;

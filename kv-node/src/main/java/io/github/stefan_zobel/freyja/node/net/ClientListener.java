@@ -13,6 +13,8 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.atomic.AtomicLong;
 
 import io.github.stefan_zobel.freyja.common.DecodeException;
+import io.github.stefan_zobel.freyja.common.wire.Frames;
+import io.github.stefan_zobel.freyja.common.wire.Handshake;
 import io.github.stefan_zobel.freyja.common.kv.ClientCodec;
 import io.github.stefan_zobel.freyja.common.kv.ClientResponse;
 import io.github.stefan_zobel.freyja.node.concurrent.Scopes;

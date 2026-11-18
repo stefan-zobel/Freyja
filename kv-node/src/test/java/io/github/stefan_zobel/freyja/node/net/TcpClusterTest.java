@@ -36,6 +36,8 @@ import io.github.stefan_zobel.freyja.common.kv.Command;
 import io.github.stefan_zobel.freyja.common.kv.Command.Put;
 import io.github.stefan_zobel.freyja.common.kv.CommandResult.SessionRegistered;
 import io.github.stefan_zobel.freyja.common.kv.CommandResult.Written;
+import io.github.stefan_zobel.freyja.common.wire.Frames;
+import io.github.stefan_zobel.freyja.common.wire.Handshake;
 import io.github.stefan_zobel.freyja.lsm.EngineOptions;
 import io.github.stefan_zobel.freyja.lsm.fs.MemoryFileSystem;
 import io.github.stefan_zobel.freyja.node.Node;

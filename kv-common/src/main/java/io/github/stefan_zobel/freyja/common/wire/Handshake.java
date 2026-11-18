@@ -1,4 +1,4 @@
-package io.github.stefan_zobel.freyja.node.net;
+package io.github.stefan_zobel.freyja.common.wire;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;

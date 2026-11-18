@@ -15,6 +15,7 @@
         <module>lsm-core</module>
         <module>raft-core</module>
         <module>raft-sim</module>
+        <module>kv-client</module>
         <module>kv-node</module>
         <module>kv-tools</module>
     </modules>
