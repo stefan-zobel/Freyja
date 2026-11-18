@@ -63,6 +63,7 @@ import io.github.sz.freyja.raft.SnapshotMeta;
 import io.github.sz.freyja.raft.sim.LinearizabilityChecker;
 import io.github.sz.freyja.raft.sim.Observation;
 import io.github.sz.freyja.raft.sim.SafetyInvariants;
+import io.github.sz.freyja.raft.sim.Simulation;
 
 /**
  * The whole-system simulation (docs/spec/verification.md, section 3): complete nodes and
@@ -97,28 +98,37 @@ public final class SystemSimulation {
      *                    are asked to hand over
      * @param spares      how many nodes stand by to take the place of members; with spares,
      *                    members are replaced and identities are lost
+     * @param snapshots   whether nodes write snapshots and shorten their logs
      */
     public record Options(int nodes, int clients, int keys, long duration, int maxDelay, double drop,
-                          double duplicate, double chaos, boolean storage, int spares) {
+                          double duplicate, double chaos, boolean storage, int spares, boolean snapshots) {
 
         /** A reliable network and no crashes. */
         public static Options calm() {
-            return new Options(3, 3, 4, 30_000, 3, 0, 0, 0, false, 0);
+            return new Options(3, 3, 4, 30_000, 3, 0, 0, 0, false, 0, true);
         }
 
         /** Lost and repeated messages, partitions, and crashes, also in the middle of a write. */
         public static Options faulty() {
-            return new Options(3, 4, 4, 60_000, 12, 0.03, 0.03, 0.25, false, 0);
+            return new Options(3, 4, 4, 60_000, 12, 0.03, 0.03, 0.25, false, 0, true);
         }
 
         /** All of {@link #faulty}, and damaged files, full disks, slow disks, and hand-overs. */
         public static Options hostile() {
-            return new Options(3, 4, 4, 80_000, 12, 0.02, 0.02, 0.3, true, 0);
+            return new Options(3, 4, 4, 80_000, 12, 0.02, 0.02, 0.3, true, 0, true);
         }
 
         /** All of {@link #hostile}, and members that are replaced, some after losing their identity. */
         public static Options changing() {
-            return new Options(3, 4, 4, 100_000, 12, 0.02, 0.02, 0.25, true, 4);
+            return new Options(3, 4, 4, 100_000, 12, 0.02, 0.02, 0.25, true, 4, true);
+        }
+
+        /**
+         * A short run of {@link #faulty} in which no log is shortened: the model that traces
+         * are validated against has no snapshots (docs/spec/verification.md, section 2.7).
+         */
+        public static Options traced() {
+            return new Options(3, 3, 4, 6_000, 12, 0.03, 0.03, 0.5, false, 0, false);
         }
     }
 
@@ -267,6 +277,18 @@ public final class SystemSimulation {
         }
     }
 
+    /** A step of the core of a node whose work may not have been handed out completely yet. */
+    private static final class TracedStep {
+        final RaftEvent event;
+        final ProtocolState state;
+        final List<Ready> readies = new ArrayList<>();
+
+        TracedStep(RaftEvent event, ProtocolState state) {
+            this.event = event;
+            this.state = state;
+        }
+    }
+
     /** One node with everything that survives a crash, and what does not. */
     private final class Host implements NodeListener {
         final int id;
@@ -289,10 +311,14 @@ public final class SystemSimulation {
         long clockSkew;
         /** Whether the node has ever been started; a spare has not. */
         boolean started;
+        /** Whether a start of the node has ever succeeded. */
+        boolean everOpened;
         /** Whether the node is out of the cluster for good. */
         boolean retired;
         boolean identityLost;
         long configIndex;
+        /** For the trace: the steps of the core that are not written yet, oldest first. */
+        final List<TracedStep> traced = new ArrayList<>();
 
         /** Whether the node is one of those that are meant to run. */
         boolean active() {
@@ -335,6 +361,8 @@ public final class SystemSimulation {
             crashArmed = false;
             role = Role.FOLLOWER;
             digestedAt = -1;
+            boolean again = everOpened;
+            traced.clear(); // of a start that failed
             Node.Options own = new Node.Options(nodeOptions.raft(), nodeOptions.segmentSize(),
                     nodeOptions.queueCapacity(), nodeOptions.snapshotLogBytes(), nodeOptions.snapshotRetainEntries(),
                     nodeOptions.transfers(), nodeOptions.limits(), () -> time + clockSkew);
@@ -346,6 +374,17 @@ public final class SystemSimulation {
                     .deterministic(true).reserveSize(0).minFreeSpace(0).memTableSize(32 * 1024)
                     .blockCacheCapacity(1024 * 1024), SESSION_TIMEOUT), (to, frame) -> outbox.add(frame), service);
             service.attach(node);
+            everOpened = true;
+            if (trace != null) {
+                // A start after the first is a line of its own: it changes the state of the
+                // node without a step. What the node did while it opened follows it. That is
+                // the report of damage, and the state before it is not to be had: the line
+                // then shows the state after it, which is where the model puts damage too.
+                if (again) {
+                    trace.restarted(time, id, traced.isEmpty() ? node.view() : traced.getFirst().state);
+                }
+                writeTrace(traced.size());
+            }
             if (node.repairedAtStart()) {
                 stats.repairs++;
             }
@@ -381,6 +420,7 @@ public final class SystemSimulation {
             service.detach(); // whoever waits is told to ask again
             // The state machine of a node that died in an installation is not to be asked.
             log("node " + id + " down" + (crashFirst ? "" : " (crash in an operation)") + ": " + dead.view());
+            writeTrace(traced.size()); // what it did before it died is part of the run
             stats.snapshotsCreated += dead.snapshotsCreated();
             stats.slowDiskStepDowns += dead.slowSyncStepDowns();
             outbox.clear();
@@ -461,6 +501,9 @@ public final class SystemSimulation {
 
         @Override
         public void stepped(RaftEvent event, ProtocolState state) {
+            if (trace != null) {
+                traced.add(new TracedStep(event, state));
+            }
             protocol.sawCommitted(state.commitIndex(), state.term());
             if (event instanceof RaftEvent.SnapshotInstalled && node != null) {
                 // The stored log starts after the snapshot now, with or without what followed.
@@ -470,6 +513,21 @@ public final class SystemSimulation {
 
         @Override
         public void ready(Ready ready, HardState durableHardState, long durableLastIndex) {
+            if (trace != null && !traced.isEmpty()) {
+                // A node makes the work of a Ready durable and tells its core before it shows
+                // the Ready: the step that handed it out is the one before that report. A
+                // Ready without such work was handed out by the latest step.
+                int owner = traced.size() - 1;
+                for (int i = 1; i < traced.size(); i++) {
+                    if (traced.get(i).event instanceof RaftEvent.Persisted persisted
+                            && persisted.readySequence() == ready.sequence()) {
+                        owner = i - 1;
+                        break;
+                    }
+                }
+                traced.get(owner).readies.add(ready);
+                writeTrace(owner + 1);
+            }
             if (ready.truncateSuffixFrom() != -1) {
                 protocol.truncated(id, ready.truncateSuffixFrom());
             }
@@ -485,6 +543,18 @@ public final class SystemSimulation {
             for (Outbound outbound : ready.messages()) {
                 protocol.released(id, outbound, durableHardState, durableLastIndex);
             }
+        }
+
+        /** Writes the oldest {@code count} steps that wait for it to the trace. */
+        void writeTrace(int count) {
+            if (trace == null) {
+                return;
+            }
+            for (int i = 0; i < count; i++) {
+                TracedStep step = traced.get(i);
+                trace.stepped(time, id, step.event, step.state, List.copyOf(step.readies));
+            }
+            traced.subList(0, count).clear();
         }
 
         /** The log of the node from index 1: what its snapshot covers, then what it stores. */
@@ -774,6 +844,18 @@ public final class SystemSimulation {
     /** Set the environment variable FREYJA_SIM_DEBUG to see what a run does. */
     private final boolean debug = System.getenv("FREYJA_SIM_DEBUG") != null;
 
+    /** Is told every step of the core of every node, and every start after the first. */
+    private Simulation.StepListener trace;
+
+    /**
+     * Registers the listener that records the run as a trace (docs/spec/verification.md,
+     * section 2.7), in the form the Raft simulator records its runs. To be called before
+     * {@link #run}. Recording does not change the run.
+     */
+    public void setStepListener(Simulation.StepListener listener) {
+        this.trace = listener;
+    }
+
     private void log(String what) {
         if (debug) {
             System.out.println("[sim " + time + "] " + what);
@@ -784,7 +866,8 @@ public final class SystemSimulation {
         this.seed = seed;
         this.options = options;
         this.random = new Random(seed);
-        this.nodeOptions = new Node.Options(RaftConfig.defaults(0, seed), 8 * 1024, 4096, 32 * 1024, 20,
+        this.nodeOptions = new Node.Options(RaftConfig.defaults(0, seed), 8 * 1024, 4096,
+                options.snapshots() ? 32 * 1024 : Long.MAX_VALUE, 20,
                 new SnapshotTransfers.Options(2048, 5, 60, 2),
                 new Node.Limits(10_000, 1L << 40, options.storage() ? MIN_FREE : 0, 10,
                         options.storage() ? 5L * TICK : Long.MAX_VALUE), () -> time);
@@ -860,6 +943,7 @@ public final class SystemSimulation {
             while (host.node.runOnce()) {
                 // work the queue off
             }
+            host.writeTrace(host.traced.size()); // the node is idle: nothing is handed out any more
             host.observeRecovering();
             long applied = host.node.store().appliedIndex();
             if (applied != host.digestedAt) {

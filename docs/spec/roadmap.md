@@ -73,7 +73,9 @@ Rules:
     their repairs, short and slow disks, hand-overs; replaced members and lost identities;
     the Raft invariants over complete nodes.
   - The probes below the node are counted (`verification.md` §3.1).
-  - Open: traces of whole-system runs for the model, which needs runs of TLC.
+  - Whole-system runs are recorded as traces in the form of the Raft simulator
+    (`verification.md` §2.7).
+  - Open: the validation of those traces, which needs runs of TLC.
   - The Raft simulator lets the log of a node go back to an earlier state, with entries in
     it again that were cut off, as the log store of a node does after damage
     (`verification.md` §2.4).
@@ -140,7 +142,7 @@ leaves this list in the change that completes it.
 |---|---|---|
 | Trace validation of the runs with membership changes, transfers, and log damage | B3 | A run of TLC; `docs/tla/README.md` |
 | Exhaustive check of a configuration with membership change | B3 | A run of TLC; the last attempt ran out of memory |
-| Export of whole-system runs as traces, and their validation | C3 | The export is not written; then runs of TLC |
+| Validation of the traces of whole-system runs | C3 | A run of TLC: `./mvnw test -pl kv-node -am -Ptrace-validation` |
 | Workloads during compaction, snapshot transfer, and follower catch-up | D3 | `verification.md` §7 |
 | Write and space amplification in the results | D3 | Needs figures of the nodes |
 | Overload tests at twice the sustainable load | D3 | |
@@ -161,11 +163,11 @@ leaves this list in the change that completes it.
 | Multi-version simulation harness | D1 | A second release |
 | Upgrade procedure with finalization, verified in simulation and with real processes | E3 | A second release |
 | Compatibility suite | E3 | A first release to capture, a second to read it |
-| A scheduled job for the continuous simulation | D1 | A decision of the project owner: the build workflow is started by hand only |
+| A scheduled job for the continuous simulation | D1 | A decision of the project lead: the build workflow is started by hand only |
 | Every procedure of the runbook executed once | E3 | A real cluster |
 | Review against the exit criteria | E3 | Everything above |
 
-**For the project owner:**
+**For the project lead:**
 
 - Review of `SystemInvariants` (`kv-node`). It was written with milestone C3 and is protected
   from then on (`verification.md` §2.6).

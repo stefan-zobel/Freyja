@@ -256,6 +256,19 @@ the two.
   repository directory, or its path in the system property `freyja.tlc`.
 - The whole-system simulation (§3) records the same trace format for the Raft part of every
   node, so traces from complete nodes are validated as well.
+  - It records through the listener of a node (§3, the invariants of §2.4 over complete
+    nodes) and writes with the two writers of the Raft simulator.
+  - A node makes the work of a `Ready` durable and reports that to its core before it sends
+    the messages of the `Ready`. In the trace a `Ready` belongs to the step that handed it
+    out: the step before that report, or the latest step if the `Ready` has no such work.
+  - A start after the first is a restart line. If the node reports damage while it opens,
+    the line shows the state after that report.
+  - The runs that are validated (`traced`) have the faults of `system-faulty`, are short,
+    and shorten no log, because the model has no snapshots. The profile
+    `-Ptrace-validation` runs them in `kv-node` (`SystemTraceValidationTest`).
+  - Checked on every build without TLC (`SystemTraceTest`): recording does not change a
+    run; the trace is a function of the seed; every start after a crash is a line; a node
+    receives only what a node has released in an earlier step.
 
 ### 2.8 Pure Kernels: Exhaustive Checks
 
@@ -459,8 +472,10 @@ invariants of `SystemInvariants` and of `SafetyInvariants`, linearizability, con
 
 Open in this milestone:
 
-- Traces of whole-system runs for the model (§2.7). The model has no snapshots, so only
-  runs without shortened logs can be validated, and validating needs runs of TLC.
+- The validation of the traces of whole-system runs (§2.7). The export is written; TLC
+  has not been run on it. Where the first run may disagree with the model: a node writes
+  the hard state and the log of one `Ready` one after the other, so a crash can leave the
+  first without the second, and the model makes the work of a step durable as a whole.
 - The model lets a damaged log keep a true prefix. It does not know entries that come back
   after the record of their removal is lost (`node.md` §3.3); the Raft simulator and the
   whole-system simulation do. Runs of the Raft simulator that are validated against the

@@ -6,13 +6,11 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
-import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 import org.junit.jupiter.api.Tag;
@@ -21,6 +19,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import io.github.sz.freyja.common.testing.Seeds;
 import io.github.sz.freyja.raft.ClusterConfig;
+import io.github.sz.freyja.raft.sim.TraceValidator.Verdict;
 
 /**
  * Trace validation against the TLA+ model (docs/spec/verification.md, section 2.7): TLC must
@@ -39,79 +38,10 @@ class TraceValidationTest {
     /** Longer runs are cut off here. */
     private static final int MAX_STEPS = 3_000;
 
-    private static Path repositoryRoot() {
-        Path here = Path.of("").toAbsolutePath();
-        return Files.exists(here.resolve("docs")) ? here : here.getParent();
-    }
-
-    /** The outcome of one validation. */
-    private record Verdict(boolean accepted, String reason, int steps) {
-    }
-
     private Verdict validate(String name, TlaTraceWriter trace) throws IOException, InterruptedException {
-        Path root = repositoryRoot();
-        Path tla = root.resolve("docs").resolve("tla");
-        Path jar = Path.of(System.getProperty("freyja.tlc",
-                root.resolve("tools").resolve("tla2tools.jar").toString()));
-        assertTrue(Files.exists(jar), "TLC not found at " + jar + "; set -Dfreyja.tlc=<tla2tools.jar>");
-        Path dir = Files.createDirectories(temp.resolve(name));
-        for (String file : List.of("Raft.tla", "RaftTrace.tla", "RaftTrace.cfg")) {
-            Files.copy(tla.resolve(file), dir.resolve(file));
-        }
-        Files.writeString(dir.resolve("TraceData.tla"), trace.module(), StandardCharsets.UTF_8);
-        Path output = dir.resolve("tlc.out");
-        Process process = new ProcessBuilder(
-                Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-                "-XX:+UseParallelGC", "-Xss64m", "-cp", jar.toString(), "tlc2.TLC",
-                "-workers", "1", "-metadir", dir.resolve("states").toString(),
-                "-config", "RaftTrace.cfg", "RaftTrace.tla")
-                .directory(dir.toFile())
-                .redirectErrorStream(true)
-                .redirectOutput(output.toFile())
-                .start();
-        if (!process.waitFor(20, TimeUnit.MINUTES)) {
-            process.destroyForcibly().waitFor();
-            throw new AssertionError("TLC did not finish within 20 minutes");
-        }
-        String text = Files.readString(output, StandardCharsets.UTF_8);
-        int steps = trace.steps().size();
-        if (text.contains("Invariant NotDone is violated")) {
-            return new Verdict(true, "accepted", steps);
-        }
-        String reason = "TLC did not get past the last step";
-        for (String line : text.split("\n")) {
-            if (line.contains("is violated") || line.contains("rror:") || line.contains("depth of the complete")) {
-                reason = line.trim();
-                if (!line.contains("depth of the complete")) {
-                    break;
-                }
-            }
-        }
-        return new Verdict(false, reason + rejectedStep(trace, text), steps);
-    }
-
-    /** The step TLC could not take, with the steps of the same node before it. */
-    private static String rejectedStep(TlaTraceWriter trace, String tlcOutput) {
-        java.util.regex.Matcher depth = java.util.regex.Pattern
-                .compile("depth of the complete state graph search is (\\d+)").matcher(tlcOutput);
-        if (!depth.find()) {
-            return "";
-        }
-        int at = Integer.parseInt(depth.group(1)) - 1;
-        List<TlaTraceWriter.Step> steps = trace.steps();
-        if (at < 0 || at >= steps.size()) {
-            return "";
-        }
-        StringBuilder text = new StringBuilder("\nrejected step " + (at + 1) + ": "
-                + TlaTraceWriter.record(steps.get(at)));
-        int shown = 0;
-        for (int i = at - 1; i >= 0 && shown < 6; i--) {
-            if (steps.get(i).node == steps.get(at).node) {
-                text.append("\n  step ").append(i + 1).append(": ").append(TlaTraceWriter.record(steps.get(i)));
-                shown++;
-            }
-        }
-        return text.toString();
+        assertTrue(Files.exists(TraceValidator.tlcJar()),
+                "TLC not found at " + TraceValidator.tlcJar() + "; set -Dfreyja.tlc=<tla2tools.jar>");
+        return TraceValidator.validate(temp.resolve(name), trace);
     }
 
     private static TlaTraceWriter record(SimOptions options, long millis) {

@@ -13,8 +13,9 @@
     <artifactId>kv-node</artifactId>
 
     <properties>
-        <!-- The continuous simulation runs for as long as it is told and only in its profile. -->
-        <excludedTestGroups>continuous</excludedTestGroups>
+        <!-- The continuous simulation runs for as long as it is told and only in its profile;
+             trace validation needs TLC and runs only in its profile. -->
+        <excludedTestGroups>continuous,tlc</excludedTestGroups>
         <includedTestGroups/>
     </properties>
 
@@ -40,6 +41,17 @@
             <properties>
                 <excludedTestGroups/>
                 <includedTestGroups>continuous</includedTestGroups>
+            </properties>
+        </profile>
+        <!-- ./mvnw test -pl kv-node -am -Ptrace-validation
+             Validates traces of whole-system runs against the TLA+ model
+             (docs/spec/verification.md, section 2.7). Needs tla2tools.jar: tools/tla2tools.jar,
+             or -Dfreyja.tlc=path. The profile of the same name in raft-sim runs with it. -->
+        <profile>
+            <id>trace-validation</id>
+            <properties>
+                <excludedTestGroups/>
+                <includedTestGroups>tlc</includedTestGroups>
             </properties>
         </profile>
     </profiles>
