@@ -193,6 +193,16 @@ only as that mode allows, and is refilled by the leader.
 
 A torn tail is not damage: those entries were never acknowledged.
 
+**The state machine as a witness.** Damage that hits only the data of the last completed
+sync round of the newest segment cannot be told from a torn tail (`storage-format.md`
+§3.2), and the store cuts it away. The node narrows that gap with what it knows besides the
+log: an entry is applied only after it is durable in the log. If, at a start, the state
+machine has applied more than an undamaged log holds and the node is not in log-recovering
+mode, the log has lost entries that were synced. The node then tells the core that the log
+is lost from the entry after its end, exactly as for damage that the store reports; nothing
+is set aside, because nothing damaged is left. What remains outside this check are entries
+that were stored and acknowledged but not yet applied.
+
 ### 3.4 Lost Identity
 
 If `NODE` or both hard-state files are unreadable, the node cannot know what it promised. It

@@ -178,6 +178,7 @@ public final class Node implements Closeable {
     private long snapshotsCreated;
     private long snapshotsInstalled;
     private boolean repairedAtStart;
+    private boolean lostTailWitnessed;
     /** The time of the node: the number of ticks it has processed. */
     private long now;
     private long expiredProposals;
@@ -402,10 +403,19 @@ public final class Node implements Closeable {
                     options.raft().seed() ^ (identity.nodeId() + 1) * 0x9E3779B97F4A7C15L);
             long applied = stateMachine.appliedIndex();
             long damagedFrom = log.firstDamagedIndex();
+            HardState stored = hardState.get();
+            // The state machine is a witness: an entry is applied only after it is durable in
+            // the log. If the state machine holds more than the log, the log has lost entries
+            // that were synced, though nothing in the log shows it (damage after the last
+            // sync point looks like a torn tail). The node treats that as damage.
+            boolean witnessed = damagedFrom == -1 && !stored.logRecovering()
+                    && applied > Math.max(log.lastIndex(), snapshotIndex);
+            if (witnessed) {
+                damagedFrom = log.lastIndex() + 1;
+            }
             // With a damaged log the state machine may be ahead of what the log still holds.
             // The core accepts that only in log-recovering mode, which the report of the
             // damage below is about to start; the flag is durable before anything else happens.
-            HardState stored = hardState.get();
             HardState start = damagedFrom == -1 ? stored : new HardState(stored.term(), stored.votedFor(), true,
                     stored.logEpoch(), stored.lostLogIndex(), stored.lostLogTerm());
             RaftNode raft = RaftNode.create(config, new PersistedState(start, snapshot), log, applied);
@@ -415,7 +425,10 @@ public final class Node implements Closeable {
                 // Entries that the snapshot covers are not missed, wherever the damage begins.
                 raft.step(new RaftEvent.LogDamaged(Math.max(damagedFrom, snapshotIndex + 1)));
                 node.drain();
-                log.quarantineDamaged();
+                if (!witnessed) {
+                    log.quarantineDamaged();
+                }
+                node.lostTailWitnessed = witnessed;
                 if (log.lastIndex() < snapshotIndex) {
                     // What is left ends before the snapshot: nothing of it is needed, and the
                     // next entry to store is the one after the snapshot.
@@ -862,6 +875,14 @@ public final class Node implements Closeable {
     /** How often this node, as leader, has proposed an alarm. */
     public long alarmsRaised() {
         return alarmsRaised;
+    }
+
+    /**
+     * Whether this start found the state machine ahead of an undamaged log and therefore
+     * entered log-recovering mode: the log has lost entries that were synced.
+     */
+    public boolean lostTailWitnessed() {
+        return lostTailWitnessed;
     }
 
     /** Whether this start replaced a damaged state machine by an empty one. */

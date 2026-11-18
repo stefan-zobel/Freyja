@@ -28,6 +28,7 @@ import io.github.stefan_zobel.freyja.common.kv.CommandResult.Failed;
 import io.github.stefan_zobel.freyja.common.kv.CommandResult.Failure;
 import io.github.stefan_zobel.freyja.common.kv.CommandResult.SessionRegistered;
 import io.github.stefan_zobel.freyja.common.kv.CommandResult.Written;
+import io.github.stefan_zobel.freyja.lsm.CorruptionException;
 import io.github.stefan_zobel.freyja.lsm.EngineOptions;
 import io.github.stefan_zobel.freyja.lsm.fs.FaultyFileSystem;
 import io.github.stefan_zobel.freyja.lsm.fs.MemoryFileSystem;
@@ -37,6 +38,7 @@ import io.github.stefan_zobel.freyja.node.sm.KvStateMachine;
 import io.github.stefan_zobel.freyja.node.sm.StateMachineStore;
 import io.github.stefan_zobel.freyja.node.snapshot.SnapshotTransfers;
 import io.github.stefan_zobel.freyja.node.store.NodeIdentity;
+import io.github.stefan_zobel.freyja.node.store.RepairMarker;
 import io.github.stefan_zobel.freyja.node.wire.MessageCodec;
 import io.github.stefan_zobel.freyja.raft.ClusterConfig;
 import io.github.stefan_zobel.freyja.raft.EntryType;
@@ -77,18 +79,25 @@ public final class SystemSimulation {
      * @param duplicate   the probability that a message arrives twice
      * @param chaos       the probability, each {@value #CHAOS_PERIOD} units, that a node
      *                    crashes or the network is cut
+     * @param storage     whether stored data is damaged, disks run full or slow, and leaders
+     *                    are asked to hand over
      */
     public record Options(int nodes, int clients, int keys, long duration, int maxDelay, double drop,
-                          double duplicate, double chaos) {
+                          double duplicate, double chaos, boolean storage) {
 
         /** A reliable network and no crashes. */
         public static Options calm() {
-            return new Options(3, 3, 4, 30_000, 3, 0, 0, 0);
+            return new Options(3, 3, 4, 30_000, 3, 0, 0, 0, false);
         }
 
         /** Lost and repeated messages, partitions, and crashes, also in the middle of a write. */
         public static Options faulty() {
-            return new Options(3, 4, 4, 60_000, 12, 0.03, 0.03, 0.25);
+            return new Options(3, 4, 4, 60_000, 12, 0.03, 0.03, 0.25, false);
+        }
+
+        /** All of {@link #faulty}, and damaged files, full disks, slow disks, and hand-overs. */
+        public static Options hostile() {
+            return new Options(3, 4, 4, 80_000, 12, 0.02, 0.02, 0.3, true);
         }
     }
 
@@ -113,6 +122,20 @@ public final class SystemSimulation {
         public long snapshotsCreated;
         public long snapshotsInstalled;
         public long highestApplied;
+        public long damagedLogs;
+        public long damagedTables;
+        public long recoveringEntered;
+        public long recoveringLeft;
+        public long repairs;
+        public long damageFoundByScrub;
+        public long disksShort;
+        public long diskFullStops;
+        public long rejectedForSpace;
+        public long alarmsCleared;
+        public long slowDisks;
+        public long slowDiskStepDowns;
+        public long transfers;
+        public long transfersAborted;
 
         public void add(Stats other) {
             steps += other.steps;
@@ -134,6 +157,20 @@ public final class SystemSimulation {
             snapshotsCreated += other.snapshotsCreated;
             snapshotsInstalled += other.snapshotsInstalled;
             highestApplied += other.highestApplied;
+            damagedLogs += other.damagedLogs;
+            damagedTables += other.damagedTables;
+            recoveringEntered += other.recoveringEntered;
+            recoveringLeft += other.recoveringLeft;
+            repairs += other.repairs;
+            damageFoundByScrub += other.damageFoundByScrub;
+            disksShort += other.disksShort;
+            diskFullStops += other.diskFullStops;
+            rejectedForSpace += other.rejectedForSpace;
+            alarmsCleared += other.alarmsCleared;
+            slowDisks += other.slowDisks;
+            slowDiskStepDowns += other.slowDiskStepDowns;
+            transfers += other.transfers;
+            transfersAborted += other.transfersAborted;
         }
 
         @Override
@@ -145,7 +182,13 @@ public final class SystemSimulation {
                     + leaderChanges + ", crashes "
                     + crashes + " (" + crashesInAnOperation + " in an operation), partitions " + partitions
                     + ", dropped " + dropped + ", duplicated " + duplicated + ", snapshots created/installed "
-                    + snapshotsCreated + "/" + snapshotsInstalled + ", applied " + highestApplied;
+                    + snapshotsCreated + "/" + snapshotsInstalled + ", applied " + highestApplied
+                    + ", damaged logs/tables " + damagedLogs + "/" + damagedTables + ", recovering entered/left "
+                    + recoveringEntered + "/" + recoveringLeft + ", repairs " + repairs + " (" + damageFoundByScrub
+                    + " after a scrub), disks short " + disksShort + " (" + diskFullStops + " stops, "
+                    + rejectedForSpace + " rejections, " + alarmsCleared + " alarms cleared), slow disks "
+                    + slowDisks + " (" + slowDiskStepDowns + " step-downs), transfers " + transfers + " ("
+                    + transfersAborted + " aborted)";
         }
     }
 
@@ -168,6 +211,9 @@ public final class SystemSimulation {
     private static final int EVENT_RESTART = 4;
     private static final int EVENT_HEAL = 5;
     private static final int EVENT_REPLAY = 6;
+    private static final int EVENT_DISK_HEAL = 7;
+    /** What a node wants to have free; below it, it raises the alarm. */
+    private static final long MIN_FREE = 96 * 1024;
 
     private record Event(long time, long order, int kind, int target, int from, byte[] frame)
             implements Comparable<Event> {
@@ -195,6 +241,14 @@ public final class SystemSimulation {
         long digestedAt = -1;
         boolean crashArmed;
         Role role = Role.FOLLOWER;
+        /** A file of this node was damaged and the node has not been found whole since. */
+        boolean damaged;
+        boolean diskShort;
+        boolean recovering;
+        /** While simulated time is below this, every sync of this node takes long. */
+        long slowUntil;
+        /** What the clock of this node is ahead of simulated time. */
+        long clockSkew;
 
         Host(int id, ClusterConfig config) throws IOException {
             this.id = id;
@@ -203,12 +257,37 @@ public final class SystemSimulation {
 
         void start() throws IOException {
             fs = new FaultyFileSystem(memory);
+            // A slow disk: every sync takes long by the clock of this node.
+            fs.setFault((operation, path, index) -> {
+                if (operation == FaultyFileSystem.Operation.SYNC && time < slowUntil) {
+                    clockSkew += 20L * TICK;
+                }
+                return null;
+            });
             crashArmed = false;
             role = Role.FOLLOWER;
             digestedAt = -1;
-            node = Node.open(fs, DATA, nodeOptions, new StateMachineStore.Options(new EngineOptions()
+            Node.Options own = new Node.Options(nodeOptions.raft(), nodeOptions.segmentSize(),
+                    nodeOptions.queueCapacity(), nodeOptions.snapshotLogBytes(), nodeOptions.snapshotRetainEntries(),
+                    nodeOptions.transfers(), nodeOptions.limits(), () -> time + clockSkew);
+            node = Node.open(fs, DATA, own, new StateMachineStore.Options(new EngineOptions()
                     .deterministic(true).reserveSize(0).minFreeSpace(0).memTableSize(32 * 1024)
                     .blockCacheCapacity(1024 * 1024), SESSION_TIMEOUT), (to, frame) -> outbox.add(frame), this);
+            if (node.repairedAtStart()) {
+                stats.repairs++;
+            }
+            observeRecovering();
+        }
+
+        /** Notes when the node enters or leaves log-recovering mode. */
+        void observeRecovering() {
+            boolean now = node.view().logRecovering();
+            if (now && !recovering) {
+                stats.recoveringEntered++;
+            } else if (!now && recovering) {
+                stats.recoveringLeft++;
+            }
+            recovering = now;
         }
 
         boolean running() {
@@ -220,6 +299,7 @@ public final class SystemSimulation {
             Node dead = node;
             node = null;
             stats.snapshotsCreated += dead.snapshotsCreated();
+            stats.slowDiskStepDowns += dead.slowSyncStepDowns();
             accepted.clear();
             reads.clear();
             outbox.clear();
@@ -248,6 +328,7 @@ public final class SystemSimulation {
                     }
                     role = change.role();
                 }
+                case Notification.TransferAborted _ -> stats.transfersAborted++;
                 default -> {
                 }
             }
@@ -452,6 +533,12 @@ public final class SystemSimulation {
                         waiting = false;
                     }
                 }
+                case Failed failed when failed.failure() == Failure.NO_SPACE -> {
+                    // The alarm is set. The command did not use its sequence number up; the
+                    // client sends it again later.
+                    stats.rejectedForSpace++;
+                    refused = true;
+                }
                 default -> throw new AssertionError("client " + id + " got " + result + " for " + kind
                         + " " + this.sequence + " of session " + this.session);
             }
@@ -527,7 +614,8 @@ public final class SystemSimulation {
         this.random = new Random(seed);
         this.nodeOptions = new Node.Options(RaftConfig.defaults(0, seed), 8 * 1024, 4096, 32 * 1024, 20,
                 new SnapshotTransfers.Options(2048, 5, 60, 2),
-                new Node.Limits(10_000, 1L << 40, 0, 10, Long.MAX_VALUE), () -> time);
+                new Node.Limits(10_000, 1L << 40, options.storage() ? MIN_FREE : 0, 10,
+                        options.storage() ? 5L * TICK : Long.MAX_VALUE), () -> time);
     }
 
     // ------------------------------------------------------------------ helpers
@@ -536,9 +624,14 @@ public final class SystemSimulation {
         return ("k" + key).getBytes(StandardCharsets.UTF_8);
     }
 
+    /**
+     * The stored form of a value: the number, and padding that follows from it, so that the
+     * tables of the state machine grow beyond one block and damage can hide in them.
+     */
     private static byte[] value(long value) {
-        byte[] bytes = new byte[8];
+        byte[] bytes = new byte[8 + 248];
         LittleEndian.putUint64(bytes, 0, value);
+        Arrays.fill(bytes, 8, bytes.length, (byte) (value * 37 + 11));
         return bytes;
     }
 
@@ -580,6 +673,7 @@ public final class SystemSimulation {
             while (host.node.runOnce()) {
                 // work the queue off
             }
+            host.observeRecovering();
             long applied = host.node.store().appliedIndex();
             if (applied != host.digestedAt) {
                 host.digestedAt = applied;
@@ -603,14 +697,41 @@ public final class SystemSimulation {
             stats.crashesInAnOperation++;
             host.down(false);
             return;
-        } catch (IOException e) {
-            throw new AssertionError("node " + host.id + " stopped: " + e, e);
+        } catch (IOException | java.io.UncheckedIOException e) {
+            stopped(host, e);
+            return;
         }
         List<byte[]> frames = new ArrayList<>(host.outbox);
         host.outbox.clear();
         for (byte[] frame : frames) {
             route(host.id, frame);
         }
+    }
+
+    /**
+     * A node stopped itself or the simulation met a failure of its storage. That is expected
+     * of a node whose files were damaged or whose disk is full, and of no other.
+     */
+    private void stopped(Host host, Exception cause) {
+        Throwable root = cause instanceof java.io.UncheckedIOException ? cause.getCause() : cause;
+        try {
+            if (host.damaged && (root instanceof CorruptionException
+                    || RepairMarker.exists(host.memory, DATA))) {
+                if (root instanceof CorruptionException && host.running() && !host.node.stopped()) {
+                    host.node.stateMachineDamaged(); // the simulation itself read the damage
+                }
+                host.down(true);
+                return;
+            }
+        } catch (IOException e) {
+            throw new AssertionError("node " + host.id + ": " + e, e);
+        }
+        if (host.diskShort) {
+            stats.diskFullStops++;
+            host.down(true);
+            return;
+        }
+        throw new AssertionError("node " + host.id + " stopped: " + cause, cause);
     }
 
     private void route(int from, byte[] frame) {
@@ -634,8 +755,10 @@ public final class SystemSimulation {
             return;
         }
         long down = hosts.stream().filter(h -> !h.running()).count();
-        int choice = random.nextInt(10);
-        if (choice < 5) {
+        int choice = random.nextInt(options.storage() ? 16 : 10);
+        if (choice >= 10) {
+            storageChaos(choice);
+        } else if (choice < 5) {
             // Mostly a minority is down at one time, so that the cluster makes progress.
             Host victim = hosts.get(random.nextInt(hosts.size()));
             if (victim.running() && (down < (hosts.size() - 1) / 2 || random.nextInt(8) == 0)) {
@@ -653,6 +776,150 @@ public final class SystemSimulation {
             stats.partitions++;
             isolated.add(random.nextInt(hosts.size()));
             schedule(time + 20L * TICK + random.nextInt(80 * TICK), EVENT_HEAL, -1, -1, null);
+        }
+    }
+
+    /** Whether every node runs and none is repairing anything. */
+    private boolean allHealthy() {
+        for (Host host : hosts) {
+            if (!host.running() || host.damaged || host.recovering || host.node.view().logRecovering()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void storageChaos(int choice) {
+        Host victim = hosts.get(random.nextInt(hosts.size()));
+        try {
+            switch (choice) {
+                case 10, 11 -> {
+                    // One node at a time loses what it has stored: the others still hold it.
+                    if (allHealthy()) {
+                        damage(victim);
+                    }
+                }
+                case 12 -> {
+                    if (victim.running() && !victim.diskShort) {
+                        stats.disksShort++;
+                        victim.diskShort = true;
+                        long used = Long.MAX_VALUE - victim.memory.freeSpace(DATA);
+                        victim.memory.setCapacity(used + MIN_FREE / 2);
+                        schedule(time + 100L * TICK + random.nextInt(300 * TICK), EVENT_DISK_HEAL, victim.id, -1,
+                                null);
+                    }
+                }
+                case 13 -> {
+                    if (victim.running() && victim.slowUntil < time) {
+                        stats.slowDisks++;
+                        victim.slowUntil = time + 50L * TICK + random.nextInt(100 * TICK);
+                    }
+                }
+                case 14 -> {
+                    for (Host host : hosts) {
+                        if (host.running() && host.role == Role.LEADER) {
+                            stats.transfers++;
+                            host.node.submit(new RaftEvent.TransferLeadership(++requests,
+                                    (host.id + 1 + random.nextInt(hosts.size() - 1)) % hosts.size()));
+                            pump(host);
+                            break;
+                        }
+                    }
+                }
+                default -> scrub(victim);
+            }
+        } catch (IOException e) {
+            throw new AssertionError("node " + victim.id + ": " + e, e);
+        }
+    }
+
+    /** The node crashes, and one bit of a segment of its log or of a table is not what it was. */
+    private void damage(Host victim) throws IOException {
+        victim.down(true);
+        stats.crashes++;
+        boolean log = random.nextBoolean();
+        List<Path> candidates = new ArrayList<>();
+        if (log) {
+            for (Path path : victim.memory.list(DATA.resolve(Node.RAFT_DIRECTORY))) {
+                if (path.getFileName().toString().endsWith(".rlog")) {
+                    candidates.add(path);
+                }
+            }
+            // Only bytes that are proven to be synced are damaged (verification.md,
+            // section 2.2): the newest segment has no successor that vouches for its
+            // length, and damage at its end is the stated residual case of the format.
+            if (!candidates.isEmpty()) {
+                candidates.sort(null);
+                candidates.removeLast();
+            }
+        }
+        if (!log || candidates.isEmpty()) {
+            log = false;
+            for (Path generation : victim.memory.list(DATA.resolve(StateMachineStore.DIRECTORY))) {
+                if (generation.getFileName().toString().matches("\\d{10}")) {
+                    for (Path path : victim.memory.list(generation)) {
+                        if (path.getFileName().toString().endsWith(".sst")) {
+                            candidates.add(path);
+                        }
+                    }
+                }
+            }
+        }
+        candidates.removeIf(path -> {
+            try {
+                return victim.memory.size(path) == 0;
+            } catch (IOException e) {
+                return true;
+            }
+        });
+        if (candidates.isEmpty()) {
+            return;
+        }
+        Path file = candidates.get(random.nextInt(candidates.size()));
+        long offset = (long) (random.nextDouble() * victim.memory.size(file));
+        byte[] one = victim.memory.peek(file, offset, 1);
+        one[0] ^= (byte) (1 << random.nextInt(8));
+        victim.memory.overwrite(file, offset, one);
+        victim.damaged = true;
+        if (log) {
+            stats.damagedLogs++;
+        } else {
+            stats.damagedTables++;
+        }
+    }
+
+    /**
+     * Reads every block of the state machine of a node. Damage that is found stops the node
+     * at its next step; a node without damage counts as whole again.
+     */
+    private void scrub(Host host) throws IOException {
+        if (!host.running() || !host.damaged || host.node.view().logRecovering()) {
+            return;
+        }
+        if (host.node.store().machine().engine().scrub() > 0) {
+            stats.damageFoundByScrub++;
+            pump(host);
+        } else {
+            host.damaged = false;
+        }
+    }
+
+    /** An administrator clears the alarm for lack of space once no disk is short any more. */
+    private void clearAlarm() {
+        for (Host host : hosts) {
+            if (host.diskShort) {
+                return;
+            }
+        }
+        for (Host host : hosts) {
+            if (host.running() && host.role == Role.LEADER
+                    && host.node.store().machine().alarms().contains(Command.Alarm.NOSPACE)) {
+                stats.alarmsCleared++;
+                host.node.propose(++requests, CommandCodec.encode(0, new Command.ClearAlarm(Command.Alarm.NOSPACE)),
+                        host.node.now() + 3L * PATIENCE / TICK);
+                pump(host);
+                return;
+            }
         }
     }
 
@@ -681,10 +948,18 @@ public final class SystemSimulation {
                 }
             }
             case EVENT_CHAOS -> {
+                if (options.storage()) {
+                    clearAlarm();
+                }
                 if (faults) {
                     chaos();
-                    schedule(time + CHAOS_PERIOD, EVENT_CHAOS, -1, -1, null);
                 }
+                schedule(time + CHAOS_PERIOD, EVENT_CHAOS, -1, -1, null);
+            }
+            case EVENT_DISK_HEAL -> {
+                Host host = hosts.get(event.target());
+                host.memory.setCapacity(Long.MAX_VALUE);
+                host.diskShort = false;
             }
             case EVENT_RESTART -> {
                 Host host = hosts.get(event.target());
@@ -692,7 +967,13 @@ public final class SystemSimulation {
                     try {
                         host.start();
                     } catch (IOException e) {
-                        throw new AssertionError("node " + host.id + " does not start: " + e, e);
+                        if (!host.diskShort) {
+                            throw new AssertionError("node " + host.id + " does not start: " + e, e);
+                        }
+                        // No room to start. The failed start is one more crash.
+                        host.memory.crash(random);
+                        schedule(time + 20L * TICK + random.nextInt(60 * TICK), EVENT_RESTART, host.id, -1, null);
+                        return;
                     }
                     pump(host);
                 }
@@ -781,6 +1062,9 @@ public final class SystemSimulation {
                 host.fs.crashAt(-1, null, null);
                 host.crashArmed = false;
             }
+            host.slowUntil = 0;
+            host.memory.setCapacity(Long.MAX_VALUE);
+            host.diskShort = false;
         }
         long deadline = time + 4_000L * TICK;
         while (!converged()) {
@@ -796,6 +1080,14 @@ public final class SystemSimulation {
         long applied = -1;
         for (Host host : hosts) {
             if (!host.running() || host.node.view().logRecovering()) {
+                return false;
+            }
+            if (host.damaged) {
+                // Damage that nobody has read yet must not outlive the run.
+                scrub(host);
+                return false;
+            }
+            if (!host.node.store().machine().alarms().isEmpty()) {
                 return false;
             }
             long own = host.node.store().appliedIndex();
@@ -839,6 +1131,10 @@ public final class SystemSimulation {
             digest = own;
             applied = host.node.store().appliedIndex();
             stats.snapshotsCreated += host.node.snapshotsCreated();
+            stats.slowDiskStepDowns += host.node.slowSyncStepDowns();
+            if (host.node.store().machine().engine().scrub() != 0) {
+                throw new AssertionError("after healing the state machine of node " + host.id + " is damaged");
+            }
         }
         for (SystemObservation.Acknowledged ack : observation.acknowledged()) {
             if (ack.index() > applied) {

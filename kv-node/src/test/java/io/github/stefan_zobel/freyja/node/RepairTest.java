@@ -121,6 +121,47 @@ class RepairTest {
     }
 
     @Test
+    void aLogTailThatIsLostWithoutATraceIsWitnessedByTheStateMachine() throws IOException {
+        KvCluster cluster = KvCluster.ofThree(1L << 30);
+        Random random = new Random(9);
+        cluster.write(40, 300, random);
+        Member victim = cluster.members.get((cluster.leader().id + 1) % 3);
+        long applied = victim.applied();
+        long epoch = victim.node.view().logEpoch();
+        victim.stop();
+        // Damage in the last record of the newest segment, after the last sync point: the
+        // format cannot tell it from a write that a crash tore (storage-format.md, 3.2).
+        Path raft = KvCluster.DATA.resolve(Node.RAFT_DIRECTORY);
+        Path newest = null;
+        for (Path path : victim.memory.list(raft)) {
+            if (path.getFileName().toString().endsWith(".rlog") && victim.memory.size(path) > 400) {
+                newest = path;
+            }
+        }
+        long size = victim.memory.size(newest);
+        byte[] one = victim.memory.peek(newest, size - 20, 1);
+        one[0] ^= 0x02;
+        victim.memory.overwrite(newest, size - 20, one);
+
+        victim.start();
+        assertTrue(victim.node.view().lastLogIndex() < applied, "the log lost its end without a sign");
+        assertTrue(victim.node.lostTailWitnessed(), "but the state machine had applied those entries");
+        assertTrue(victim.node.view().logRecovering());
+        assertEquals(epoch + 1, victim.node.view().logEpoch());
+        assertTrue(HardStateStore.open(victim.memory, KvCluster.DATA).get().logRecovering());
+        assertEquals(applied, victim.applied(), "what was applied stays applied");
+
+        cluster.ticks(60);
+        assertFalse(victim.node.view().logRecovering());
+        cluster.write(10, 100, random);
+        cluster.assertSameState();
+        victim.stop();
+        victim.start();
+        assertFalse(victim.node.lostTailWitnessed());
+        cluster.close();
+    }
+
+    @Test
     void damageFoundByAScrubStopsTheNodeAndIsRepairedAtTheNextStart() throws IOException {
         KvCluster cluster = KvCluster.ofThree();
         Random random = new Random(3);

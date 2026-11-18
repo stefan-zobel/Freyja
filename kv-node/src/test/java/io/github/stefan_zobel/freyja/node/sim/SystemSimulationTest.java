@@ -42,4 +42,23 @@ class SystemSimulationTest {
         assertTrue(total.dropped > 0 && total.duplicated > 0, total.toString());
         assertTrue(total.snapshotsCreated > 0, total.toString());
     }
+
+    @Test
+    void aClusterWithDamagedFilesAndFullAndSlowDisksRepairsItself() {
+        SystemSimulation.Stats total = new SystemSimulation.Stats();
+        Seeds.forEach(SystemSimulationTest.class, "system-hostile", 12, seed ->
+                total.add(new SystemSimulation(seed, SystemSimulation.Options.hostile()).run()));
+        assertTrue(total.sessionsLostInRetry > 0, total.toString());
+        assertTrue(total.transfersAborted > 0, total.toString());
+        assertTrue(total.diskFullStops > 0, total.toString());
+        assertTrue(total.acknowledged > 500, total.toString());
+        assertTrue(total.damagedLogs > 3 && total.damagedTables > 3, total.toString());
+        assertTrue(total.recoveringEntered > 3, total.toString());
+        assertTrue(total.recoveringLeft > 3, total.toString());
+        assertTrue(total.repairs > 0, total.toString());
+        assertTrue(total.snapshotsInstalled > 0, total.toString());
+        assertTrue(total.disksShort > 3 && total.rejectedForSpace > 0 && total.alarmsCleared > 0, total.toString());
+        assertTrue(total.slowDisks > 3 && total.slowDiskStepDowns > 0, total.toString());
+        assertTrue(total.transfers > 3, total.toString());
+    }
 }

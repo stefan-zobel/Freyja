@@ -383,11 +383,39 @@ after every step the invariants of `SystemInvariants` are checked.
   result again or `SEQUENCE_TOO_OLD`; once the session is gone, only `NO_SUCH_SESSION`. A
   client is told the result of the one time the command took effect.
 
+**Storage faults and what the simulation expects of them:**
+
+- *Damage:* a node crashes and one bit of a sealed segment of its log or of a table of its
+  state machine is flipped. Only one node at a time is damaged, and only while every node
+  runs and none is repairing: the others still hold what this one loses. In a log only
+  bytes that are proven to be synced are damaged (§2.2): the newest segment is left alone,
+  because damage at its end is the stated residual case of the format.
+- A node may stop itself only for a reason the simulation gave it: its files were damaged,
+  or its disk is short. Any other stop fails the run.
+- A damaged node counts as whole again when a scrub of its state machine finds nothing and
+  it is out of log-recovering mode. A run does not end before that.
+- *Disk short:* the capacity of the file system of a node drops to a little above what is
+  used. The node raises the alarm, commands with puts are rejected, and sooner or later a
+  write fails and the node stops. It is started again and again until the capacity is back.
+  An administrator, played by the simulation, clears the alarm when no disk is short.
+- *Slow disk:* for a while every sync of a node takes long by its clock. A leader gives its
+  leadership up.
+- *Hand-over:* a leader is asked to transfer its leadership to another node.
+- At the end every state machine is scrubbed and no alarm is set.
+
 **State of the work.** Injected so far: lost, delayed, and repeated messages; partitions;
-crashes between operations and in the middle of a file operation; restarts. Still to come
-in this milestone: damage to stored data and the repairs it triggers, full and slow disks,
-membership changes, leadership transfers, lost identity, the invariants of §2.4 over
-complete nodes, the probes of §3.1, and traces for the model.
+crashes between operations and in the middle of a file operation; restarts; damaged logs
+and tables; short and slow disks; hand-overs. Still to come in this milestone: membership
+changes, lost identity, the invariants of §2.4 over complete nodes, the remaining probes of
+§3.1, and traces for the model.
+
+What the simulation found while it was built:
+
+- An `Error` in the middle of a write left the storage engine with a request at the head of
+  its write queue forever; closing it never returned (`storage-engine.md` §9).
+- Damage after the last sync point of the newest log segment left a node with a state
+  machine ahead of its log, and the node refused to start. It now takes the state machine as
+  a witness and enters log-recovering mode (`node.md` §3.3).
 
 Mutations that the simulation catches: a repeated command applied again; an older command
 of a session applied; the log shortened without a flush before; the applied index not
