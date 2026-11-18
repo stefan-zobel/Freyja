@@ -205,7 +205,7 @@ public final class FreyjaClient implements Closeable {
      * @param end   an empty array for no upper bound
      */
     public List<Entry> scan(byte[] start, byte[] end, int limit) {
-        return scan(start, end, limit, false);
+        return scan(start, end, limit, false, false);
     }
 
     /**
@@ -216,11 +216,19 @@ public final class FreyjaClient implements Closeable {
      * @param end   an empty array for no upper bound
      */
     public List<Entry> scanReverse(byte[] start, byte[] end, int limit) {
-        return scan(start, end, limit, true);
+        return scan(start, end, limit, true, false);
     }
 
-    private List<Entry> scan(byte[] start, byte[] end, int limit, boolean reverse) {
-        Pairs pairs = (Pairs) read(new ClientRequest.Scan(start, end, limit, reverse, false));
+    /**
+     * Reads a range in ascending order from whatever node answers first. The answer may be
+     * older than what a linearizable scan gives.
+     */
+    public List<Entry> scanStale(byte[] start, byte[] end, int limit) {
+        return scan(start, end, limit, false, true);
+    }
+
+    private List<Entry> scan(byte[] start, byte[] end, int limit, boolean reverse, boolean stale) {
+        Pairs pairs = (Pairs) read(new ClientRequest.Scan(start, end, limit, reverse, stale));
         List<Entry> entries = new ArrayList<>(pairs.pairs().size());
         for (ClientResponse.Pair pair : pairs.pairs()) {
             entries.add(new Entry(pair.key(), pair.value(), pair.modIndex()));

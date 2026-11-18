@@ -60,7 +60,13 @@ to one node and prints the answer: `status`, `add-learner N PEER CLIENT`, `promo
 [--cluster-version V]` prepares a data directory; without voters, for a node that is to
 join. `FreyjaNode run --data DIR --peer HOST:PORT --client HOST:PORT --admin HOST:PORT
 [--seed N=HOST:PORT]... [--tick-ms MILLIS]` runs the node and prints
-`READY node=N peer=PORT client=PORT admin=PORT` when it listens.
+`READY node=N peer=PORT client=PORT admin=PORT` when it listens. Further options of `run`,
+each with a number of bytes or of entries: `--segment-bytes` (a segment of the Raft log,
+64 MiB), `--snapshot-log-bytes` (the size of the log at which the node takes a snapshot and
+shortens it, 1 GiB), `--snapshot-retain` (the applied entries it keeps then, 10,000),
+`--quota-bytes` (the size of the state machine at which the alarm for lack of space is
+raised, 16 GiB), `--min-free-bytes` (the free space of the file system below which it is
+raised, 1 GiB).
 
 
 ## 2. Observability

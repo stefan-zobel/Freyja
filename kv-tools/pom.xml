@@ -12,6 +12,38 @@
 
     <artifactId>kv-tools</artifactId>
 
+    <properties>
+        <!-- The external fault suite starts processes and breaks them; it runs only in its profile. -->
+        <excludedTestGroups>external</excludedTestGroups>
+        <includedTestGroups/>
+    </properties>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <groups>${includedTestGroups}</groups>
+                    <excludedGroups>${excludedTestGroups}</excludedGroups>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <!-- ./mvnw -pl kv-tools -am test -Pexternal-faults [-Dfreyja.external.runs=50]
+             Clusters of real processes under kills, pauses, and network faults; the histories
+             of their clients are checked (docs/spec/verification.md, section 4). -->
+        <profile>
+            <id>external-faults</id>
+            <properties>
+                <excludedTestGroups/>
+                <includedTestGroups>external</includedTestGroups>
+            </properties>
+        </profile>
+    </profiles>
+
     <dependencies>
         <dependency>
             <groupId>io.github.stefan-zobel</groupId>
@@ -27,6 +59,13 @@
         <dependency>
             <groupId>io.github.stefan-zobel</groupId>
             <artifactId>kv-client</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- The external fault suite checks its histories with the checker of the simulator. -->
+        <dependency>
+            <groupId>io.github.stefan-zobel</groupId>
+            <artifactId>raft-sim</artifactId>
             <version>${project.version}</version>
             <scope>test</scope>
         </dependency>

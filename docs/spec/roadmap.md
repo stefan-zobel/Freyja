@@ -99,6 +99,11 @@ Rules:
   - Open: a scheduled job that runs it; the multi-version harness, which needs a second
     release to load.
 - **D2.** External fault suite on Linux with the independent checker cross-check.
+  - Done so far: the suite with its proxy, its clients, and its scenarios
+    (`verification.md` §4); kills, partitions, and the slow network pass on the development
+    machine.
+  - Open: pauses, the full disk, and the cross-check, which need Linux; the count of
+    consecutive green runs of the exit criteria; the privileged stage.
 - **D3.** `kv-bench`: workloads, open-loop load generator, baselines. Tuning. Overload tests.
   - Done so far: the module with the open-loop load generator, the six workloads, the
     latency histogram, stored results, and the comparison with a baseline.
@@ -144,7 +149,7 @@ leaves this list in the change that completes it.
 
 | Item | Milestone | Notes |
 |---|---|---|
-| External fault suite with the cross-check by an independent checker | D2 | Not started; the device-level stage is optional and needs privileges |
+| External fault suite: pauses, the full disk, the cross-check by an independent checker, 50 green runs per scenario | D2 | The suite is written; the device-level stage is optional and needs privileges |
 | Performance baselines on the production platform; tuning | D3 | |
 | Soak tests of several days with monitoring | D4 | Not started; needs a machine that can be left alone for a week |
 

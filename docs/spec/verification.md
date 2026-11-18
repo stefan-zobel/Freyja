@@ -528,6 +528,60 @@ Real processes on real file systems and sockets.
 - Histories are checked with the project's checker and also exported in the history format
   of an independent linearizability checker for a cross-check.
 
+The suite (`ExternalFaultTest` in `kv-tools`, profile `external-faults`):
+
+```
+./mvnw -pl kv-tools -am test -Pexternal-faults [-Dfreyja.external.runs=50]
+```
+
+- **The cluster:** one process per node, started with the node program, on data directories
+  of its own. The ports of a node stay the same over its restarts.
+- **The proxy:** every direction of every link between two nodes passes through a TCP proxy
+  of the test. A node knows a peer by the address of the proxy for that direction. A proxy
+  can swallow everything (connections stay open and the sender learns nothing), delay
+  everything, or break its connections. Clients reach the nodes directly: a node that is cut
+  off from its peers is still asked.
+- **The clients:** six, through the client library, each with a session of its own. They
+  read, write, and compare-and-set registers. Every write writes a value that no other
+  operation writes. The keys in use move on during a run, so that the history of one key
+  stays short enough to be checked. Every other client has a short timeout and gives up
+  while a fault still lasts.
+- **The history:** an answered operation with its result; a write or a compare-and-set of
+  which the client says that its outcome is unknown, as an operation without a response; an
+  operation of which the client says that it had no effect, not at all. The checkers take
+  the client at its word, so a wrong word of the client library fails the check.
+- **Scenarios**, each with faults for a set time (30 seconds by default), one after the other
+  with a pause between them:
+
+  | Scenario | Nodes | Faults |
+  |---|---|---|
+  | kill | 3 | one node or a majority is killed and started again; the leader as often as any other |
+  | pause | 3 | a node, the leader as often as any other, is stopped by a signal and goes on later (Linux) |
+  | partition | 5 | a node is isolated; a node is heard and hears nothing, or the reverse; two groups |
+  | slow network | 3 | delays of up to 250 ms on most directions, and connections that break |
+  | all | 5 | all of the above in turn |
+  | full disk | 3 | one node on a small file system; see below |
+
+- **What a run must show**, after the last fault is healed and every process runs:
+  - the clients get answers again;
+  - no client failed in a way the client library does not define;
+  - a key written last reaches every node, and all nodes answer a stale scan of everything
+    alike, values and modification indexes;
+  - the history is linearizable for the checker of the project, and for the independent one
+    if it is given (`-Dfreyja.external.porcupine=PROGRAM`; its source is in
+    `kv-tools/src/test/external/porcupine`);
+  - the processes end in order, and `NodeVerify` finds every data directory whole.
+- **The full disk** (`-Dfreyja.external.smallfs=DIRECTORY`, an empty directory on a file
+  system of about 64 MiB): the cluster is filled until the node on the small disk raises the
+  alarm. Then writes are refused, reads and deletes are served; after deletes, a snapshot,
+  and a compaction on that node there is room again, the alarm is cleared, and writes are
+  taken again.
+- A run prints its seed. The data directories, the output of the nodes, and the history of a
+  run that fails are kept (`-Dfreyja.external.dir=DIRECTORY` says where).
+
+Open: the scenarios pause and full disk have not run yet, nor has the cross-check; they need
+Linux. The privileged stage is not built.
+
 ## 5. Compatibility Suite
 
 - For every release: a data directory, a backup, and captures of every message type are

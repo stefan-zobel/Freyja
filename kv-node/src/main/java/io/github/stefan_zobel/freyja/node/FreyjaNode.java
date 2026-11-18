@@ -28,7 +28,14 @@ import io.github.stefan_zobel.freyja.raft.RaftConfig;
  * FreyjaNode init --data DIR --cluster HEX --node N [--voters N,N,...] [--cluster-version V]
  * FreyjaNode run  --data DIR --peer HOST:PORT --client HOST:PORT --admin HOST:PORT
  *                 [--seed N=HOST:PORT]... [--tick-ms MILLIS] [--status HOST:PORT]
+ *                 [--segment-bytes N] [--snapshot-log-bytes N] [--snapshot-retain N]
+ *                 [--quota-bytes N] [--min-free-bytes N]
  * </pre>
+ *
+ * <p>The last five set the size of a segment of the Raft log (64 MiB), the size of the log at
+ * which the node takes a snapshot and shortens it (1 GiB), the number of applied entries it
+ * keeps then (10,000), the size of the state machine at which the alarm for lack of space is
+ * raised (16 GiB), and the free space of the file system below which it is raised (1 GiB).
  *
  * <p>{@code --status} serves the metrics and the health of the node over HTTP: {@code /metrics},
  * {@code /health}, {@code /ready}.
@@ -105,6 +112,8 @@ public final class FreyjaNode {
         err.println("       FreyjaNode recover-majority --data DIR --cluster HEX --i-accept-data-loss yes");
         err.println("       FreyjaNode run --data DIR --peer HOST:PORT --client HOST:PORT --admin HOST:PORT"
                 + " [--seed N=HOST:PORT]... [--tick-ms MILLIS] [--status HOST:PORT]");
+        err.println("                      [--segment-bytes N] [--snapshot-log-bytes N] [--snapshot-retain N]"
+                + " [--quota-bytes N] [--min-free-bytes N]");
         return 2;
     }
 
@@ -183,8 +192,13 @@ public final class FreyjaNode {
             seeds.put(Integer.parseInt(seed.substring(0, equals)), seed.substring(equals + 1));
         }
         int tick = Integer.parseInt(one(options, "tick-ms", "100"));
-        Node.Options node = new Node.Options(RaftConfig.defaults(0, System.nanoTime()), 64L << 20, 4096, 1L << 30,
-                10_000, SnapshotTransfers.Options.defaults(), Node.Limits.defaults(), Clock.SYSTEM);
+        Node.Limits limits = Node.Limits.defaults();
+        limits = new Node.Limits(limits.maxApplyLag(), size(options, "quota-bytes", limits.quotaBytes()),
+                size(options, "min-free-bytes", limits.minFreeBytes()), limits.alarmCheckTicks(),
+                limits.slowSyncNanos());
+        Node.Options node = new Node.Options(RaftConfig.defaults(0, System.nanoTime()),
+                size(options, "segment-bytes", 64L << 20), 4096, size(options, "snapshot-log-bytes", 1L << 30),
+                size(options, "snapshot-retain", 10_000), SnapshotTransfers.Options.defaults(), limits, Clock.SYSTEM);
         NodeServer server = NodeServer.start(new RealFileSystem(), new NodeServer.Settings(data,
                 resolve(one(options, "peer", null)), resolve(one(options, "client", null)),
                 resolve(one(options, "admin", null)), seeds, node,
@@ -212,6 +226,14 @@ public final class FreyjaNode {
             Thread.currentThread().interrupt();
         }
         return 0;
+    }
+
+    private static long size(Map<String, List<String>> options, String name, long fallback) {
+        long value = Long.parseLong(one(options, name, Long.toString(fallback)));
+        if (value < 0) {
+            throw new IllegalArgumentException("--" + name + " is negative");
+        }
+        return value;
     }
 
     private static InetSocketAddress resolve(String address) {
