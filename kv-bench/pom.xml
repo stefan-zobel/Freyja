@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.github.stefan-zobel</groupId>
+        <artifactId>Freyja</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>kv-bench</artifactId>
+
+    <!-- The load generator is a client of a cluster: it needs the client library only. -->
+    <dependencies>
+        <dependency>
+            <groupId>io.github.stefan-zobel</groupId>
+            <artifactId>kv-client</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.stefan-zobel</groupId>
+            <artifactId>kv-common</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <!-- Its tests run it against nodes in the same process. -->
+        <dependency>
+            <groupId>io.github.stefan-zobel</groupId>
+            <artifactId>kv-node</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

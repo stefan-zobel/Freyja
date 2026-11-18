@@ -18,6 +18,7 @@
         <module>kv-client</module>
         <module>kv-node</module>
         <module>kv-tools</module>
+        <module>kv-bench</module>
     </modules>
 
     <properties>

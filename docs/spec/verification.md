@@ -554,6 +554,30 @@ disk usage relative to live data, latency drift.
 - Overload tests: at twice the sustainable load the system must reject requests quickly and
   keep the latency of admitted requests bounded.
 
+The load generator (`FreyjaBench` in `kv-bench`):
+
+- Request number `i` is due `i / rate` seconds after the start. A fixed number of clients
+  carry the requests out. The latency of a request counts from the moment it was due, not
+  from the moment a client had time for it.
+- If the clients cannot keep up, requests wait and their latencies grow. Beyond five seconds
+  of load in the queue, further requests are counted as shed and not sent: the generator is
+  bounded too.
+- Latencies go into a histogram of fixed size with a relative error of about one percent,
+  one per client, merged at the end.
+- A result is a text file of `name = value` lines: the settings, the hardware (operating
+  system, architecture, processors, Java version), the counts of requests due, completed,
+  failed, and shed, the throughput, and the latencies at p50, p99, p99.9, and the maximum.
+- A comparison with a stored result is refused if the settings or the hardware differ. A run
+  is worse than its baseline if its throughput is more than ten percent lower, a latency
+  more than ten percent higher, or more requests failed or were shed.
+- `FreyjaBench --endpoints H:P[,...] --workload NAME [--rate N] [--seconds N] [--clients N]
+  [--keys N] [--value-bytes N] [--seed N] [--timeout-ms N] [--record FILE] [--baseline FILE]`.
+  Exit code 1 if the run is worse than the baseline.
+
+Open: the workloads during compaction, snapshot transfer, and follower catch-up; write and
+space amplification, which need figures of the nodes; the overload tests; baselines recorded
+on the production platform.
+
 ## 8. Exit Criteria
 
 "Production-grade" is defined for this project by the following measurable conditions on one

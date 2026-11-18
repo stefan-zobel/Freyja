@@ -101,6 +101,9 @@ Rules:
     release to load.
 - **D2.** External fault suite on Linux with the independent checker cross-check.
 - **D3.** `kv-bench`: workloads, open-loop load generator, baselines. Tuning. Overload tests.
+  - Done so far: the module with the open-loop load generator, the six workloads, the
+    latency histogram, stored results, and the comparison with a baseline.
+  - Open: what `verification.md` §7 lists as open; tuning; baselines on Linux.
 - **D4.** Soak tests with monitoring.
 
 ## Phase E — Operations
