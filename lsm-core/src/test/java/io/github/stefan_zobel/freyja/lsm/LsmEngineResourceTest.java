@@ -216,7 +216,7 @@ class LsmEngineResourceTest {
         EngineOptions normal = new EngineOptions().reserveSize(0).minFreeSpace(0)
                 .blockCacheCapacity(1 << 20)
                 .level0CompactionTrigger(4)
-                .compactionBytesPerSecond(2_000_000);
+                .compactionBytesPerSecond(400_000);
         try (LsmEngine engine = LsmEngine.open(fs, dir, normal)) {
             for (int file = 0; file < 4; file++) {
                 for (int i = 0; i < 100; i++) {
@@ -229,9 +229,11 @@ class LsmEngineResourceTest {
                 Thread.sleep(2);
             }
             assertEquals(0, engine.tableCount(0), "the background compaction ran");
-            // 400 entries of about 220 bytes at 2 MB per second: about 40 ms of waiting.
+            // 400 entries of about 220 bytes at 400 kB per second: about 200 ms of waiting, less
+            // what the compaction takes by itself. The bounds are wide, because a slow machine
+            // needs less waiting to stay below the rate and sleeps longer than it is asked to.
             long throttled = engine.compactionThrottledNanos();
-            assertTrue(throttled > 20_000_000L && throttled < 200_000_000L, "throttled for " + throttled + " ns");
+            assertTrue(throttled > 40_000_000L && throttled < 2_000_000_000L, "throttled for " + throttled + " ns");
         }
     }
 

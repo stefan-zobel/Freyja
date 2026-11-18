@@ -89,6 +89,72 @@ class LsmEngineBackgroundTest {
         }
     }
 
+    /**
+     * A few keys are overwritten all the time, so that every compaction drops versions of
+     * them. A read without a snapshot must still see at least what was written before it
+     * began: it must not take its sequence number first and then read a state from which a
+     * compaction has removed the version that number sees.
+     */
+    @Test
+    void aReadWithoutASnapshotSeesWhatWasWrittenBeforeItWhileCompactionsDropVersions() throws Exception {
+        int keys = 4;
+        int rounds = 3_000;
+        AtomicLongArray written = new AtomicLongArray(keys);
+        AtomicBoolean stop = new AtomicBoolean();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        try (LsmEngine engine = LsmEngine.open(fs, dir, options)) {
+            List<Thread> readers = new ArrayList<>();
+            for (int r = 0; r < 8; r++) {
+                int reader = r;
+                readers.add(new Thread(() -> {
+                    try {
+                        for (long i = reader; !stop.get(); i++) {
+                            int index = (int) (i % keys);
+                            long finished = written.get(index);
+                            byte[] value;
+                            String how;
+                            if (reader % 3 == 0) {
+                                how = "get";
+                                value = engine.get(b(key(index)));
+                            } else {
+                                how = reader % 3 == 1 ? "scan" : "reverse scan";
+                                try (ScanIterator scan = reader % 3 == 1
+                                        ? engine.scan(b(key(index)), b(key(index + 1)))
+                                        : engine.scanReverse(b(key(index)), b(key(index + 1)))) {
+                                    value = scan.valid() ? scan.value() : null;
+                                }
+                            }
+                            long counter = value == null ? 0 : Long.parseLong(s(value).split("-")[0]);
+                            if (counter < finished) {
+                                throw new AssertionError(how + " of key " + index + " returned " + counter
+                                        + " after " + finished + " was written");
+                            }
+                        }
+                    } catch (Throwable e) {
+                        failure.compareAndSet(null, e);
+                    }
+                }, "reader-" + r));
+            }
+            for (Thread thread : readers) {
+                thread.start();
+            }
+            for (long round = 1; round <= rounds && failure.get() == null; round++) {
+                for (int index = 0; index < keys; index++) {
+                    engine.put(b(key(index)), b(round + "-" + "v".repeat(100)));
+                    written.set(index, round);
+                }
+            }
+            stop.set(true);
+            for (Thread thread : readers) {
+                thread.join();
+            }
+            if (failure.get() != null) {
+                throw new AssertionError(failure.get());
+            }
+        }
+        assertEquals(0, fs.openHandleCount());
+    }
+
     @Test
     void readersAndScansStayConsistentWhileBackgroundWorkRuns() throws Exception {
         int writers = 4;

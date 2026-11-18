@@ -1735,14 +1735,25 @@ public final class LsmEngine implements Closeable {
     // ---- reads -----------------------------------------------------------------------------
 
     /**
+     * Stands for "the current state" where a read takes the sequence number of a snapshot.
+     *
+     * <p>A read without a snapshot must take its sequence number after it has pinned its
+     * state, never before. No snapshot protects that number. Between the two steps a
+     * compaction may drop the version the number sees, because a newer one shadows it, and
+     * publish a state that holds only the newer one: the read would then find an older
+     * version from a deeper level, or nothing. A pinned state keeps the newest version of
+     * every key it held when it was pinned, and those are all at or below a number taken
+     * afterward.
+     */
+    private static final long CURRENT = -1;
+
+    /**
      * Returns the value stored under {@code key}, or {@code null} if there is none.
      *
      * @throws CorruptionException if a table block needed for the answer is damaged
      */
     public byte[] get(byte[] key) throws IOException {
-        // The sequence number is read before the state: the state read afterward holds at
-        // least everything up to it.
-        return lookup(key, lastSequence);
+        return lookup(key, CURRENT);
     }
 
     /**
@@ -1753,12 +1764,16 @@ public final class LsmEngine implements Closeable {
         return lookup(key, snapshot.sequenceFor(this));
     }
 
-    private byte[] lookup(byte[] key, long snapshot) throws IOException {
+    /**
+     * @param at the sequence number of a snapshot, or {@link #CURRENT}
+     */
+    private byte[] lookup(byte[] key, long at) throws IOException {
         if (key.length == 0) {
             throw new IllegalArgumentException("keys must not be empty");
         }
         ReadState current = pinState();
         try {
+            long snapshot = at == CURRENT ? lastSequence : at;
             Lookup lookup = current.mem().get(key, snapshot);
             // The waiting MemTables, newest first.
             for (int i = current.frozen().size() - 1; i >= 0 && lookup.kind() == Lookup.Kind.ABSENT; i--) {
@@ -1841,7 +1856,7 @@ public final class LsmEngine implements Closeable {
      * @param end   the key to stop before, or {@code null} to scan to the largest key
      */
     public ScanIterator scan(byte[] start, byte[] end) throws IOException {
-        return scan(start, end, lastSequence, false);
+        return scan(start, end, CURRENT, false);
     }
 
     /**
@@ -1849,7 +1864,7 @@ public final class LsmEngine implements Closeable {
      * largest key below {@code end} comes first.
      */
     public ScanIterator scanReverse(byte[] start, byte[] end) throws IOException {
-        return scan(start, end, lastSequence, true);
+        return scan(start, end, CURRENT, true);
     }
 
     /** Scans a range as it was when {@code snapshot} was taken. */
@@ -1862,11 +1877,15 @@ public final class LsmEngine implements Closeable {
         return scan(start, end, snapshot.sequenceFor(this), true);
     }
 
-    private ScanIterator scan(byte[] start, byte[] end, long snapshot, boolean reverse) throws IOException {
+    /**
+     * @param at the sequence number of a snapshot, or {@link #CURRENT}
+     */
+    private ScanIterator scan(byte[] start, byte[] end, long at, boolean reverse) throws IOException {
         if ((start != null && start.length == 0) || (end != null && end.length == 0)) {
             throw new IllegalArgumentException("range bounds must not be empty; use null for no bound");
         }
         ReadState current = pinState();
+        long snapshot = at == CURRENT ? lastSequence : at;
         List<InternalIterator> sources = new ArrayList<>();
         try {
             sources.add(current.mem().iterator());

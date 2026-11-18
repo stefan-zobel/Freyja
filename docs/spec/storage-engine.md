@@ -213,6 +213,12 @@ All limits are fields of `EngineOptions` and are enforced, not advisory.
     replaced as a whole. It holds a reference to the reader of each of its table files.
   - A read pins the state it starts with and unpins it when it ends; a scan keeps its pin
     until it is closed.
+  - A read without a snapshot takes its sequence number after it has pinned its state, never
+    before. No snapshot protects that number: between the two steps a compaction could drop
+    the version the number sees, because a newer one shadows it, and publish a state that
+    holds only the newer one. The read would find an older version in a deeper level, or
+    nothing. A pinned state keeps the newest version of every key it held when it was
+    pinned, and all of those are at or below a number taken afterward.
 - Flush, compaction, and scrubbing run on background threads in normal mode. In
   **deterministic mode** there are no background threads; these tasks run only when the caller
   invokes them. All randomized tests and both simulations use deterministic mode.
