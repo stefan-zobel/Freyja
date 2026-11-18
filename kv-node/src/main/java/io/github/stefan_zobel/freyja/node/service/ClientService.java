@@ -10,7 +10,9 @@ import java.util.TreeMap;
 import java.util.function.IntFunction;
 import java.util.function.LongSupplier;
 
+import io.github.stefan_zobel.freyja.common.Clock;
 import io.github.stefan_zobel.freyja.common.DecodeException;
+import io.github.stefan_zobel.freyja.common.Metrics;
 import io.github.stefan_zobel.freyja.common.kv.ClientCodec;
 import io.github.stefan_zobel.freyja.common.kv.ClientRequest;
 import io.github.stefan_zobel.freyja.common.kv.ClientResponse;
@@ -81,7 +83,7 @@ public final class ClientService implements NodeListener {
     }
 
     /** A request that waits for the log or for a read index. */
-    private record Waiting(long requestId, Reply reply, long deadline, ClientRequest request) {
+    private record Waiting(long requestId, Reply reply, long deadline, ClientRequest request, long arrivedNanos) {
     }
 
     private final Options options;
@@ -97,6 +99,8 @@ public final class ClientService implements NodeListener {
     private final List<long[]> reads = new ArrayList<>();
     private long nextId;
     private long sweptAt;
+    private Metrics metrics = Metrics.NONE;
+    private Clock clock = () -> 0;
     private long answered;
     private long dropped;
     private long invalid;
@@ -153,7 +157,8 @@ public final class ClientService implements NodeListener {
             return;
         }
         long ticks = Math.max(1, (envelope.timeoutMillis() + options.tickMillis() - 1L) / options.tickMillis());
-        Waiting w = new Waiting(envelope.requestId(), reply, node.now() + ticks, envelope.request());
+        Waiting w = new Waiting(envelope.requestId(), reply, node.now() + ticks, envelope.request(),
+                clock.nanoTime());
         switch (envelope.request()) {
             case ClientRequest.Execute execute -> execute(w, execute.command());
             case ClientRequest.Get get -> read(w, get.stale());
@@ -269,7 +274,24 @@ public final class ClientService implements NodeListener {
 
     private void send(Waiting w, ClientResponse response) {
         answered++;
+        switch (response) {
+            case Rejected rejected -> metrics.count("client.rejected." + rejected.reason().name().toLowerCase(
+                    java.util.Locale.ROOT), 1);
+            case NotLeader _ -> metrics.count("client.redirected", 1);
+            default -> metrics.duration(w.request() instanceof ClientRequest.Execute ? "client.command"
+                    : "client.read", clock.nanoTime() - w.arrivedNanos());
+        }
         w.reply().send(ClientCodec.encode(w.requestId(), response));
+    }
+
+    /**
+     * Where the service reports: how long commands and reads take from their arrival to
+     * their answer, and how many requests are refused, by reason. Set before the first
+     * request.
+     */
+    public void measure(Metrics metrics, Clock clock) {
+        this.metrics = metrics;
+        this.clock = clock;
     }
 
     private NotLeader notLeader(int leaderHint) {

@@ -13,12 +13,16 @@ import java.util.function.IntFunction;
 import java.util.function.LongSupplier;
 
 import io.github.stefan_zobel.freyja.common.Clock;
+import io.github.stefan_zobel.freyja.common.Metrics;
+import io.github.stefan_zobel.freyja.common.kv.Command;
 import io.github.stefan_zobel.freyja.lsm.fs.StorageFileSystem;
 import io.github.stefan_zobel.freyja.node.service.AdminService;
 import io.github.stefan_zobel.freyja.node.service.ClientService;
 import io.github.stefan_zobel.freyja.node.sm.KvStateMachine;
 import io.github.stefan_zobel.freyja.node.sm.StateMachineStore;
 import io.github.stefan_zobel.freyja.node.store.LostIdentityException;
+import io.github.stefan_zobel.freyja.raft.PeerProgress;
+import io.github.stefan_zobel.freyja.raft.ProtocolState;
 
 /**
  * Runs one node in real time (docs/spec/node.md, section 1): the thread that steps the event
@@ -60,6 +64,10 @@ public final class NodeRuntime implements Closeable {
         }
     }
 
+    private static final System.Logger LOG = System.getLogger("freyja.node");
+    /** A node this many entries behind what is committed does not count as ready. */
+    private static final long READY_LAG = 10_000;
+
     /** A request of a client on its way to the thread of the node. */
     private record ClientCall(byte[] frame, ClientService.Reply reply) {
     }
@@ -95,6 +103,14 @@ public final class NodeRuntime implements Closeable {
     private volatile Throwable fatal;
     private volatile Throwable lastFailure;
     private volatile long restarts;
+    private volatile String notReady = "the node is not running";
+    private Metrics metrics = Metrics.NONE;
+    private long publishes;
+    private String loggedRole;
+    private String loggedMembers;
+    private boolean loggedRecovering;
+    private boolean loggedAlarm;
+    private long loggedInstalled;
     private final AtomicLong refused = new AtomicLong();
 
     /** Only the thread of the runtime touches the node. */
@@ -180,9 +196,11 @@ public final class NodeRuntime implements Closeable {
                     nextTick = clock.nanoTime() + tickNanos;
                 }
                 long now = clock.nanoTime();
+                boolean ticked = false;
                 for (int ticks = 0; now - nextTick >= 0 && ticks < 5; ticks++) {
                     node.tick();
                     nextTick += tickNanos;
+                    ticked = true;
                 }
                 if (now - nextTick >= 0) {
                     nextTick = now + tickNanos; // far behind: time that was missed is not made up
@@ -197,6 +215,9 @@ public final class NodeRuntime implements Closeable {
                 }
                 service.afterStep();
                 passAddressesOn();
+                if (ticked) {
+                    publish();
+                }
                 if (inbound.isEmpty()) {
                     long wait = nextTick - clock.nanoTime();
                     if (wait > 0) {
@@ -210,11 +231,14 @@ public final class NodeRuntime implements Closeable {
                 break;
             } catch (LostIdentityException e) {
                 fatal = e;
+                LOG.log(System.Logger.Level.ERROR, "the node has lost its identity and does not run again;"
+                        + " replace the member: " + e.getMessage());
                 break;
             } catch (IOException | RuntimeException e) {
                 // The node has stopped. It is started again from what is on disk.
                 lastFailure = e;
                 restarts++;
+                LOG.log(System.Logger.Level.ERROR, "the node stopped and is started again: " + e, e);
                 stopNode();
                 try {
                     Thread.sleep(config.restartMillis());
@@ -237,6 +261,97 @@ public final class NodeRuntime implements Closeable {
         service.attach(node);
         admin.attach(node, restarts);
         running = true;
+        LOG.log(System.Logger.Level.INFO, "node " + node.identity().nodeId() + " of cluster "
+                + Long.toHexString(node.identity().clusterId()) + " started: " + node.view() + ", applied "
+                + node.store().appliedIndex()
+                + (node.repairedAtStart() ? "; its state machine was damaged and is being rebuilt" : "")
+                + (node.lostTailWitnessed() ? "; its log had lost entries that were synced" : ""));
+    }
+
+    /**
+     * Publishes the state of the node as gauges, notes whether it can serve, and logs every
+     * change of its state once (docs/spec/operations.md, section 2). Once per tick.
+     */
+    private void publish() {
+        ProtocolState state = node.view();
+        KvStateMachine machine = node.store().machine();
+        long applied = machine.appliedIndex();
+        boolean alarm = machine.alarms().contains(Command.Alarm.NOSPACE);
+        metrics.gauge("raft.term", state.term());
+        metrics.gauge("raft.role", state.role().ordinal());
+        metrics.gauge("raft.leader", state.leaderId());
+        metrics.gauge("raft.last.index", state.lastLogIndex());
+        metrics.gauge("raft.commit.index", state.commitIndex());
+        metrics.gauge("raft.applied.index", applied);
+        metrics.gauge("raft.snapshot.index", node.snapshot().lastIncludedIndex());
+        metrics.gauge("raft.log.recovering", state.logRecovering() ? 1 : 0);
+        metrics.gauge("raft.log.segments", node.logSegmentCount());
+        metrics.gauge("node.queue.events", node.waitingEvents());
+        metrics.gauge("node.queue.inbound", inbound.size());
+        metrics.gauge("node.events.rejected", node.rejectedEvents());
+        metrics.gauge("node.messages.invalid", node.invalidMessages());
+        metrics.gauge("node.restarts", restarts);
+        metrics.gauge("node.inbound.refused", refused.get());
+        metrics.gauge("node.snapshots.created", node.snapshotsCreated());
+        metrics.gauge("node.snapshots.installed", node.snapshotsInstalled());
+        metrics.gauge("node.proposals.expired", node.expiredProposals());
+        metrics.gauge("node.slow.sync.step.downs", node.slowSyncStepDowns());
+        metrics.gauge("transfers.outgoing", node.transfers().outgoingCount());
+        metrics.gauge("transfers.sent", node.transfers().sentCount());
+        metrics.gauge("transfers.received", node.transfers().receivedCount());
+        metrics.gauge("transfers.failed", node.transfers().failedCount());
+        metrics.gauge("client.waiting", service.waitingCount());
+        metrics.gauge("client.dropped", service.droppedCount());
+        metrics.gauge("alarm.nospace", alarm ? 1 : 0);
+        metrics.gauge("cluster.version", machine.clusterVersion());
+        metrics.gauge("sessions", machine.sessionCount());
+        for (PeerProgress peer : node.peers()) {
+            metrics.gauge("raft.follower." + peer.nodeId() + ".lag", state.lastLogIndex() - peer.matchIndex());
+            metrics.gauge("raft.follower." + peer.nodeId() + ".active", peer.active() ? 1 : 0);
+        }
+        if (++publishes % 50 == 0) {
+            machine.engine().reportGauges();
+        }
+
+        String waitingFor = state.logRecovering() ? "the node is refilling its log"
+                : state.leaderId() < 0 ? "the node knows no leader"
+                : state.commitIndex() - applied > READY_LAG ? "the node is " + (state.commitIndex() - applied)
+                + " entries behind what is committed" : null;
+        notReady = waitingFor;
+
+        String described = state.role() + " in term " + state.term() + ", leader "
+                + (state.leaderId() < 0 ? "unknown" : "node " + state.leaderId());
+        if (!described.equals(loggedRole)) {
+            if (state.role().name().equals("LEADER") && !described.equals(loggedRole)) {
+                metrics.count("raft.elections.won", 1);
+            }
+            loggedRole = described;
+            LOG.log(System.Logger.Level.INFO, "node " + state.nodeId() + " is " + described);
+        }
+        String members = "voters " + new java.util.TreeSet<>(state.config().voters()) + ", learners "
+                + new java.util.TreeSet<>(state.config().learners());
+        if (!members.equals(loggedMembers)) {
+            loggedMembers = members;
+            LOG.log(System.Logger.Level.INFO, "node " + state.nodeId() + ": the configuration in force is "
+                    + members);
+        }
+        if (state.logRecovering() != loggedRecovering) {
+            loggedRecovering = state.logRecovering();
+            LOG.log(System.Logger.Level.WARNING, "node " + state.nodeId() + (loggedRecovering
+                    ? " has lost entries of its log and is refilling it from the leader"
+                    : " has its log back and counts again"));
+        }
+        if (alarm != loggedAlarm) {
+            loggedAlarm = alarm;
+            LOG.log(System.Logger.Level.WARNING, "the alarm for lack of space is " + (alarm
+                    ? "set: only deletes are accepted" : "cleared"));
+        }
+        long installed = node.snapshotsInstalled();
+        if (installed != loggedInstalled) {
+            loggedInstalled = installed;
+            LOG.log(System.Logger.Level.INFO, "node " + state.nodeId() + " took the state machine of the leader"
+                    + " through index " + node.snapshot().lastIncludedIndex());
+        }
     }
 
     /** Tells the owner of the network where the nodes listen, when the replicated state has news. */
@@ -254,6 +369,8 @@ public final class NodeRuntime implements Closeable {
 
     private void stopNode() {
         running = false;
+        notReady = "the node is not running";
+        loggedInstalled = 0;
         service.detach();
         admin.detach();
         if (node != null) {
@@ -277,6 +394,31 @@ public final class NodeRuntime implements Closeable {
     }
 
     // ------------------------------------------------------------------ status, from any thread
+
+    /**
+     * Where the runtime, the service for clients, and the storage engine report. Set before
+     * {@link #start}; the engine settings of the configuration must name the same sink.
+     */
+    public void measure(Metrics metrics) {
+        this.metrics = metrics;
+        service.measure(metrics, clock);
+    }
+
+    /** Why the node cannot serve now, or {@code null} if it can. For the readiness endpoint. */
+    public String notReady() {
+        return notReady;
+    }
+
+    /** Why the runtime does not run its node, or {@code null} if it does. For the liveness endpoint. */
+    public String notAlive() {
+        Throwable ended = fatal;
+        Thread running;
+        synchronized (this) {
+            running = thread;
+        }
+        return ended != null ? "the node has ended for good: " + ended.getMessage()
+                : running == null || !running.isAlive() ? "the thread of the node is not running" : null;
+    }
 
     /** Whether the node is open and being stepped. */
     public boolean running() {

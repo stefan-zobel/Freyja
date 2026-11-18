@@ -10,7 +10,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import io.github.stefan_zobel.freyja.common.Version;
 import io.github.stefan_zobel.freyja.common.wire.Handshake;
 import io.github.stefan_zobel.freyja.lsm.fs.StorageFileSystem;
+import io.github.stefan_zobel.freyja.node.metrics.MetricsRegistry;
 import io.github.stefan_zobel.freyja.node.net.ClientListener;
+import io.github.stefan_zobel.freyja.node.net.StatusEndpoint;
 import io.github.stefan_zobel.freyja.node.net.TcpTransport;
 import io.github.stefan_zobel.freyja.node.service.ClientService;
 import io.github.stefan_zobel.freyja.node.sm.StateMachineStore;
@@ -36,10 +38,11 @@ public final class NodeServer implements Closeable {
      * @param node          the settings of the node
      * @param machine       the settings of the state machine
      * @param tickMillis    how long a tick takes
+     * @param statusListen  where to serve metrics and health over HTTP; {@code null} for nowhere
      */
     public record Settings(Path dataDirectory, InetSocketAddress peerListen, InetSocketAddress clientListen,
                            InetSocketAddress adminListen, Map<Integer, String> seedPeers, Node.Options node,
-                           StateMachineStore.Options machine, int tickMillis) {
+                           StateMachineStore.Options machine, int tickMillis, InetSocketAddress statusListen) {
         public Settings {
             seedPeers = Map.copyOf(seedPeers);
         }
@@ -51,9 +54,13 @@ public final class NodeServer implements Closeable {
     private final ClientListener clients;
     private final ClientListener administrators;
     private final Map<Integer, String> clientAddresses = new ConcurrentHashMap<>();
+    private final MetricsRegistry metrics = new MetricsRegistry();
+    private StatusEndpoint status;
 
     private NodeServer(StorageFileSystem fs, Settings settings) throws IOException {
         identity = NodeIdentity.read(fs, settings.dataDirectory());
+        // The engine reports to the same registry as the node.
+        settings.machine().engine().metrics(metrics);
         runtime = new NodeRuntime(fs, new NodeRuntime.Config(settings.dataDirectory(), settings.node(),
                 settings.machine(), new ClientService.Options(settings.tickMillis(), 1_000, 10_000),
                 settings.tickMillis(), 4096, 500, System::currentTimeMillis,
@@ -64,8 +71,13 @@ public final class NodeServer implements Closeable {
                 ClientListener.Options.defaults(), runtime::clientRequest);
         administrators = new ClientListener(identity.clusterId(), identity.nodeId(), Version.SOFTWARE,
                 Handshake.ADMIN, ClientListener.Options.defaults(), runtime::adminRequest);
+        runtime.measure(metrics);
         boolean started = false;
         try {
+            if (settings.statusListen() != null) {
+                status = new StatusEndpoint(settings.statusListen(), this::renderMetrics, runtime::notAlive,
+                        runtime::notReady);
+            }
             transport.listen(settings.peerListen());
             clients.listen(settings.clientListen());
             administrators.listen(settings.adminListen());
@@ -140,12 +152,35 @@ public final class NodeServer implements Closeable {
         return administrators.port();
     }
 
+    /** The port of the HTTP endpoint for metrics and health; -1 if there is none. */
+    public int statusPort() {
+        return status == null ? -1 : status.port();
+    }
+
+    /** The metrics registry of the node. */
+    public MetricsRegistry metrics() {
+        return metrics;
+    }
+
+    private String renderMetrics() {
+        metrics.gauge("transport.sent", transport.sentCount());
+        metrics.gauge("transport.received", transport.receivedCount());
+        metrics.gauge("transport.dropped", transport.droppedCount());
+        metrics.gauge("transport.refused", transport.refusedCount());
+        metrics.gauge("listener.clients.connections", clients.connectionCount());
+        metrics.gauge("listener.clients.refused", clients.refusedCount());
+        return metrics.render();
+    }
+
     /** Stops the listeners, the node, and the transport. */
     @Override
     public void close() throws IOException {
         IOException first = null;
-        for (Closeable part : new Closeable[] {administrators, clients, runtime, transport}) {
+        for (Closeable part : new Closeable[] {status, administrators, clients, runtime, transport}) {
             try {
+                if (part == null) {
+                    continue;
+                }
                 part.close();
             } catch (IOException e) {
                 first = first == null ? e : first;

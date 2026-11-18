@@ -109,6 +109,10 @@ Rules:
 ## Phase E — Operations
 
 - **E1.** Metrics endpoint, logging, health endpoints. Offline tools complete.
+  - Done so far: the metrics registry, the HTTP endpoint with `/metrics`, `/health`, and
+    `/ready`, what a node publishes and logs (`operations.md` §2).
+  - Open: a tool that verifies a whole data directory of a node, not only an engine
+    directory.
 - **E2.** TLS for peers, clients, and administration. Authentication. Certificate reload.
 - **E3.** Backup and restore. Upgrade procedure with finalization. Compatibility suite.
   Lost-majority tool. Runbook, each procedure executed. Review against the exit criteria.

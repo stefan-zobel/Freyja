@@ -26,8 +26,11 @@ import io.github.stefan_zobel.freyja.raft.RaftConfig;
  * <pre>
  * FreyjaNode init --data DIR --cluster HEX --node N [--voters N,N,...] [--cluster-version V]
  * FreyjaNode run  --data DIR --peer HOST:PORT --client HOST:PORT --admin HOST:PORT
- *                 [--seed N=HOST:PORT]... [--tick-ms MILLIS]
+ *                 [--seed N=HOST:PORT]... [--tick-ms MILLIS] [--status HOST:PORT]
  * </pre>
+ *
+ * <p>{@code --status} serves the metrics and the health of the node over HTTP: {@code /metrics},
+ * {@code /health}, {@code /ready}.
  *
  * <p>{@code init} prepares an empty data directory. A node of a new cluster is given the
  * voters the cluster starts with, the same on every node; a node that is to join a cluster is
@@ -86,7 +89,7 @@ public final class FreyjaNode {
         err.println("usage: FreyjaNode init --data DIR --cluster HEX --node N [--voters N,N,...]"
                 + " [--cluster-version V]");
         err.println("       FreyjaNode run --data DIR --peer HOST:PORT --client HOST:PORT --admin HOST:PORT"
-                + " [--seed N=HOST:PORT]... [--tick-ms MILLIS]");
+                + " [--seed N=HOST:PORT]... [--tick-ms MILLIS] [--status HOST:PORT]");
         return 2;
     }
 
@@ -140,9 +143,11 @@ public final class FreyjaNode {
         NodeServer server = NodeServer.start(new RealFileSystem(), new NodeServer.Settings(data,
                 resolve(one(options, "peer", null)), resolve(one(options, "client", null)),
                 resolve(one(options, "admin", null)), seeds, node,
-                new StateMachineStore.Options(new EngineOptions(), 60_000), tick));
+                new StateMachineStore.Options(new EngineOptions(), 60_000), tick,
+                options.containsKey("status") ? resolve(one(options, "status", null)) : null));
         out.println("READY node=" + server.identity().nodeId() + " peer=" + server.peerPort() + " client="
-                + server.clientPort() + " admin=" + server.adminPort());
+                + server.clientPort() + " admin=" + server.adminPort()
+                + (server.statusPort() < 0 ? "" : " status=" + server.statusPort()));
         out.flush();
         if (!block) {
             return 0;

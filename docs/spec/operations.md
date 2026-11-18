@@ -78,6 +78,36 @@ No third-party libraries.
 - **Health:** a liveness endpoint (process is running) and a readiness endpoint (node has a
   leader and its applied index is within a configured distance of the commit index).
 
+**The endpoint.** `FreyjaNode run ... --status HOST:PORT` serves, over HTTP and for `GET`
+only:
+
+- `/metrics`: every metric as one line `name value`, sorted by name. A name is `freyja_` and
+  the reported name with every character that is not a letter, a digit, or an underscore
+  replaced by an underscore. A counter ends in `_total`. A duration gives `_count`, and in
+  microseconds `_p50_micros`, `_p99_micros`, `_p999_micros`, `_max_micros`, from a histogram
+  with a relative error of about one percent.
+- `/health`: 200 while the thread of the node runs; 503 with the reason once the node has
+  ended for good (it has lost its identity).
+- `/ready`: 200 if the node knows a leader, is not refilling its log, and has applied to
+  within 10,000 entries of what is committed; otherwise 503 with the reason.
+
+**What a node publishes**, besides the figures of its storage engine
+(`storage-engine.md` §10), once per tick:
+
+| Kind | Names |
+|---|---|
+| Gauges of the protocol | `raft.term`, `raft.role` (0 follower, 1 pre-candidate, 2 candidate, 3 leader), `raft.leader`, `raft.last.index`, `raft.commit.index`, `raft.applied.index`, `raft.snapshot.index`, `raft.log.recovering`, `raft.log.segments`; on the leader per follower `raft.follower.N.lag` and `raft.follower.N.active` |
+| Gauges of the node | `node.queue.events`, `node.queue.inbound`, `node.events.rejected`, `node.messages.invalid`, `node.inbound.refused`, `node.restarts`, `node.snapshots.created`, `node.snapshots.installed`, `node.proposals.expired`, `node.slow.sync.step.downs`, `alarm.nospace`, `cluster.version`, `sessions` |
+| Gauges of transfers and network | `transfers.outgoing`, `transfers.sent`, `transfers.received`, `transfers.failed`, `transport.sent`, `transport.received`, `transport.dropped`, `transport.refused`, `listener.clients.connections`, `listener.clients.refused` |
+| Clients | durations `client.command` and `client.read`, from the arrival of a request to its answer; counters `client.redirected` and `client.rejected.REASON`; gauges `client.waiting`, `client.dropped` |
+| Counters | `raft.elections.won` |
+
+**What a node logs**, through `System.Logger` under the name `freyja.node`, once per change:
+its start (with a rebuilt state machine or a witnessed loss of its log end, if so), its role
+with term and leader, the configuration in force, entering and leaving log-recovering mode,
+the alarm set and cleared, a snapshot taken from the leader, a stop with its cause before
+the node is started again, and the loss of its identity.
+
 ## 3. Backup and Restore
 
 - **Backup:** an online checkpoint of the state machine plus its `SnapshotMeta`, written to a

@@ -59,7 +59,7 @@ class LoadGeneratorTest {
             servers.add(NodeServer.start(fs, new NodeServer.Settings(DATA, new InetSocketAddress(LOOPBACK, 0),
                     new InetSocketAddress(LOOPBACK, 0), new InetSocketAddress(LOOPBACK, 0), Map.of(), node,
                     new StateMachineStore.Options(new EngineOptions().deterministic(true).reserveSize(0)
-                            .minFreeSpace(0).blockCacheCapacity(8 << 20), 60_000), 20)));
+                            .minFreeSpace(0).blockCacheCapacity(8 << 20), 60_000), 20, null)));
         }
         List<String> endpoints = new ArrayList<>();
         for (NodeServer server : servers) {
