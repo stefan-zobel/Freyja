@@ -30,7 +30,7 @@ class SystemTraceValidationTest {
     Path temp;
 
     /** Longer runs are cut off here; a prefix of a run is a run. */
-    private static final int MAX_STEPS = 3_000;
+    private static final int MAX_STEPS = 6_000;
 
     @Test
     void tracesOfWholeSystemRunsAreBehaviorsOfTheModel() {
@@ -45,6 +45,7 @@ class SystemTraceValidationTest {
             }
             TraceValidator.Verdict verdict = TraceValidator.validate(temp.resolve("seed-" + seed), trace);
             assertTrue(verdict.accepted(), "seed " + seed + ", " + verdict.steps() + " steps: " + verdict.reason());
+            System.out.println("seed " + seed + ": " + verdict.steps() + " steps accepted");
             validated[0] += verdict.steps();
         });
         assertTrue(validated[0] > 5_000, "steps validated: " + validated[0]);

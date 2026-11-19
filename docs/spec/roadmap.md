@@ -75,7 +75,9 @@ Rules:
   - The probes below the node are counted (`verification.md` §3.1).
   - Whole-system runs are recorded as traces in the form of the Raft simulator
     (`verification.md` §2.7).
-  - Open: the validation of those traces, which needs runs of TLC.
+  - Those traces validated with TLC: six complete runs, 26,447 steps (2026-11-19).
+  - Open: a crash between the write of the hard state and the sync of the log of one step,
+    which the model has no state for (`verification.md` §3).
   - The Raft simulator lets the log of a node go back to an earlier state, with entries in
     it again that were cut off, as the log store of a node does after damage
     (`verification.md` §2.4).
@@ -147,7 +149,7 @@ leaves this list in the change that completes it.
 |---|---|---|
 | Trace validation of the runs with membership changes, transfers, and log damage | B3 | A run of TLC; `docs/tla/README.md` |
 | Exhaustive check of a configuration with membership change | B3 | A run of TLC; the last attempt ran out of memory |
-| Validation of the traces of whole-system runs | C3 | A run of TLC: `./mvnw test -pl kv-node -am -Ptrace-validation` |
+| A crash between the write of the hard state and the sync of the log of one step | C3 | A probe in the whole-system simulation; a restart in the model that keeps the hard state of a step without its log |
 | The guard of the finalization: `set-version` is refused unless every member supports the version | E3 | `operations.md` §6; members do not tell the leader yet which versions they support |
 
 **Work that needs Linux:**

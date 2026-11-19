@@ -89,8 +89,11 @@ java -cp ../../tools/tla2tools.jar tlc2.TLC -workers auto -config Raft.cfg Raft.
 ```
 
 With `-pl kv-node -am` the same profile also runs `SystemTraceValidationTest`: traces of
-whole-system runs, recorded from complete nodes on real log stores. They have not been
-validated yet.
+whole-system runs, recorded from complete nodes on real log stores. All six seeds of
+`system-trace-validation` were accepted on 2026-11-19: complete runs of 3,932 to 5,394 steps,
+26,447 steps in all, in 13 minutes. Whether these runs contain a crash between the write of
+the hard state and the sync of the log of one step is not known; the model has no state for
+it (`docs/spec/verification.md`, section 3).
 
 The profile runs `TraceValidationTest`. For each seed it simulates a cluster under the full
 fault model, writes the run as the module `TraceData` (`TlaTraceWriter`), and lets TLC check

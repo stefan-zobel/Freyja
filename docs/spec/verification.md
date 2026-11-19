@@ -265,7 +265,9 @@ the two.
     the line shows the state after that report.
   - The runs that are validated (`traced`) have the faults of `system-faulty`, are short,
     and shorten no log, because the model has no snapshots. The profile
-    `-Ptrace-validation` runs them in `kv-node` (`SystemTraceValidationTest`).
+    `-Ptrace-validation` runs them in `kv-node` (`SystemTraceValidationTest`), complete and
+    not cut off. TLC accepted the six seeds of `system-trace-validation` on 2026-11-19:
+    26,447 steps in 13 minutes.
   - Checked on every build without TLC (`SystemTraceTest`): recording does not change a
     run; the trace is a function of the seed; every start after a crash is a line; a node
     receives only what a node has released in an earlier step.
@@ -472,10 +474,13 @@ invariants of `SystemInvariants` and of `SafetyInvariants`, linearizability, con
 
 Open in this milestone:
 
-- The validation of the traces of whole-system runs (§2.7). The export is written; TLC
-  has not been run on it. Where the first run may disagree with the model: a node writes
-  the hard state and the log of one `Ready` one after the other, so a crash can leave the
-  first without the second, and the model makes the work of a step durable as a whole.
+- A crash between the two writes of one `Ready`. A node writes the hard state first and
+  syncs the log after it, so a crash in between leaves the new term or vote with the old
+  log. That is safe, because no message of the `Ready` has been sent, but the model makes
+  the work of a step durable as a whole and has no such state. TLC accepted the validated
+  traces (§2.7); whether one of them contains that crash is not known. Open: a probe that
+  counts it, and a restart in the model that may keep the hard state of a step without its
+  log.
 - The model lets a damaged log keep a true prefix. It does not know entries that come back
   after the record of their removal is lost (`node.md` §3.3); the Raft simulator and the
   whole-system simulation do. Runs of the Raft simulator that are validated against the
