@@ -340,6 +340,43 @@ class RaftLogStoreTest {
     }
 
     @Test
+    void entriesCutByADamagedSegmentAreInTheLogAgainAsTheyWere() throws IOException {
+        MemoryFileSystem fs = new MemoryFileSystem();
+        long cut;
+        Path victim;
+        try (RaftLogStore store = open(fs)) {
+            for (int i = 0; i < 12; i++) {
+                store.append(batch(store.lastIndex() + 1, 3, 1, 300));
+                store.sync();
+            }
+            victim = segmentFiles(fs).getLast();
+            // The active segment cuts into the one before it and takes other entries there.
+            cut = store.lastIndex() - 8;
+            store.truncateSuffix(cut);
+            store.append(batch(cut, 6, 2, 50));
+            store.sync();
+            assertEquals(victim, segmentFiles(fs).getLast(), "the cut and its entries are in one segment");
+            while (segmentFiles(fs).getLast().equals(victim)) {
+                store.append(batch(store.lastIndex() + 1, 3, 2, 300));
+                store.sync();
+            }
+        }
+        long size = fs.size(victim);
+        byte[] one = fs.peek(victim, size - 20, 1);
+        one[0] ^= 0x04;
+        fs.overwrite(victim, size - 20, one);
+
+        try (RaftLogStore store = open(fs)) {
+            long vouched = store.lastIndex();
+            assertEquals(vouched + 1, store.firstDamagedIndex());
+            assertTrue(vouched >= cut, "the entries cut by the damaged segment are back: " + vouched + " < " + cut);
+            assertEquals(shapes(batch(1, (int) vouched, 1, 300)), content(store, 1));
+            store.quarantineDamaged();
+        }
+        assertEquals(0, fs.openHandleCount());
+    }
+
+    @Test
     void everyDamageOfSyncedSegmentsIsNoticed() {
         Seeds.forEach(RaftLogStoreTest.class, "raft-log-damage", 150, seed -> {
             Random random = new Random(seed);

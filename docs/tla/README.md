@@ -12,7 +12,8 @@ against it; trace validation uses the seed sets without them.
 
 **State of the checks (B3):**
 
-- `Raft.cfg`: exhaustive, no error.
+- `Raft.cfg`: exhaustive, no error, with the model before the partly durable restart
+  (2026-11-19, section 1). With that change the check has to be repeated.
 - `RaftMembership.cfg`: a breadth-first search of nine minutes (14.7 million distinct states,
   depth 14) found no error. It did not finish. A run with smaller bounds that was meant to
   be exhaustive was stopped by the machine for lack of memory and has to be repeated.
@@ -37,7 +38,10 @@ control).
   - a successful append acknowledgment: the entries are durable, and they are known to
     equal the log of the leader of that term.
 - A restart loses everything but the durable state. Of the snapshots on their way, any prefix
-  may have become durable.
+  may have become durable, and of the rest a part (`PartlyDurable`): a node writes the term
+  and the vote of a step before its log, so they may be durable while the log is the old one
+  or the new one cut anywhere after what the two have in common. The log-recovering state
+  stays as it was until the log is durable (`docs/spec/raft.md`, section 3).
 - What the implementation decides by timers and by flow control is left open: a node may
   time out, step down, or send any valid message at any time. The model therefore allows
   more behaviors than the implementation has, which is the safe direction.
@@ -91,9 +95,10 @@ java -cp ../../tools/tla2tools.jar tlc2.TLC -workers auto -config Raft.cfg Raft.
 With `-pl kv-node -am` the same profile also runs `SystemTraceValidationTest`: traces of
 whole-system runs, recorded from complete nodes on real log stores. All six seeds of
 `system-trace-validation` were accepted on 2026-11-19: complete runs of 3,932 to 5,394 steps,
-26,447 steps in all, in 13 minutes. Whether these runs contain a crash between the write of
-the hard state and the sync of the log of one step is not known; the model has no state for
-it (`docs/spec/verification.md`, section 3).
+26,447 steps in all, in 13 minutes. None of them contains a crash between the write of the
+hard state and the write of the log of one step. Three more seeds were chosen because they
+do (`SystemTraceTest.CRASH_BETWEEN_WRITES`); they are part of the profile now and have not
+been validated yet, and neither has the model with the partly durable restart.
 
 The profile runs `TraceValidationTest`. For each seed it simulates a cluster under the full
 fault model, writes the run as the module `TraceData` (`TlaTraceWriter`), and lets TLC check
@@ -165,8 +170,9 @@ and a leader advances its commit index within `RecvAppendResponse` or `PersistK`
 - The trace shows the last index and term of a log, not its content. The content is followed
   by the model through the actions; a wrong entry shows as soon as it changes one of the
   recorded values or makes a released message invalid.
-- At a restart the trace does not say how many writes on their way had reached the disk. TLC
-  tries every number that gives the recorded state.
+- At a restart the trace does not say how many writes on their way had reached the disk, nor
+  how much of the write that was cut off. TLC tries every choice that gives the recorded
+  state.
 - A node that joins reports the empty configuration until the first `CONFIG` entry reaches
   it; the model has the initial configuration there. The comparison allows for that.
 - Whether a majority holds an intact log when damage is injected is not checked in trace

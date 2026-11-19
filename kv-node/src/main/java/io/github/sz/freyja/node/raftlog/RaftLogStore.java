@@ -162,31 +162,23 @@ public final class RaftLogStore implements LogView, Closeable {
             fs.delete(found.removeLast().path);
             fs.syncDirectory(directory);
         }
-        long previous = 0;
         for (int k = 0; k < found.size(); k++) {
             Segment segment = found.get(k);
             if (firstDamagedIndex != -1) {
                 damaged.add(segment);
                 continue;
             }
-            boolean last = k == found.size() - 1;
-            int countBefore = count;
-            long firstBefore = firstIndex;
-            int configsBefore = configIndexes.size();
             try {
-                replay(segment, last ? null : found.get(k + 1), k == 0 ? -1 : previous);
+                replay(segment, k == found.size() - 1 ? null : found.get(k + 1),
+                        k == 0 ? -1 : found.get(k - 1).number);
                 segments.add(segment);
-                previous = segment.number;
             } catch (CorruptionException e) {
                 // Nothing of a damaged segment is kept: the file is set aside as a whole, and
                 // an entry in it could not be read later. What the segments before it hold
-                // stands; nothing after that can be vouched for.
-                count = countBefore;
-                firstIndex = firstBefore;
-                while (configIndexes.size() > configsBefore) {
-                    configIndexes.removeLast();
-                    configValues.removeLast();
-                }
+                // stands; nothing after that can be vouched for. The index is built again
+                // from them: what the damaged segment did to it before the damage showed,
+                // such as a cut of the log and the entries after the cut, is undone with that.
+                rebuildIndex(found.subList(0, k + 1), snapshotIndex);
                 firstDamagedIndex = lastIndex() + 1;
                 damaged.add(segment);
             }
@@ -200,6 +192,20 @@ public final class RaftLogStore implements LogView, Closeable {
             firstIndex = snapshotIndex + 1;
             configIndexes.clear();
             configValues.clear();
+        }
+    }
+
+    /**
+     * Builds the index again from the segments before the last of {@code through}, which have
+     * been read once without damage; the last is their successor.
+     */
+    private void rebuildIndex(List<Segment> through, long snapshotIndex) throws IOException {
+        firstIndex = snapshotIndex + 1;
+        count = 0;
+        configIndexes.clear();
+        configValues.clear();
+        for (int k = 0; k < through.size() - 1; k++) {
+            replay(through.get(k), through.get(k + 1), k == 0 ? -1 : through.get(k - 1).number);
         }
     }
 

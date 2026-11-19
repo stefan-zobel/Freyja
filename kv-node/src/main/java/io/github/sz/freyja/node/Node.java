@@ -633,8 +633,25 @@ public final class Node implements Closeable {
             Ready ready = raft.takeReady();
             if (ready.hasPersistentWork()) {
                 long started = options.clock().nanoTime();
+                HardState after = null;
+                boolean logChanges = ready.truncateSuffixFrom() != -1 || !ready.entries().isEmpty();
                 if (ready.hardState() != null) {
-                    hardState.put(ready.hardState());
+                    HardState next = ready.hardState();
+                    HardState stored = hardState.get();
+                    if (logChanges && stored.logRecovering() && !next.logRecovering()) {
+                        // The entries that end log-recovering mode must be durable before the
+                        // mode is left: a crash in between would leave a node that votes again
+                        // without entries it acknowledged before its log was damaged
+                        // (section 3.3). Until then the hard state keeps the mode.
+                        hardState.put(new HardState(next.term(), next.votedFor(), true, next.logEpoch(),
+                                stored.lostLogIndex(), stored.lostLogTerm()));
+                        after = next;
+                    } else {
+                        hardState.put(next);
+                    }
+                    if (observed && logChanges) {
+                        listener.hardStateWritten(ready, hardState.get());
+                    }
                 }
                 boolean logChanged = false;
                 if (ready.truncateSuffixFrom() != -1) {
@@ -647,6 +664,9 @@ public final class Node implements Closeable {
                 }
                 if (logChanged) {
                     log.sync();
+                }
+                if (after != null) {
+                    hardState.put(after);
                 }
                 long took = options.clock().nanoTime() - started;
                 feed(new RaftEvent.Persisted(ready.sequence()));

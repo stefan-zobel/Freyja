@@ -43,10 +43,11 @@ The event loop:
 - The queue of waiting events is bounded (default 4,096). An event that does not fit is
   rejected at once.
 - The work of a `Ready` is done in the order of the contract of the core: hard state,
-  suffix truncation, entries, then one sync of the log. Only then the core is told that the
-  work is durable; messages are sent and entries applied after that. Persisting is
-  synchronous in the loop for now; the contract of the core allows to move it to its own
-  thread later without changing the core.
+  suffix truncation, entries, then one sync of the log; a hard state that ends
+  log-recovering mode is stored in two steps around them (`raft.md` §3). Only then the
+  core is told that the work is durable; messages are sent and entries applied after that.
+  Persisting is synchronous in the loop for now; the contract of the core allows to move it
+  to its own thread later without changing the core.
 - A failure of storage stops the node: it rejects every further event. It is started again
   from what is on disk.
 - A message that fails its checksum, has an unknown format, or is meant for another node is

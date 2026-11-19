@@ -147,6 +147,8 @@ public final class SystemSimulation {
         public long leaderChanges;
         public long crashes;
         public long crashesInAnOperation;
+        /** Crashes after the hard state of a step was durable and before its log was. */
+        public long crashesBetweenHardStateAndLog;
         public long partitions;
         public long dropped;
         public long duplicated;
@@ -190,6 +192,7 @@ public final class SystemSimulation {
             leaderChanges += other.leaderChanges;
             crashes += other.crashes;
             crashesInAnOperation += other.crashesInAnOperation;
+            crashesBetweenHardStateAndLog += other.crashesBetweenHardStateAndLog;
             partitions += other.partitions;
             dropped += other.dropped;
             duplicated += other.duplicated;
@@ -226,7 +229,8 @@ public final class SystemSimulation {
                     + ", sessions lost " + sessionsLost + " (" + sessionsLostInRetry
                     + " under retries), late duplicates " + lateDuplicates + ", leader changes "
                     + leaderChanges + ", crashes "
-                    + crashes + " (" + crashesInAnOperation + " in an operation), partitions " + partitions
+                    + crashes + " (" + crashesInAnOperation + " in an operation, " + crashesBetweenHardStateAndLog
+                    + " between hard state and log), partitions " + partitions
                     + ", dropped " + dropped + ", duplicated " + duplicated + ", snapshots created/installed "
                     + snapshotsCreated + "/" + snapshotsInstalled + " (" + installsAroundALeaderChange
                     + " around a leader change), applied " + highestApplied
@@ -319,6 +323,8 @@ public final class SystemSimulation {
         long configIndex;
         /** For the trace: the steps of the core that are not written yet, oldest first. */
         final List<TracedStep> traced = new ArrayList<>();
+        /** The hard state of the Ready being written is durable, its log not yet. */
+        boolean hardStateAheadOfLog;
 
         /** Whether the node is one of those that are meant to run. */
         boolean active() {
@@ -359,6 +365,7 @@ public final class SystemSimulation {
                 return null;
             });
             crashArmed = false;
+            hardStateAheadOfLog = false;
             role = Role.FOLLOWER;
             digestedAt = -1;
             boolean again = everOpened;
@@ -512,7 +519,20 @@ public final class SystemSimulation {
         }
 
         @Override
+        public void hardStateWritten(Ready ready, HardState durableHardState) {
+            hardStateAheadOfLog = true;
+            if (crashAtNextWindow) {
+                // In one of the next operations: the writes of the log, or the hard state
+                // that is written after them.
+                crashAtNextWindow = false;
+                crashArmed = true;
+                fs.crashAt(fs.operationCount() + random.nextInt(6), random, () -> memory.crash(random));
+            }
+        }
+
+        @Override
         public void ready(Ready ready, HardState durableHardState, long durableLastIndex) {
+            hardStateAheadOfLog = false;
             if (trace != null && !traced.isEmpty()) {
                 // A node makes the work of a Ready durable and tells its core before it shows
                 // the Ready: the step that handed it out is the one before that report. A
@@ -841,6 +861,8 @@ public final class SystemSimulation {
     /** Hits of probes that the simulation caused by reading a file itself. */
     private final long[] ownProbeHits = new long[Probes.Probe.values().length];
     private boolean faults = true;
+    /** The next node that has written the hard state of a step and not yet its log crashes. */
+    private boolean crashAtNextWindow;
     /** Set the environment variable FREYJA_SIM_DEBUG to see what a run does. */
     private final boolean debug = System.getenv("FREYJA_SIM_DEBUG") != null;
 
@@ -956,6 +978,10 @@ public final class SystemSimulation {
         } catch (FaultyFileSystem.SimulatedCrash crash) {
             stats.crashes++;
             stats.crashesInAnOperation++;
+            if (host.hardStateAheadOfLog) {
+                stats.crashesBetweenHardStateAndLog++;
+            }
+            host.hardStateAheadOfLog = false;
             host.down(false);
             return;
         } catch (IOException | java.io.UncheckedIOException e) {
@@ -1028,6 +1054,10 @@ public final class SystemSimulation {
                 if (random.nextBoolean()) {
                     stats.crashes++;
                     victim.down(true);
+                } else if (random.nextInt(4) == 0) {
+                    // A step that writes both the hard state and the log is rare among the
+                    // operations of a node: the next node that takes one crashes in between.
+                    crashAtNextWindow = true;
                 } else if (!victim.crashArmed) {
                     // The crash comes in the middle of one of the next file operations.
                     victim.crashArmed = true;
@@ -1533,6 +1563,7 @@ public final class SystemSimulation {
 
         // Healing: no more faults, every node runs, clients finish what they have in hand.
         faults = false;
+        crashAtNextWindow = false;
         clientsMayStart = false;
         isolated.clear();
         for (Host host : hosts) {

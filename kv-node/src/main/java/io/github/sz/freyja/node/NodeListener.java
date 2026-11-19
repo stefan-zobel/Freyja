@@ -48,6 +48,16 @@ public interface NodeListener {
     }
 
     /**
+     * The node has made the hard state of a {@code Ready} durable and is about to write its
+     * log; until {@link #ready} the hard state is ahead of the log. Only if
+     * {@link #observesCore} and only for a {@code Ready} that changes both.
+     *
+     * @param durableHardState the hard state in stable storage at this moment
+     */
+    default void hardStateWritten(Ready ready, HardState durableHardState) {
+    }
+
+    /**
      * A proposal waited for the event loop beyond its deadline and was dropped. Nobody waits
      * for its answer any more.
      */

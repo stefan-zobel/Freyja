@@ -252,21 +252,33 @@ ProposeCfg(i) ==
             Update(i, s, AdvanceCommit(
                 [s EXCEPT !.log = Append(s.log, [term |-> s.term, cfg |-> c])], i))
 
-\* A crash and restart. Of the snapshots on their way, any prefix may have become durable.
-\* The state machine keeps any prefix of what it had applied that is still in the log.
-RestartNode(s, k, c) ==
-    LET dd == IF k = 0 THEN s.d ELSE s.pend[k]
-    IN [InitNode EXCEPT !.term = dd.term, !.vote = dd.vote, !.log = dd.log, !.acc = dd.acc,
-                        !.rec = dd.rec, !.epoch = dd.epoch, !.lost = dd.lost, !.commit = c,
-                        !.d = dd]
+\* What is durable after a crash in the middle of the write that takes the durable state from
+\* old to new (the snapshots after old, up to new). A node writes the term and the vote first
+\* and the log after them, and it keeps the log-recovering state until the log is durable. So
+\* the term and the vote may be those of new while the log is the old one, or the new one cut
+\* anywhere after what the two have in common, and the rest is that of old.
+PartlyDurable(old, new) ==
+    LET a == Agree(old.log, new.log)
+        logs == {old.log} \cup {SubSeq(new.log, 1, x) : x \in a..Len(new.log)}
+    IN {[old EXCEPT !.term = new.term, !.vote = new.vote, !.log = l,
+                    !.acc = [old.acc EXCEPT !.i = Min(@, Agree(old.log, l))]] : l \in logs}
+
+\* A crash and restart. Of the snapshots on their way, any prefix may have become durable, and
+\* of the rest a part (PartlyDurable). The state machine keeps any prefix of what it had
+\* applied that is still in the log.
+RestartNode(dd, c) ==
+    [InitNode EXCEPT !.term = dd.term, !.vote = dd.vote, !.log = dd.log, !.acc = dd.acc,
+                     !.rec = dd.rec, !.epoch = dd.epoch, !.lost = dd.lost, !.commit = c,
+                     !.d = dd]
 
 Restart(i) ==
     LET s == st[i]
     IN \E k \in 0..Len(s.pend) :
-         LET dd == IF k = 0 THEN s.d ELSE s.pend[k]
-         IN \E c \in 0..Min(s.commit, Agree(dd.log, s.log)) :
-              /\ st' = [st EXCEPT ![i] = RestartNode(s, k, c)]
-              /\ UNCHANGED <<elected, chosen, damages>>
+         LET old == IF k = 0 THEN s.d ELSE s.pend[k]
+         IN \E dd \in {old} \cup UNION {PartlyDurable(old, s.pend[j]) : j \in (k + 1)..Len(s.pend)} :
+              \E c \in 0..Min(s.commit, Agree(dd.log, s.log)) :
+                 /\ st' = [st EXCEPT ![i] = RestartNode(dd, c)]
+                 /\ UNCHANGED <<elected, chosen, damages>>
 
 (***************************************************************************)
 (* Log damage: the stored log of node i cannot be read from index k on,    *)

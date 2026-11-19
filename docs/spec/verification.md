@@ -268,6 +268,10 @@ the two.
     `-Ptrace-validation` runs them in `kv-node` (`SystemTraceValidationTest`), complete and
     not cut off. TLC accepted the six seeds of `system-trace-validation` on 2026-11-19:
     26,447 steps in 13 minutes.
+  - A crash between the write of the hard state and the write of the log of one step is
+    rare in these short runs. Three seeds that reach it were found by search
+    (`SystemTraceTest.CRASH_BETWEEN_WRITES`); the profile validates them as well, and every
+    build checks that they still reach it.
   - Checked on every build without TLC (`SystemTraceTest`): recording does not change a
     run; the trace is a function of the seed; every start after a crash is a line; a node
     receives only what a node has released in an earlier step.
@@ -474,13 +478,22 @@ invariants of `SystemInvariants` and of `SafetyInvariants`, linearizability, con
 
 Open in this milestone:
 
-- A crash between the two writes of one `Ready`. A node writes the hard state first and
-  syncs the log after it, so a crash in between leaves the new term or vote with the old
-  log. That is safe, because no message of the `Ready` has been sent, but the model makes
-  the work of a step durable as a whole and has no such state. TLC accepted the validated
-  traces (§2.7); whether one of them contains that crash is not known. Open: a probe that
-  counts it, and a restart in the model that may keep the hard state of a step without its
-  log.
+- A crash between the two writes of one `Ready` (2026-11-19). A node writes the hard state
+  first and the log after it, so a crash in between leaves the new term or vote with the
+  old log, or with part of the new one. That is safe for the term and the vote, because no
+  message of the `Ready` has been sent. It was not safe for the log-recovering mode: a
+  `Ready` that ends the mode also holds the entries that end it, and a crash before they
+  were durable left a node out of the mode without entries it had acknowledged before its
+  log was damaged (`NodeTest`). The node now keeps the mode in the hard state until those
+  entries are durable (`raft.md` §3). The simulation counts the crash (§3.1) and aims at
+  it, and the model has a restart in which a step is durable in part (`PartlyDurable`).
+  Open: the runs of TLC for that model, the exhaustive check of `Raft.cfg` and the
+  validation of the traces that contain the crash (§2.7).
+- A damaged segment that had cut the log and stored entries after the cut left those
+  entries in the index of the log store, though the segment was set aside; the node read
+  them from it. The store now builds its index again from the segments before the damaged
+  one (`RaftLogStoreTest`). Found by the simulation once it aimed at the crash above, which
+  changed its runs.
 - The model lets a damaged log keep a true prefix. It does not know entries that come back
   after the record of their removal is lost (`node.md` §3.3); the Raft simulator and the
   whole-system simulation do. Runs of the Raft simulator that are validated against the
@@ -543,6 +556,7 @@ Required probes include at least:
 - leadership transfer aborted
 - session expired while a retry was in flight
 - write stalled by backpressure; write rejected by the quota alarm
+- crash after the hard state of a step is durable and before its log is
 - upgrade finalized; downgrade before finalization
 
 ### 3.2 Continuous Simulation

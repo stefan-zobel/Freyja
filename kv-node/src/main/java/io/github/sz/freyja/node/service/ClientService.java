@@ -403,6 +403,13 @@ public final class ClientService implements NodeListener {
         }
     }
 
+    @Override
+    public void hardStateWritten(Ready ready, HardState durableHardState) {
+        if (next != null) {
+            next.hardStateWritten(ready, durableHardState);
+        }
+    }
+
     // ------------------------------------------------------------------ status
 
     /** The number of requests that wait for the log or for a read index. */

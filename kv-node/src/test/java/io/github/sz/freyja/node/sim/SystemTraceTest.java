@@ -20,6 +20,13 @@ import io.github.sz.freyja.raft.sim.TraceRecorder;
  */
 class SystemTraceTest {
 
+    /**
+     * Runs in which a node crashes after the hard state of a step is durable and before its
+     * log is. That is rare in these short runs; the seeds were found by search, and
+     * {@link #theChosenRunsCrashBetweenTheHardStateAndTheLogOfAStep} holds them to it.
+     */
+    static final long[] CRASH_BETWEEN_WRITES = {35, 74, 92};
+
     private static String json(long seed, SystemSimulation.Stats[] stats) {
         StringBuilder text = new StringBuilder();
         SystemSimulation simulation = new SystemSimulation(seed, SystemSimulation.Options.traced());
@@ -90,6 +97,16 @@ class SystemTraceTest {
             crashes += stats[0].crashes;
         }
         assertTrue(crashes > 6, "crashes: " + crashes);
+    }
+
+    @Test
+    void theChosenRunsCrashBetweenTheHardStateAndTheLogOfAStep() {
+        for (long seed : CRASH_BETWEEN_WRITES) {
+            SystemSimulation.Stats[] stats = new SystemSimulation.Stats[1];
+            String trace = json(seed, stats);
+            assertTrue(stats[0].crashesBetweenHardStateAndLog > 0, "seed " + seed + ": " + stats[0]);
+            assertEquals(stats[0].crashes, count(trace, "\"type\":\"Restart\""), "seed " + seed);
+        }
     }
 
     /**

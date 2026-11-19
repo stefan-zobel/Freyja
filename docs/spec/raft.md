@@ -106,6 +106,11 @@ public record Ready(
    - Within one `Ready` the order is: hard state, suffix truncation, entries. A truncation
      removes the stored entries from the given index on. The entries of a `Ready` have
      consecutive indexes and follow the stored log directly after the truncation.
+   - One exception: if the hard state of a `Ready` ends log-recovering mode (§8) and the
+     `Ready` also changes the log, the runtime first stores the hard state with the mode
+     still set and the end of the lost log as before, and the hard state as handed out only
+     after the log is durable. A crash in between must not leave a node out of the mode
+     without the entries that end it.
    - A write that is on its way when the core truncates its log in memory does not bring
      the removed entries back: when that write is reported, the core counts as durable only
      the part that is still in its log.

@@ -312,6 +312,58 @@ class NodeTest {
     }
 
     @Test
+    void aNodeLeavesLogRecoveringModeOnlyWithTheEntriesThatEndItDurable() throws IOException {
+        startCluster();
+        Member leader = leader();
+        for (int i = 0; i < 30; i++) {
+            propose(leader, i, 300);
+            settle();
+        }
+        ticks(2);
+        Member victim = members.get((leader.id + 1) % 3);
+        long acknowledged = victim.node.view().lastLogIndex();
+        victim.stop();
+
+        Path raft = DATA.resolve(Node.RAFT_DIRECTORY);
+        List<Path> segments = victim.memory.list(raft).stream()
+                .filter(p -> p.getFileName().toString().endsWith(".rlog")).sorted().toList();
+        Path damaged = segments.get(1);
+        byte[] one = victim.memory.peek(damaged, 300, 1);
+        one[0] ^= 0x08;
+        victim.memory.overwrite(damaged, 300, one);
+
+        // The sync of the log fails in the step in which the core leaves log-recovering mode,
+        // and what was not synced is lost.
+        boolean[] failed = new boolean[1];
+        FaultyFileSystem faulty = new FaultyFileSystem(victim.memory);
+        faulty.setFault((operation, path, index) -> {
+            if (!failed[0] && operation == FaultyFileSystem.Operation.SYNC
+                    && path.getFileName().toString().endsWith(".rlog")
+                    && victim.node != null && !victim.node.view().logRecovering()) {
+                failed[0] = true;
+                return new IOException("injected");
+            }
+            return null;
+        });
+        victim.fs = faulty;
+        victim.start();
+        assertTrue(victim.node.view().logRecovering());
+        assertThrows(IOException.class, () -> ticks(40));
+        assertTrue(failed[0], "the step that ends log-recovering mode wrote to the log");
+        victim.node = null;
+        victim.memory.crash();
+
+        victim.fs = victim.memory;
+        victim.start();
+        assertTrue(victim.node.view().logRecovering() || victim.node.view().lastLogIndex() >= acknowledged,
+                "a node out of log-recovering mode holds what it acknowledged before the damage: "
+                        + victim.node.view().lastLogIndex() + " < " + acknowledged);
+        ticks(60);
+        assertFalse(victim.node.view().logRecovering());
+        assertEquals(leader.machine.applied, victim.machine.applied);
+    }
+
+    @Test
     void aNodeThatHasLostItsIdentityRefusesToStart() throws IOException {
         Member member = new Member(0);
         members.add(member);

@@ -33,21 +33,28 @@ class SystemTraceValidationTest {
     private static final int MAX_STEPS = 6_000;
 
     @Test
-    void tracesOfWholeSystemRunsAreBehaviorsOfTheModel() {
+    void tracesOfWholeSystemRunsAreBehaviorsOfTheModel() throws Exception {
         assertTrue(Files.exists(TraceValidator.tlcJar()),
                 "TLC not found at " + TraceValidator.tlcJar() + "; set -Dfreyja.tlc=<tla2tools.jar>");
         int[] validated = new int[1];
-        Seeds.forEach(SystemTraceValidationTest.class, "system-trace-validation", 6, seed -> {
-            TlaTraceWriter trace = SystemTraceTest.record(seed);
-            List<TlaTraceWriter.Step> steps = trace.steps();
-            if (steps.size() > MAX_STEPS) {
-                steps.subList(MAX_STEPS, steps.size()).clear();
-            }
-            TraceValidator.Verdict verdict = TraceValidator.validate(temp.resolve("seed-" + seed), trace);
-            assertTrue(verdict.accepted(), "seed " + seed + ", " + verdict.steps() + " steps: " + verdict.reason());
-            System.out.println("seed " + seed + ": " + verdict.steps() + " steps accepted");
-            validated[0] += verdict.steps();
-        });
+        Seeds.forEach(SystemTraceValidationTest.class, "system-trace-validation", 6, seed ->
+                validated[0] += validate(seed));
+        // Runs with a crash between the write of the hard state and the write of the log.
+        for (long seed : SystemTraceTest.CRASH_BETWEEN_WRITES) {
+            validated[0] += validate(seed);
+        }
         assertTrue(validated[0] > 5_000, "steps validated: " + validated[0]);
+    }
+
+    private int validate(long seed) throws Exception {
+        TlaTraceWriter trace = SystemTraceTest.record(seed);
+        List<TlaTraceWriter.Step> steps = trace.steps();
+        if (steps.size() > MAX_STEPS) {
+            steps.subList(MAX_STEPS, steps.size()).clear();
+        }
+        TraceValidator.Verdict verdict = TraceValidator.validate(temp.resolve("seed-" + seed), trace);
+        assertTrue(verdict.accepted(), "seed " + seed + ", " + verdict.steps() + " steps: " + verdict.reason());
+        System.out.println("seed " + seed + ": " + verdict.steps() + " steps accepted");
+        return verdict.steps();
     }
 }
