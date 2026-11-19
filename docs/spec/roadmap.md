@@ -131,8 +131,10 @@ Rules:
   Lost-majority tool. Runbook, each procedure executed. Review against the exit criteria.
   - Done so far: backup of a running node, its verification, restore as a new cluster, and
     the recovery from a lost majority (`operations.md` §3).
+  - The runbook (`docs/runbook.md`): every procedure but the upgrade carried out with node
+    processes on one machine.
   - Open: the upgrade procedure and the compatibility suite, which need a second release;
-    the runbook, whose procedures are to be executed on a real cluster.
+    the execution of the runbook on a real cluster.
 
 ## Open Items
 
@@ -146,7 +148,7 @@ leaves this list in the change that completes it.
 | Trace validation of the runs with membership changes, transfers, and log damage | B3 | A run of TLC; `docs/tla/README.md` |
 | Exhaustive check of a configuration with membership change | B3 | A run of TLC; the last attempt ran out of memory |
 | Validation of the traces of whole-system runs | C3 | A run of TLC: `./mvnw test -pl kv-node -am -Ptrace-validation` |
-| The runbook as a text | E3 | Its execution is listed below |
+| The guard of the finalization: `set-version` is refused unless every member supports the version | E3 | `operations.md` §6; members do not tell the leader yet which versions they support |
 
 **Work that needs Linux:**
 

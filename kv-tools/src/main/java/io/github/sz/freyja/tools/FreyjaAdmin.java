@@ -113,9 +113,20 @@ public final class FreyjaAdmin {
             OutputStream output = secured.getOutputStream();
             Frames.write(output, new Handshake(Handshake.ADMIN, 0, -1, Version.SOFTWARE).encode());
             output.flush();
-            byte[] hello = Frames.read(in, Handshake.MAX_BYTES);
+            byte[] hello;
+            try {
+                hello = Frames.read(in, Handshake.MAX_BYTES);
+            } catch (IOException e) {
+                if (tls == null) {
+                    // A node with TLS answers a plain handshake with a TLS record, which is no frame.
+                    throw new IOException("the node did not answer as a node in insecure mode does (" + e.getMessage()
+                            + "); if it runs with TLS, --tls-key and --tls-trust are needed", e);
+                }
+                throw e;
+            }
             if (hello == null) {
-                throw new IOException("the node refused the connection; is this its administration listener?");
+                throw new IOException("the node refused the connection; is this its administration listener?"
+                        + (tls == null ? " If the node runs with TLS, --tls-key and --tls-trust are needed" : ""));
             }
             Handshake.decode(hello);
             Frames.write(output, AdminCodec.encode(1, request));

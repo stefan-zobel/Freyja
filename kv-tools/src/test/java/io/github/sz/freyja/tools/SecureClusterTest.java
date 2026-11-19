@@ -316,7 +316,9 @@ class SecureClusterTest {
                 password, address, "status").startsWith("1\n"), "the certificate of a client");
         assertTrue(tool("--tls-key", nodeKey.toString(), "--tls-trust", trust.toString(), "--tls-password-file",
                 password, address, "status").startsWith("1\n"), "the certificate of a node");
-        assertTrue(tool(address, "status").startsWith("1\n"), "no TLS");
+        String plain = tool(address, "status");
+        assertTrue(plain.startsWith("1\n"), "no TLS");
+        assertTrue(plain.contains("--tls-key and --tls-trust are needed"), plain);
         assertTrue(tool("--tls-key", adminKey.toString(), address, "status").startsWith("2\n"));
         assertTrue(tool("--tls-key", directory.resolve("missing").toString(), "--tls-trust", trust.toString(),
                 address, "status").startsWith("1\n"));

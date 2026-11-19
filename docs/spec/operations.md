@@ -319,7 +319,8 @@ address of the node: `--tls-key FILE --tls-trust FILE [--tls-password-file FILE]
 ## 8. Runbook
 
 Each procedure is written as numbered steps with the exact commands and the expected output,
-and each is executed at least once against a real cluster before release:
+and each is executed at least once against a real cluster before release. The procedures are
+in `docs/runbook.md`:
 
 1. Bootstrap a cluster.
 2. Replace a dead node.
@@ -329,3 +330,14 @@ and each is executed at least once against a real cluster before release:
 6. Backup, verify, and restore.
 7. Recover from a lost majority.
 8. Rotate certificates.
+
+What the procedures rest on and the spec does not say elsewhere:
+
+- The members of a cluster that was just prepared with `init --voters` have no addresses in
+  the replicated state; they are set with `set-address`, or nodes cannot send clients to the
+  leader by its address. A restored or recovered node carries the addresses of the old
+  cluster and gets its own set the same way.
+- A node id is used once. A member that is lost is replaced by a node with a new id, which
+  is added before the lost one is removed.
+- The guard of the finalization (§6) is not implemented yet: `set-version` takes any higher
+  cluster version.
