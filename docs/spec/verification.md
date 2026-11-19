@@ -710,6 +710,11 @@ The load generator (`FreyjaBench` in `kv-bench`):
   sessions of hundreds of clients at once is a load of its own. The result names how long
   that took (`warmup.seconds`) and how many clients could not open their session before the
   start (`warmup.failures`; they try again with their first command).
+- A run may begin with a warm-up (`--warmup-seconds`): the same load at the same rate, carried
+  out but not measured. Without it, the first seconds measure a cluster that was idle meeting
+  a full load at once, including the warm-up of its code; at 4000 requests per second the first
+  two seconds held from a third to most of the responses of a run that took 30 ms or more. The result names the warm-up
+  (`warmup.load.seconds`), and runs with and without one are not compared with each other.
 - If the clients cannot keep up, requests wait and their latencies grow. Beyond five seconds
   of load in the queue, further requests are counted as shed and not sent: the generator is
   bounded too.

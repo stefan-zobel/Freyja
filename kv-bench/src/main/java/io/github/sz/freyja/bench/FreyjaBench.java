@@ -16,7 +16,7 @@ import java.util.Map;
  * <pre>
  * FreyjaBench --endpoints HOST:PORT[,HOST:PORT]... --workload NAME [--rate N] [--seconds N]
  *             [--clients N] [--keys N] [--value-bytes N] [--seed N] [--timeout-ms N]
- *             [--record FILE] [--baseline FILE]
+ *             [--warmup-seconds N] [--record FILE] [--baseline FILE]
  *             [--status HOST:PORT[,...]]
  *             [--during compaction|snapshot-transfer|catch-up [--admin HOST:PORT[,...]]
  *              [--spare ID,PEER-HOST:PORT,CLIENT-HOST:PORT] [--background-rate N]]
@@ -27,6 +27,8 @@ import java.util.Map;
  * </pre>
  *
  * <ul>
+ *   <li>{@code --warmup-seconds} runs the same load for that long before the measured part
+ *       begins, so that the result shows a cluster that is warm.</li>
  *   <li>{@code --record} stores the result. {@code --baseline} compares the result with a
  *       stored one.</li>
  *   <li>{@code --status} names the HTTP endpoints of the nodes. With them the result has the
@@ -80,7 +82,8 @@ public final class FreyjaBench {
                     LoadGenerator.Workload.valueOf(options.get("workload").toUpperCase(Locale.ROOT).replace('-', '_')),
                     number(options, "rate", 1000), number(options, "seconds", 30), number(options, "clients", 32),
                     number(options, "keys", 100_000), number(options, "value-bytes", 128),
-                    Long.parseLong(options.getOrDefault("seed", "1")), number(options, "timeout-ms", 10_000));
+                    Long.parseLong(options.getOrDefault("seed", "1")), number(options, "timeout-ms", 10_000))
+                    .withWarmUp(number(options, "warmup-seconds", 0));
             if (options.containsKey("during")) {
                 if (options.containsKey("overload")) {
                     throw new IllegalArgumentException("--during and --overload do not go together");
@@ -104,7 +107,8 @@ public final class FreyjaBench {
             err.println("error: " + e.getMessage());
             err.println("usage: FreyjaBench --endpoints HOST:PORT[,...] --workload bulk-load|read-heavy|mixed|"
                     + "write-only|scan-heavy|large-values [--rate N] [--seconds N] [--clients N] [--keys N]"
-                    + " [--value-bytes N] [--seed N] [--timeout-ms N] [--record FILE] [--baseline FILE]"
+                    + " [--value-bytes N] [--seed N] [--timeout-ms N] [--warmup-seconds N] [--record FILE]"
+                    + " [--baseline FILE]"
                     + " [--status HOST:PORT[,...]]"
                     + " [--during compaction|snapshot-transfer|catch-up [--admin HOST:PORT[,...]]"
                     + " [--spare ID,PEER-HOST:PORT,CLIENT-HOST:PORT] [--background-rate N]]"
@@ -121,7 +125,7 @@ public final class FreyjaBench {
             Thread starter = null;
             if (background != null) {
                 Background condition = background;
-                long delayMillis = config.seconds() * 1_000L / 4;
+                long delayMillis = config.warmUpSeconds() * 1_000L + config.seconds() * 1_000L / 4;
                 starter = Thread.ofVirtual().name("freyja-bench-condition").start(() -> {
                     try {
                         Thread.sleep(delayMillis);

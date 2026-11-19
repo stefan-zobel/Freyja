@@ -101,6 +101,22 @@ class LoadGeneratorTest {
     }
 
     @Test
+    void aWarmUpRunsTheLoadButIsNotMeasured() throws Exception {
+        List<String> endpoints = startCluster();
+        LoadGenerator.Config config = new LoadGenerator.Config(endpoints, LoadGenerator.Workload.BULK_LOAD, 200, 1, 4,
+                100, 16, 3, 30_000).withWarmUp(1);
+        long started = System.nanoTime();
+        LoadGenerator.Result result = LoadGenerator.run(config);
+        double took = (System.nanoTime() - started) / 1e9;
+        assertEquals(200, result.due(), "only the measured part counts");
+        assertEquals(200, result.completed());
+        assertEquals(200L * (16 + 16), result.writtenBytes(), "the warm-up's writes are not counted");
+        assertTrue(result.seconds() < took - 0.5, "the measured part starts after the warm-up: " + result.seconds()
+                + " of " + took + " s");
+        assertThrows(IllegalArgumentException.class, () -> config.withWarmUp(-1));
+    }
+
+    @Test
     void theToolRecordsAResultAndComparesWithABaseline() throws Exception {
         List<String> endpoints = startCluster();
         Path baseline = directory.resolve("baseline.txt");
@@ -145,6 +161,10 @@ class LoadGeneratorTest {
         Map<String, String> other = new HashMap<>(stored);
         other.put("clients", "64");
         assertThrows(IllegalArgumentException.class, () -> Baseline.regressions(other, stored));
+        // Nor is a run that was warmed up with one that was not.
+        Map<String, String> warm = new HashMap<>(stored);
+        warm.put("warmup.load.seconds", "15");
+        assertThrows(IllegalArgumentException.class, () -> Baseline.regressions(warm, stored));
         assertEquals(2, FreyjaBench.run(new String[] {"--workload", "mixed"}, out, out));
         assertEquals(2, FreyjaBench.run(new String[] {"--endpoints", "x:1", "--workload", "no-such"}, out, out));
     }

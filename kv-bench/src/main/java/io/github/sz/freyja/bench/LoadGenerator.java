@@ -29,6 +29,10 @@ import io.github.sz.freyja.client.FreyjaException;
  * <p>The clock starts when every client has connected, found the leader, and opened its
  * session. What that costs is not part of the load: a run measures the cluster under its
  * workload, not a crowd of clients that arrive at once.
+ *
+ * <p>A run may begin with a warm-up: the same load at the same rate for a number of seconds,
+ * which is carried out but not measured. Without it, a run also measures how a cluster that
+ * was idle copes with a sudden full load, which includes the warm-up of its code.
  */
 public final class LoadGenerator {
 
@@ -69,39 +73,48 @@ public final class LoadGenerator {
      * @param requestTimeoutMillis how long one request may take
      * @param retryWhenOverloaded whether a client sends a request that a node refused as
      *                   overloaded again; if not, the request counts as rejected
+     * @param warmUpSeconds how long the load runs at the same rate before the measured part
+     *                   begins; 0 for none
      */
     public record Config(List<String> endpoints, Workload workload, int ratePerSecond, int seconds, int clients,
-                         int keys, int valueBytes, long seed, int requestTimeoutMillis, boolean retryWhenOverloaded) {
+                         int keys, int valueBytes, long seed, int requestTimeoutMillis, boolean retryWhenOverloaded,
+                         int warmUpSeconds) {
 
         /** Settings with clients that send a request the cluster had no room for again. */
         public Config(List<String> endpoints, Workload workload, int ratePerSecond, int seconds, int clients,
                       int keys, int valueBytes, long seed, int requestTimeoutMillis) {
             this(endpoints, workload, ratePerSecond, seconds, clients, keys, valueBytes, seed, requestTimeoutMillis,
-                    true);
+                    true, 0);
         }
 
         /** The same settings with another rate. */
         public Config withRate(int rate) {
             return new Config(endpoints, workload, rate, seconds, clients, keys, valueBytes, seed,
-                    requestTimeoutMillis, retryWhenOverloaded);
+                    requestTimeoutMillis, retryWhenOverloaded, warmUpSeconds);
         }
 
         /** The same settings with another duration. */
         public Config withSeconds(int duration) {
             return new Config(endpoints, workload, ratePerSecond, duration, clients, keys, valueBytes, seed,
-                    requestTimeoutMillis, retryWhenOverloaded);
+                    requestTimeoutMillis, retryWhenOverloaded, warmUpSeconds);
         }
 
         /** The same settings with clients that do or do not send a refused request again. */
         public Config withRetryWhenOverloaded(boolean retry) {
             return new Config(endpoints, workload, ratePerSecond, seconds, clients, keys, valueBytes, seed,
-                    requestTimeoutMillis, retry);
+                    requestTimeoutMillis, retry, warmUpSeconds);
+        }
+
+        /** The same settings with a warm-up of the given length before the measured part. */
+        public Config withWarmUp(int warmUp) {
+            return new Config(endpoints, workload, ratePerSecond, seconds, clients, keys, valueBytes, seed,
+                    requestTimeoutMillis, retryWhenOverloaded, warmUp);
         }
 
         public Config {
             endpoints = List.copyOf(endpoints);
             if (endpoints.isEmpty() || ratePerSecond < 1 || seconds < 1 || clients < 1 || keys < 1
-                    || valueBytes < 1 || requestTimeoutMillis < 1) {
+                    || valueBytes < 1 || requestTimeoutMillis < 1 || warmUpSeconds < 0) {
                 throw new IllegalArgumentException("invalid load settings");
             }
         }
@@ -110,14 +123,15 @@ public final class LoadGenerator {
     /**
      * What a run measured.
      *
-     * @param due        requests that became due
+     * @param due        requests that became due in the measured part of the run
      * @param completed  requests that were answered
      * @param failed     requests that timed out, have an unknown outcome, or were refused
      *                   for another reason than overload
      * @param rejected   requests that a node refused as overloaded, with clients that do not
      *                   send them again
      * @param shed       requests that were not sent because too many were waiting already
-     * @param seconds    how long the run took, until the last request was answered
+     * @param seconds    how long the measured part of the run took, until the last request
+     *                   was answered
      * @param latencies  the latencies of the completed requests in microseconds, from the
      *                   moment each was due
      * @param service    the latencies of the completed requests in microseconds, from the
@@ -151,6 +165,7 @@ public final class LoadGenerator {
     public static Result run(Config config) throws InterruptedException {
         int valueBytes = config.workload() == Workload.LARGE_VALUES ? config.valueBytes() * 100 : config.valueBytes();
         long total = (long) config.ratePerSecond() * config.seconds();
+        long warmUp = (long) config.ratePerSecond() * config.warmUpSeconds();
         long intervalNanos = TimeUnit.SECONDS.toNanos(1) / config.ratePerSecond();
         // What waits for a client. Beyond a few seconds of load, requests are shed.
         ArrayBlockingQueue<long[]> waiting = new ArrayBlockingQueue<>(
@@ -194,17 +209,27 @@ public final class LoadGenerator {
                             continue;
                         }
                         long sent = System.nanoTime();
+                        boolean measured = request[0] >= warmUp;
                         try {
                             random.nextBytes(value);
-                            written[worker] += one(client, config, request[0], random, value);
+                            long bytes = one(client, config, request[0], random, value);
+                            if (!measured) {
+                                continue;
+                            }
+                            written[worker] += bytes;
                             long now = System.nanoTime();
                             histograms[worker].record((now - request[1]) / 1_000);
                             services[worker].record((now - sent) / 1_000);
                         } catch (FreyjaException.Overloaded e) {
+                            if (!measured) {
+                                continue;
+                            }
                             rejected[worker]++;
                             rejections[worker].record((System.nanoTime() - sent) / 1_000);
                         } catch (FreyjaException e) {
-                            failed[worker]++;
+                            if (measured) {
+                                failed[worker]++;
+                            }
                         }
                     }
                 } catch (InterruptedException e) {
@@ -215,15 +240,16 @@ public final class LoadGenerator {
 
         long warmUpStarted = System.nanoTime();
         ready.await();
-        long start = System.nanoTime();
+        long begin = System.nanoTime();
+        long start = begin + warmUp * intervalNanos;
         long shed = 0;
-        for (long i = 0; i < total; i++) {
-            long dueAt = start + i * intervalNanos;
+        for (long i = 0; i < warmUp + total; i++) {
+            long dueAt = begin + i * intervalNanos;
             long wait = dueAt - System.nanoTime();
             if (wait > 0) {
                 TimeUnit.NANOSECONDS.sleep(wait);
             }
-            if (!waiting.offer(new long[] {i, dueAt})) {
+            if (!waiting.offer(new long[] {i, dueAt}) && i >= warmUp) {
                 shed++;
             }
         }
@@ -248,7 +274,7 @@ public final class LoadGenerator {
             bytes += written[c];
         }
         return new Result(config, total, all.count(), failures, refusals, shed, seconds, all, service, rejection,
-                bytes, (start - warmUpStarted) / 1e9, warmUpFailures.get());
+                bytes, (begin - warmUpStarted) / 1e9, warmUpFailures.get());
     }
 
     /** The list starting at another node for every client, so that they do not all ask the same first. */
