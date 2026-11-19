@@ -61,7 +61,9 @@ import io.github.sz.freyja.lsm.table.TableMetadataBudget;
  * <p><b>Background work.</b> In normal mode one background thread flushes and compacts. In
  * deterministic mode there is no thread: a flush runs inside the write that fills the
  * MemTable, and compaction runs when the caller asks for it or when a write would otherwise
- * stall.
+ * stall. With {@link EngineOptions#walBytesPerSync}, a second thread syncs the log of writes
+ * without sync every so many bytes (in deterministic mode the write does that itself), so
+ * that freezing a MemTable does not wait for a sync of the whole log.
  *
  * <p><b>Backpressure.</b> Writes are delayed when level 0 grows long, and they stall when it
  * grows too long or when too many MemTables wait for their flush. A stalled write fails with
@@ -241,6 +243,11 @@ public final class LsmEngine implements Closeable {
     // Used only by the request at the head of the write queue, and during open and close.
     private LogWriter wal;
     private long walNumber;
+    /** The sync of the log that runs on {@link #logSyncs}, or {@code null}. */
+    private LogSyncThread.Sync logSyncInFlight;
+
+    /** Syncs the log while writers go on, in normal mode with {@code walBytesPerSync}. */
+    private LogSyncThread logSyncs;
 
     // Used only with stateLock held, and during open and close.
     private LogWriter manifest;
@@ -325,6 +332,10 @@ public final class LsmEngine implements Closeable {
         } catch (Throwable t) {
             engine.releaseResources(t);
             throw t;
+        }
+        if (!engine.options.deterministic() && engine.options.walBytesPerSync() > 0) {
+            engine.logSyncs = new LogSyncThread("freyja-lsm-log-sync", engine.options.clock(),
+                    e -> engine.fail(new EngineFailedException("a sync of the log failed", e)));
         }
         if (!engine.options.deterministic()) {
             engine.backgroundThread = Thread.ofPlatform()
@@ -756,6 +767,8 @@ public final class LsmEngine implements Closeable {
                     long started = options.clock().nanoTime();
                     wal.sync();
                     metrics.duration("wal.sync", options.clock().nanoTime() - started);
+                } else {
+                    syncLogEarly();
                 }
                 metrics.count("write.groups", 1);
                 metrics.count("write.batches", group.size());
@@ -783,6 +796,61 @@ public final class LsmEngine implements Closeable {
             next.turn.signal();
         }
         rethrowCrash();
+    }
+
+    // ---- early syncs of the log ------------------------------------------------------------
+
+    /**
+     * Syncs the log once {@code walBytesPerSync} bytes have been written to it since its last
+     * sync, so that the sync that seals it finds little left to do. In normal mode the sync
+     * runs on {@link #logSyncs} while writers go on; this call only starts it, or takes note
+     * of one that has ended. Runs on behalf of the request at the head of the queue.
+     */
+    private void syncLogEarly() throws IOException {
+        long every = options.walBytesPerSync();
+        if (every == 0) {
+            return;
+        }
+        if (logSyncInFlight != null) {
+            if (!logSyncInFlight.done()) {
+                return;
+            }
+            endLogSync();
+        }
+        if (wal.size() - wal.syncedLength() < every) {
+            return;
+        }
+        if (logSyncs == null) {
+            long started = options.clock().nanoTime();
+            wal.sync();
+            metrics.duration("wal.sync.early", options.clock().nanoTime() - started);
+            return;
+        }
+        logSyncInFlight = logSyncs.start(wal, wal.size());
+    }
+
+    /**
+     * Waits for the sync that runs on the log, if there is one, and takes note of it. Called
+     * before the log is sealed, cut back, or closed.
+     */
+    private void awaitLogSync() throws IOException {
+        if (logSyncInFlight != null) {
+            logSyncs.await(logSyncInFlight);
+            endLogSync();
+        }
+    }
+
+    private void endLogSync() throws IOException {
+        LogSyncThread.Sync sync = logSyncInFlight;
+        logSyncInFlight = null;
+        if (sync.failure() != null) {
+            throw sync.failure();
+        }
+        if (sync.writer != wal) {
+            throw new IllegalStateException("a sync of the log ended after the log was replaced");
+        }
+        wal.synced(sync.length);
+        metrics.duration("wal.sync.early", sync.nanos());
     }
 
     // ---- backpressure ----------------------------------------------------------------------
@@ -925,6 +993,7 @@ public final class LsmEngine implements Closeable {
             return;
         }
         // A log is synced and closed before its successor is created.
+        awaitLogSync();
         wal.sync();
         wal.close();
         long sealedWal = walNumber;
@@ -1622,6 +1691,7 @@ public final class LsmEngine implements Closeable {
     private void replaceLogAfterNoSpace(long sizeBeforeGroup) throws IOException {
         long sealedWal = walNumber;
         Path sealedPath = FileNames.wal(dir, sealedWal);
+        awaitLogSync();
         wal.close();
         fs.truncate(sealedPath, sizeBeforeGroup);
         freeReserve(); // room for the next log
@@ -2074,12 +2144,13 @@ public final class LsmEngine implements Closeable {
         try {
             shutDown = true;
             Throwable problem = null;
-            if (failure == null) {
-                try {
+            try {
+                awaitLogSync();
+                if (failure == null) {
                     wal.sync();
-                } catch (IOException e) {
-                    problem = e;
                 }
+            } catch (IOException e) {
+                problem = e;
             }
             problem = releaseResources(problem);
             if (problem instanceof IOException e) {
@@ -2101,6 +2172,9 @@ public final class LsmEngine implements Closeable {
      */
     private Throwable releaseResources(Throwable problem) {
         List<Closeable> resources = new ArrayList<>();
+        if (logSyncs != null) {
+            resources.add(logSyncs::close); // before the log it may still sync
+        }
         if (wal != null) {
             resources.add(wal);
         }

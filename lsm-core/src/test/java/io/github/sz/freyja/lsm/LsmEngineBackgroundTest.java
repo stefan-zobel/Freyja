@@ -339,6 +339,103 @@ class LsmEngineBackgroundTest {
     }
 
     @Test
+    void writesWithoutSyncAreSyncedEarlyWhileWritersGoOn() throws Exception {
+        HookedFileSystem hooked = new HookedFileSystem(fs);
+        options.memTableSize(1 << 20).walBytesPerSync(4096);
+        LsmEngine engine = LsmEngine.open(hooked, dir, options);
+        int before = hooked.syncCount.get();
+        hooked.syncDelayMillis = 20;
+        long started = System.nanoTime();
+        for (int i = 0; i < 300; i++) {
+            engine.write(new WriteBatch().put(b(key(i)), new byte[200]), false);
+        }
+        long tookMillis = (System.nanoTime() - started) / 1_000_000;
+        assertTrue(tookMillis < 15 * 20, "the writers did not wait for the early syncs: " + tookMillis + " ms");
+        // A write takes note of a sync that has ended and starts the next one. One sync at a
+        // time: when the second has begun, the first is durable.
+        int written = 300;
+        long deadline = System.nanoTime() + 10_000_000_000L;
+        while (hooked.syncCount.get() < before + 2) {
+            assertTrue(System.nanoTime() < deadline, "timed out waiting for two early syncs");
+            engine.write(new WriteBatch().put(b(key(written++)), new byte[200]), false);
+            Thread.sleep(2);
+        }
+        fs.crash();
+        hooked.syncDelayMillis = 0;
+        try (LsmEngine reopened = LsmEngine.open(fs, dir, options)) {
+            long recovered = reopened.lastSequence();
+            assertTrue(recovered >= 15 && recovered <= written, "a prefix of at least 4 KiB survives: " + recovered);
+            for (int i = 0; i < written; i++) {
+                assertEquals(i < recovered, reopened.get(b(key(i))) != null, key(i));
+            }
+        }
+    }
+
+    @Test
+    void aMemTableIsFrozenOnlyAfterTheEarlySyncOfItsLogHasEnded() throws Exception {
+        HookedFileSystem hooked = new HookedFileSystem(fs);
+        options.walBytesPerSync(2048).maxImmutableMemTables(4).writeStallTimeoutMillis(10_000);
+        hooked.syncDelayMillis = 5;
+        try (LsmEngine engine = LsmEngine.open(hooked, dir, options)) {
+            for (int i = 0; i < 400; i++) {
+                engine.write(new WriteBatch().put(b(key(i)), new byte[200]), false);
+            }
+        }
+        hooked.syncDelayMillis = 0;
+        try (LsmEngine reopened = LsmEngine.open(fs, dir, options)) {
+            assertEquals(400, reopened.lastSequence());
+            for (int i = 0; i < 400; i++) {
+                assertEquals(200, reopened.get(b(key(i))).length, key(i));
+            }
+        }
+    }
+
+    @Test
+    void aFailedEarlySyncFailsTheEngine() throws Exception {
+        HookedFileSystem hooked = new HookedFileSystem(fs);
+        options.memTableSize(1 << 20).walBytesPerSync(1024);
+        LsmEngine engine = LsmEngine.open(hooked, dir, options);
+        hooked.failSyncs = true;
+        EngineFailedException failed = null;
+        for (int i = 0; i < 100_000 && failed == null; i++) {
+            try {
+                engine.write(new WriteBatch().put(b(key(i % 1000)), new byte[200]), false);
+            } catch (EngineFailedException e) {
+                failed = e;
+            }
+            if (i % 100 == 99) {
+                Thread.sleep(1);
+            }
+        }
+        assertNotNull(failed, "a failed sync is fatal, also when nobody asked for it");
+        assertThrows(EngineFailedException.class, () -> engine.put(b("after"), b("x")));
+        try {
+            engine.close();
+        } catch (IOException e) {
+            // The failure may be reported once more.
+        }
+    }
+
+    @Test
+    void inDeterministicModeAWriteSyncsTheLogEarlyItself() throws IOException {
+        HookedFileSystem hooked = new HookedFileSystem(fs);
+        options.deterministic(true).memTableSize(1 << 20).walBytesPerSync(4096);
+        LsmEngine engine = LsmEngine.open(hooked, dir, options);
+        int before = hooked.syncCount.get();
+        for (int i = 0; i < 100; i++) {
+            engine.write(new WriteBatch().put(b(key(i)), new byte[200]), false);
+        }
+        int syncs = hooked.syncCount.get() - before;
+        assertTrue(syncs >= 4 && syncs <= 6, "about one sync per 4 KiB of the log: " + syncs);
+        fs.crash();
+        try (LsmEngine reopened = LsmEngine.open(fs, dir, options)) {
+            assertTrue(reopened.lastSequence() >= 100 - 4096 / 200 - 1, "lost at most 4 KiB: "
+                    + reopened.lastSequence());
+        }
+        assertThrows(IllegalArgumentException.class, () -> new EngineOptions().walBytesPerSync(-1));
+    }
+
+    @Test
     void inDeterministicModeTheCallerDrivesCompaction() throws IOException {
         options.deterministic(true).memTableSize(1 << 20);
         try (LsmEngine engine = LsmEngine.open(fs, dir, options)) {

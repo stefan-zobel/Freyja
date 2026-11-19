@@ -225,6 +225,8 @@ All limits are fields of `EngineOptions` and are enforced, not advisory.
   invokes them. All randomized tests and both simulations use deterministic mode.
   - Normal mode has one background thread. It flushes waiting MemTables first, oldest first,
     and compacts when nothing waits.
+  - With `walBytesPerSync` set, normal mode has a second thread for early syncs of the log
+    (§6). In deterministic mode the write that starts an early sync does it itself.
   - In deterministic mode a flush runs inside the write that fills the MemTable. Compaction
     runs when the caller invokes `compact()` or `runBackgroundWork()`, and inside a write
     that would otherwise stall (§7).
@@ -239,6 +241,20 @@ All limits are fields of `EngineOptions` and are enforced, not advisory.
 - **Sync policy:** by default a write is acknowledged only after the WAL has been synced.
   `sync = false` is available per write and means the write can be lost in a crash. After a
   crash the engine always recovers a prefix of the write history, never a state with gaps.
+- **Early syncs** (`walBytesPerSync`, default 0 = off): once that many bytes have been
+  written to the log since its last sync, the log is synced without being asked to, so that
+  sealing it (§6.1) does not wait for a sync of everything written with `sync = false`.
+  Without early syncs, a MemTable of 32 MiB filled without syncs leaves that much to sync
+  when it is frozen, and the writer that froze it waits for all of it.
+  - The writer at the head of the queue starts an early sync with the size of the log at that
+    moment and goes on. The sync runs on its own thread, one at a time, while later groups
+    append; a later writer at the head takes note of it when it has ended, and the next
+    record carries the synced length as its sync point.
+  - Before a log is sealed, cut back (§3), or closed, the early sync that runs on it is
+    awaited.
+  - A failed early sync puts the engine into the failed state at once, like any failed sync.
+  - Writes with `sync = false` keep their meaning: an early sync makes more of them survive a
+    crash, but promises nothing.
 - Recovery follows `storage-format.md` §3.2. The logs are replayed in file-number order; all
   but the newest are sealed. The batches must continue the sequence numbers without a gap;
   a gap is damage.
@@ -405,7 +421,7 @@ The interface has three calls: add to a counter, set a gauge, record one duratio
 | Kind | Names |
 |---|---|
 | Counters | `write.groups`, `write.batches`, `write.bytes`, `write.stall.timeouts`, `write.rejected.disk.full`, `flush.count`, `flush.bytes`, `compaction.count`, `compaction.bytes`, `scrub.passes`, `scrub.bytes`, `damage.files`, `reserve.released`, `manifest.replaced` |
-| Durations | `wal.sync`, `write.stall`, `flush.time`, `compaction.time` |
+| Durations | `wal.sync`, `wal.sync.early`, `write.stall`, `flush.time`, `compaction.time` |
 | Gauges | `level.N.files`, `level.N.bytes`, `memtables.waiting`, `memtable.bytes`, `cache.hits`, `cache.misses`, `cache.evictions`, `table.metadata.bytes`, `snapshots.live`, `snapshots.oldest.age.millis`, `damage.files.current`, `disk.free.bytes` |
 
 Gauges are published after every flush, compaction, and scrub, and when the owner asks for

@@ -530,6 +530,11 @@ node starts runs on the thread of the simulation at a later moment the seed pick
 node goes on taking events and appending entries meanwhile. The runs that are validated as
 traces sync in the loop; what they check is the core, whose contract allows both.
 
+The engines of the simulated state machines do not sync their logs early (`walBytesPerSync`,
+`storage-engine.md` §6), which a real node does. In deterministic mode an early sync would run
+inside the write, so the simulation would not show the thread it runs on in a node anyway;
+the engine tests cover early syncs, with crashes and with a failed sync.
+
 What the simulation found while it was built:
 
 - An `Error` in the middle of a write left the storage engine with a request at the head of

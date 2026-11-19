@@ -221,7 +221,8 @@ public final class FreyjaNode {
                 resolve(one(options, "peer", null)), resolve(one(options, "client", null)),
                 resolve(one(options, "admin", null)), seeds, node,
                 // The engine applies whatever is committed; low free space is answered by the alarm.
-                new StateMachineStore.Options(new EngineOptions().minFreeSpace(0), 60_000), tick,
+                new StateMachineStore.Options(new EngineOptions().minFreeSpace(0).walBytesPerSync(1024 * 1024), 60_000),
+                tick,
                 options.containsKey("status") ? resolve(one(options, "status", null)) : null, security));
         out.println("READY node=" + server.identity().nodeId() + " peer=" + server.peerPort() + " client="
                 + server.clientPort() + " admin=" + server.adminPort()

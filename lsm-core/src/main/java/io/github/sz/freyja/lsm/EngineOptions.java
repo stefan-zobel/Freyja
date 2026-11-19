@@ -18,6 +18,7 @@ public final class EngineOptions {
     private int maxValueSize = 1024 * 1024;
     private int maxBatchSize = 4 * 1024 * 1024;
     private int maxGroupCommitSize = 8 * 1024 * 1024;
+    private long walBytesPerSync;
     private long memTableSize = 32L * 1024 * 1024;
     private long blockCacheCapacity = 256L * 1024 * 1024;
     private int levelCount = 7;
@@ -47,6 +48,7 @@ public final class EngineOptions {
         this.maxValueSize = other.maxValueSize;
         this.maxBatchSize = other.maxBatchSize;
         this.maxGroupCommitSize = other.maxGroupCommitSize;
+        this.walBytesPerSync = other.walBytesPerSync;
         this.memTableSize = other.memTableSize;
         this.blockCacheCapacity = other.blockCacheCapacity;
         this.levelCount = other.levelCount;
@@ -110,6 +112,25 @@ public final class EngineOptions {
 
     public int maxGroupCommitSize() {
         return maxGroupCommitSize;
+    }
+
+    /**
+     * Sets after how many bytes written with {@code sync = false} the log is synced without
+     * being asked to, so that the sync when a MemTable is frozen finds little left to do. In
+     * normal mode that sync runs on a thread of its own while writers go on; in deterministic
+     * mode it runs inside the write. The writes stay what they were: they can still be lost in
+     * a crash. Default: 0, never.
+     */
+    public EngineOptions walBytesPerSync(long bytes) {
+        if (bytes < 0) {
+            throw new IllegalArgumentException("walBytesPerSync must not be negative: " + bytes);
+        }
+        this.walBytesPerSync = bytes;
+        return this;
+    }
+
+    public long walBytesPerSync() {
+        return walBytesPerSync;
     }
 
     /**

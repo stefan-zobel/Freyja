@@ -267,6 +267,10 @@ no leader can be elected. Recovery then is a manual, explicitly unsafe procedure
 
 - The state machine is an `lsm-core` engine. It writes with `sync = false`: the Raft log is
   the durable record, and after a crash the engine recovers a prefix of what was applied.
+  The engine syncs its log early every 1 MiB (`walBytesPerSync`, `storage-engine.md` §6), on
+  a thread of its own. Otherwise freezing a full MemTable would sync its whole log inside
+  the apply, on the node's event loop: at 4000 writes per second that stalled the loop of
+  every node for 30–70 ms at the same moment, about every 25 seconds.
 - Key namespaces: every key is prefixed with one byte. `0x00` is system state, `0x01` is user
   data.
 - **Apply:** each batch of committed entries is applied in one `WriteBatch` that also updates
