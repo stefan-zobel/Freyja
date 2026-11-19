@@ -42,6 +42,14 @@ The event loop:
   order it likes.
 - The queue of waiting events is bounded (default 4,096). An event that does not fit is
   rejected at once.
+- The node hands its core the next waiting event together with the ticks, messages, and
+  proposals that wait right behind it, up to 256 in all, and only then does their work: one
+  sync of the log covers all of them (group commit). Without that, every proposal and every
+  append that arrives would cost a sync of its own. The whole-system simulation lets the
+  seed pick batches of 1, 2, 8, or 256 events. The runs that are validated as traces use
+  batches of one, so that the trace shows which step released which message; batching is
+  therefore checked by the invariants of the simulation, not by trace validation
+  (`verification.md` §2.7).
 - The work of a `Ready` is done in the order of the contract of the core: hard state,
   suffix truncation, entries, then one sync of the log; a hard state that ends
   log-recovering mode is stored in two steps around them (`raft.md` §3). Only then the

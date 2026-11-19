@@ -266,7 +266,9 @@ the two.
   - A start after the first is a restart line. If the node reports damage while it opens,
     the line shows the state after that report.
   - The runs that are validated (`traced`) have the faults of `system-faulty`, are short,
-    and shorten no log, because the model has no snapshots. The profile
+    and shorten no log, because the model has no snapshots. Their nodes hand their core one
+    event at a time: a batch of events releases its messages together, and the trace could
+    not say which step released which (`node.md` §1). The profile
     `-Ptrace-validation` runs them in `kv-node` (`SystemTraceValidationTest`), complete and
     not cut off. With the partly durable restart (§3), TLC accepted the six seeds of
     `system-trace-validation` and the three below on 2026-11-19: 42,410 steps in 21

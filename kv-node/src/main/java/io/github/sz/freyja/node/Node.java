@@ -83,16 +83,37 @@ public final class Node implements Closeable {
      * @param transfers             the settings of snapshot transfers
      * @param limits                the limits that protect the node and the cluster
      * @param clock                 the time source for what the node measures
+     * @param eventBatch            how many waiting events the core is given before their work
+     *                              is done, so that one sync of the log covers them
      */
     public record Options(RaftConfig raft, long segmentSize, int queueCapacity, long snapshotLogBytes,
                           long snapshotRetainEntries, SnapshotTransfers.Options transfers, Limits limits,
-                          Clock clock) {
+                          Clock clock, int eventBatch) {
+
+        /** The default of {@link #eventBatch}. */
+        public static final int EVENT_BATCH = 256;
+
         public Options {
-            if (segmentSize < 1 || queueCapacity < 1 || snapshotLogBytes < 1 || snapshotRetainEntries < 0) {
+            if (segmentSize < 1 || queueCapacity < 1 || snapshotLogBytes < 1 || snapshotRetainEntries < 0
+                    || eventBatch < 1) {
                 throw new IllegalArgumentException("segment size " + segmentSize + ", queue capacity "
                         + queueCapacity + ", snapshot at " + snapshotLogBytes + " bytes, retaining "
-                        + snapshotRetainEntries);
+                        + snapshotRetainEntries + ", batches of " + eventBatch);
             }
+        }
+
+        /** Options with batches of {@link #EVENT_BATCH} events. */
+        public Options(RaftConfig raft, long segmentSize, int queueCapacity, long snapshotLogBytes,
+                       long snapshotRetainEntries, SnapshotTransfers.Options transfers, Limits limits,
+                       Clock clock) {
+            this(raft, segmentSize, queueCapacity, snapshotLogBytes, snapshotRetainEntries, transfers, limits,
+                    clock, EVENT_BATCH);
+        }
+
+        /** These options with batches of the given number of events. */
+        public Options withEventBatch(int events) {
+            return new Options(raft, segmentSize, queueCapacity, snapshotLogBytes, snapshotRetainEntries,
+                    transfers, limits, clock, events);
         }
 
         /** Snapshots and limits as by default: at 1 GiB of log, keeping 10,000 entries. */
@@ -552,7 +573,9 @@ public final class Node implements Closeable {
     // ------------------------------------------------------------------ the event loop
 
     /**
-     * Processes the next waiting event and everything that follows from it.
+     * Processes the next waiting event and everything that follows from it. Ticks, messages,
+     * and proposals that wait right behind it, up to {@link Options#eventBatch} in all, are
+     * handed to the core with it, so that one sync of the log covers all of them.
      *
      * @return whether an event was processed
      * @throws IOException if storage failed; the node has stopped then
@@ -566,28 +589,11 @@ public final class Node implements Closeable {
             return false;
         }
         try {
-            if (item instanceof RaftEvent event) {
-                if (event instanceof RaftEvent.Tick) {
-                    now++;
-                    if (transfers != null) {
-                        transfers.tick();
-                    }
-                    if (store != null && now % options.limits().alarmCheckTicks() == 0) {
-                        checkSpace();
-                    }
-                }
-                feed(event);
-            } else if (item instanceof TransferCodec.Envelope envelope) {
-                transfers.handle(envelope.from(), envelope.message());
-            } else if (item instanceof Proposal proposal) {
-                if (proposal.deadline() < now) {
-                    expiredProposals++;
-                    listener.proposalExpired(proposal.requestId());
-                } else {
-                    feed(new RaftEvent.ClientPropose(proposal.requestId(), proposal.command()));
-                }
-            } else if (item instanceof AlarmCodec.Request request) {
-                raiseAlarm(request.alarm());
+            take(item);
+            for (int taken = 1; taken < options.eventBatch() && batched(item) && batched(queue.peekFirst());
+                    taken++) {
+                item = queue.pollFirst();
+                take(item);
             }
             work();
             if (item == SNAPSHOT_REQUEST) {
@@ -615,6 +621,38 @@ public final class Node implements Closeable {
             throw e;
         }
         return true;
+    }
+
+    /** Whether an event may be handed to the core together with others before their work is done. */
+    private static boolean batched(Object item) {
+        return item instanceof RaftEvent || item instanceof Proposal;
+    }
+
+    /** Hands one waiting event to the core or to the part of the node it is meant for. */
+    private void take(Object item) throws IOException {
+        if (item instanceof RaftEvent event) {
+            if (event instanceof RaftEvent.Tick) {
+                now++;
+                if (transfers != null) {
+                    transfers.tick();
+                }
+                if (store != null && now % options.limits().alarmCheckTicks() == 0) {
+                    checkSpace();
+                }
+            }
+            feed(event);
+        } else if (item instanceof TransferCodec.Envelope envelope) {
+            transfers.handle(envelope.from(), envelope.message());
+        } else if (item instanceof Proposal proposal) {
+            if (proposal.deadline() < now) {
+                expiredProposals++;
+                listener.proposalExpired(proposal.requestId());
+            } else {
+                feed(new RaftEvent.ClientPropose(proposal.requestId(), proposal.command()));
+            }
+        } else if (item instanceof AlarmCodec.Request request) {
+            raiseAlarm(request.alarm());
+        }
     }
 
     /** Does the work the core has ready, until it has none; a failure stops the node. */

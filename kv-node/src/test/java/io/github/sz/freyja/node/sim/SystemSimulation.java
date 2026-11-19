@@ -99,36 +99,41 @@ public final class SystemSimulation {
      * @param spares      how many nodes stand by to take the place of members; with spares,
      *                    members are replaced and identities are lost
      * @param snapshots   whether nodes write snapshots and shorten their logs
+     * @param batches     whether nodes hand their core several waiting events at once, as many
+     *                    as the seed picks; otherwise one at a time
      */
     public record Options(int nodes, int clients, int keys, long duration, int maxDelay, double drop,
-                          double duplicate, double chaos, boolean storage, int spares, boolean snapshots) {
+                          double duplicate, double chaos, boolean storage, int spares, boolean snapshots,
+                          boolean batches) {
 
         /** A reliable network and no crashes. */
         public static Options calm() {
-            return new Options(3, 3, 4, 30_000, 3, 0, 0, 0, false, 0, true);
+            return new Options(3, 3, 4, 30_000, 3, 0, 0, 0, false, 0, true, true);
         }
 
         /** Lost and repeated messages, partitions, and crashes, also in the middle of a write. */
         public static Options faulty() {
-            return new Options(3, 4, 4, 60_000, 12, 0.03, 0.03, 0.25, false, 0, true);
+            return new Options(3, 4, 4, 60_000, 12, 0.03, 0.03, 0.25, false, 0, true, true);
         }
 
         /** All of {@link #faulty}, and damaged files, full disks, slow disks, and hand-overs. */
         public static Options hostile() {
-            return new Options(3, 4, 4, 80_000, 12, 0.02, 0.02, 0.3, true, 0, true);
+            return new Options(3, 4, 4, 80_000, 12, 0.02, 0.02, 0.3, true, 0, true, true);
         }
 
         /** All of {@link #hostile}, and members that are replaced, some after losing their identity. */
         public static Options changing() {
-            return new Options(3, 4, 4, 100_000, 12, 0.02, 0.02, 0.25, true, 4, true);
+            return new Options(3, 4, 4, 100_000, 12, 0.02, 0.02, 0.25, true, 4, true, true);
         }
 
         /**
          * A short run of {@link #faulty} in which no log is shortened: the model that traces
-         * are validated against has no snapshots (docs/spec/verification.md, section 2.7).
+         * are validated against has no snapshots (docs/spec/verification.md, section 2.7). Its
+         * nodes hand their core one event at a time, so that the trace shows which step
+         * released which message; a batch releases the messages of its events together.
          */
         public static Options traced() {
-            return new Options(3, 3, 4, 6_000, 12, 0.03, 0.03, 0.5, false, 0, false);
+            return new Options(3, 3, 4, 6_000, 12, 0.03, 0.03, 0.5, false, 0, false, false);
         }
     }
 
@@ -372,7 +377,8 @@ public final class SystemSimulation {
             traced.clear(); // of a start that failed
             Node.Options own = new Node.Options(nodeOptions.raft(), nodeOptions.segmentSize(),
                     nodeOptions.queueCapacity(), nodeOptions.snapshotLogBytes(), nodeOptions.snapshotRetainEntries(),
-                    nodeOptions.transfers(), nodeOptions.limits(), () -> time + clockSkew);
+                    nodeOptions.transfers(), nodeOptions.limits(), () -> time + clockSkew,
+                    nodeOptions.eventBatch());
             // Requests of clients go through the service of the node, as bytes; a tick of the
             // node is TICK units, so the service counts the time of a request in units.
             service = new ClientService(new ClientService.Options(TICK, 100, 1024), () -> time,
@@ -892,8 +898,12 @@ public final class SystemSimulation {
                 options.snapshots() ? 32 * 1024 : Long.MAX_VALUE, 20,
                 new SnapshotTransfers.Options(2048, 5, 60, 2),
                 new Node.Limits(10_000, 1L << 40, options.storage() ? MIN_FREE : 0, 10,
-                        options.storage() ? 5L * TICK : Long.MAX_VALUE), () -> time);
+                        options.storage() ? 5L * TICK : Long.MAX_VALUE), () -> time,
+                options.batches() ? EVENT_BATCHES[(int) Math.floorMod(seed, (long) EVENT_BATCHES.length)] : 1);
     }
+
+    /** How many events a node hands its core at once; the seed picks one for a run. */
+    private static final int[] EVENT_BATCHES = {1, 2, 8, Node.Options.EVENT_BATCH};
 
     // ------------------------------------------------------------------ helpers
 
