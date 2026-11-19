@@ -397,6 +397,13 @@ public final class ClientService implements NodeListener {
     }
 
     @Override
+    public void sending(Ready ready, HardState durableHardState, long durableLastIndex) {
+        if (next != null) {
+            next.sending(ready, durableHardState, durableLastIndex);
+        }
+    }
+
+    @Override
     public void ready(Ready ready, HardState durableHardState, long durableLastIndex) {
         if (next != null) {
             next.ready(ready, durableHardState, durableLastIndex);

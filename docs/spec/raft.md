@@ -303,8 +303,11 @@ acknowledged. The core then:
 3. Starts no elections. It grants a vote or a pre-vote only to a candidate whose log is at
    least as up to date as the log the node has lost: it votes as it would have before the
    damage. For that the hard state holds the last index and term of the log before the
-   damage. If they are not known (the runtime found the damage when it opened the log, so
-   the node never saw the lost entries), the node grants no vote at all. It accepts
+   damage. The candidate must also be at least as up to date as the log the node holds
+   now, as always: since the damage the node may have acknowledged entries beyond the lost
+   log, and some of them may be committed. If the end of the lost log is not known (the
+   runtime found the damage when it opened the log, so the node never saw the lost
+   entries), the node grants no vote at all. It accepts
    entries and snapshots from a leader of its current or a later term and acknowledges what
    it has durably stored.
 4. Clears `logRecovering` on an append of a leader that (a) names the present log epoch of
@@ -344,8 +347,9 @@ leader that has committed an entry of its own term knows every earlier commit).
 
 Reasoning: the election rule of Raft only asks that a voter does not vote for a candidate
 whose log is behind its own. A node that compares the candidate with the log it has lost
-gives exactly the votes it would have given with that log, so every leader holds every
-committed entry, including those the recovering node had acknowledged. A node that does not
+and with the log it holds gives no vote it would have refused with either, so every leader
+holds every committed entry, including those the recovering node had acknowledged before
+the damage and those it has acknowledged since. A node that does not
 know what it has lost abstains: then any leader is elected by a majority that excludes it,
 and that majority intersects every earlier commit quorum in another node.
 

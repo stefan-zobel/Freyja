@@ -669,6 +669,16 @@ public final class Node implements Closeable {
     private void work() throws IOException {
         while (raft.hasReady()) {
             Ready ready = raft.takeReady();
+            // The messages leave before the work of the Ready is durable: the appends of a
+            // leader reach its followers while it syncs its own log, and the core holds back
+            // every message that promises something until a later Ready (raft.md section 3).
+            if (observed) {
+                listener.sending(ready, hardState.get(), log.lastIndex());
+            }
+            for (Outbound outbound : ready.messages()) {
+                transport.send(outbound.toNode(),
+                        MessageCodec.encode(identity.nodeId(), outbound.toNode(), outbound.message()));
+            }
             if (ready.hasPersistentWork()) {
                 long started = options.clock().nanoTime();
                 HardState after = null;
@@ -716,10 +726,6 @@ public final class Node implements Closeable {
             }
             if (observed) {
                 listener.ready(ready, hardState.get(), log.lastIndex());
-            }
-            for (Outbound outbound : ready.messages()) {
-                transport.send(outbound.toNode(),
-                        MessageCodec.encode(identity.nodeId(), outbound.toNode(), outbound.message()));
             }
             if (ready.hasEntriesToApply()) {
                 List<LogEntry> entries = log.entries(ready.applyFrom(), ready.applyTo() + 1, Integer.MAX_VALUE);

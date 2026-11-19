@@ -931,8 +931,10 @@ public final class RaftNode {
         if (logRecovering) {
             // This node may lack entries it has acknowledged. It votes as it would have with
             // the log it has lost: only for a candidate that is at least as up to date as that.
-            upToDate = request.lastLogTerm() > lostLogTerm
-                    || (request.lastLogTerm() == lostLogTerm && request.lastLogIndex() >= lostLogIndex);
+            // The log it holds counts as well: since the damage it may have acknowledged
+            // entries that the lost log does not reach.
+            upToDate = upToDate && (request.lastLogTerm() > lostLogTerm
+                    || (request.lastLogTerm() == lostLogTerm && request.lastLogIndex() >= lostLogIndex));
         }
         if (request.preVote()) {
             boolean grant = request.term() > term && upToDate;

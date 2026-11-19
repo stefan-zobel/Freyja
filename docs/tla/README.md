@@ -28,6 +28,11 @@ against it; trace validation uses the seed sets without them.
   (2026-11-19). Damage is reached, but with 4 messages no damaged node is repaired: an
   election and a replicated entry use them all, and the repair needs two more. The check
   covers a damaged node until its repair, not the repair itself.
+- The vote of a node in log-recovering mode was corrected afterwards (2026-11-19): it now
+  also asks the candidate to cover the log the node holds. The whole-system simulation had
+  found a run that the old rule allowed (`verification.md` §3). The correction only takes
+  away grants of votes, and granting is never required in the model, so every state of the
+  corrected model is a state of the old one: the results above still hold for it.
 - An exhaustive check of membership change, and of damage with repair, needs larger bounds
   than these and a machine that can run TLC for days; it is an open item.
 - Trace validation: the runs under the full fault model and all mutated runs behave as
@@ -64,8 +69,9 @@ control).
 
 - A log entry is a term and, for a `CONFIG` entry, the complete new configuration. The
   configuration in force is the newest one in the log.
-- A node in log-recovering mode votes only for a candidate that covers the log it has lost.
-  The case that the node does not know what it lost (it then grants no vote) is not modeled.
+- A node in log-recovering mode votes only for a candidate that covers the log it has lost
+  and the log it holds. The case that the node does not know what it lost (it then grants
+  no vote) is not modeled.
 - Log damage cuts the log of a node, also its durable log and the snapshots on their way.
   The damage marks itself (it is found again at every start), so the log-recovering state
   counts as durable from the moment of the damage. Damage is allowed only while a majority

@@ -1,1 +1,2 @@
 # Seeds that failed at some time. Each runs on every build.
+7  # a node in log-recovering mode voted for a candidate behind the log it held

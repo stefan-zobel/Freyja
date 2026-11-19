@@ -513,8 +513,15 @@ must reach what it is there for; counted are among others: crashes in the middle
 operation, installed snapshots, snapshots installed around a leader change, log-recovering
 mode entered and left, rebuilt state machines, commands rejected for lack of space,
 step-downs for slow disks, aborted hand-overs, sessions lost while a retry was on its way,
-replaced members, lost identities, reverted configurations, and the probes below the node
-(§3.1): torn tails dropped, damage proven by a sync point, writes held back.
+replaced members, lost identities, reverted configurations, crashes of a leader whose
+appends had left before its own log was durable, and the probes below the node (§3.1): torn
+tails dropped, damage proven by a sync point, writes held back.
+
+A node that crashes in the middle of a write may have handed messages to its transport
+already (`node.md` §1); the simulation lets a random part of them go out. The runs that are
+validated as traces lose them all: their trace shows a `Ready` only once its work is
+durable. They check the release of messages by trace validation; the runs with leaked
+messages check it by the invariants, against what was durable when the messages left.
 
 What the simulation found while it was built:
 
@@ -531,6 +538,13 @@ What the simulation found while it was built:
   node in log-recovering mode now takes no commit index from a heartbeat (`raft.md` §8). The
   Raft simulator could not find this then: there a damaged log always kept a true prefix.
   It has logs that go back since (§2.4) and finds the fault.
+- A violation of leader completeness (seed 7 of `system-changing`, kept in the corpus): a
+  node in log-recovering mode had acknowledged entries beyond the log it had lost, one of
+  them committed; then it voted for a candidate that covered the lost log but not the log
+  it held, and that candidate became leader without the committed entry. A node in the
+  mode now compares a candidate with both logs (`raft.md` §8). The model had the same rule;
+  the exhaustive check of `RaftDamage.cfg` did not reach it, because its bounds end before
+  a damaged node is repaired.
 
 Mutations that the simulation catches: a repeated command applied again; an older command
 of a session applied; the log shortened without a flush before; the applied index not

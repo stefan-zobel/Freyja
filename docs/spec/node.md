@@ -50,12 +50,16 @@ The event loop:
   batches of one, so that the trace shows which step released which message; batching is
   therefore checked by the invariants of the simulation, not by trace validation
   (`verification.md` §2.7).
+- The messages of a `Ready` are handed to the transport first, before its work is
+  durable: the appends of a leader reach its followers while it syncs its own log
+  (`raft.md` §3.4). The core holds back every message that promises something until a
+  later `Ready`, so nothing else is needed for that.
 - The work of a `Ready` is done in the order of the contract of the core: hard state,
   suffix truncation, entries, then one sync of the log; a hard state that ends
   log-recovering mode is stored in two steps around them (`raft.md` §3). Only then the
-  core is told that the work is durable; messages are sent and entries applied after that.
-  Persisting is synchronous in the loop for now; the contract of the core allows to move it
-  to its own thread later without changing the core.
+  core is told that the work is durable, and entries are applied after that. Persisting is
+  synchronous in the loop for now; the contract of the core allows to move it to its own
+  thread later without changing the core.
 - A failure of storage stops the node: it rejects every further event. It is started again
   from what is on disk.
 - A message that fails its checksum, has an unknown format, or is meant for another node is

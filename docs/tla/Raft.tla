@@ -162,10 +162,11 @@ Update(i, s, n) ==
 (***************************************************************************)
 
 \* A candidate whose log ends at (lterm, lidx) is at least as up to date as a log that ends
-\* at e. A node in log-recovering mode compares with the end of the log it has lost: it votes
-\* as it would have before the damage.
+\* at e. A node in log-recovering mode compares with the end of the log it has lost as well:
+\* it votes as it would have before the damage, and as its present log, which may hold
+\* entries it has acknowledged since, demands.
 Covers(lterm, lidx, e) == lterm > e.t \/ (lterm = e.t /\ lidx >= e.i)
-VoterEnd(n) == IF n.rec THEN n.lost ELSE EndOf(n.log)
+VoterCovers(lterm, lidx, n) == Covers(lterm, lidx, EndOf(n.log)) /\ (n.rec => Covers(lterm, lidx, n.lost))
 UpToDate(lterm, lidx, log) == Covers(lterm, lidx, EndOf(log))
 
 ValidSend(m, n) ==
@@ -178,7 +179,7 @@ ValidSend(m, n) ==
       [] m.type = "RVR" /\ m.pre /\ m.granted ->
             /\ m.term > n.term
             /\ \E r \in msgs : /\ r.type = "RV" /\ r.pre /\ r.from = m.to /\ r.to = m.from
-                               /\ r.term = m.term /\ Covers(r.lterm, r.lidx, VoterEnd(n))
+                               /\ r.term = m.term /\ VoterCovers(r.lterm, r.lidx, n)
       [] m.type = "RVR" /\ ~m.pre /\ m.granted -> \* a promise: the vote is durable
             n.d.term = m.term /\ n.d.vote = m.to
       [] m.type = "RVR" /\ ~m.granted -> m.term = n.term
@@ -321,7 +322,7 @@ Damage(i) == \E k \in 1..Len(st[i].d.log) : DamageK(i, k)
 (***************************************************************************)
 
 \* A request for a real vote. Granting is never required. A node in log-recovering mode
-\* compares the candidate with the log it has lost: it may lack entries it has acknowledged.
+\* compares the candidate with the log it has lost too: it may lack entries it has acknowledged.
 RecvRequestVote(m) ==
     LET i == m.to
         s == st[i]
@@ -329,7 +330,7 @@ RecvRequestVote(m) ==
     IN /\ m.type = "RV" /\ ~m.pre /\ m.term >= s.term
        /\ \/ Update(i, s, f)
           \/ /\ f.vote \in {Nil, m.from}
-             /\ Covers(m.lterm, m.lidx, VoterEnd(f))
+             /\ VoterCovers(m.lterm, m.lidx, f)
              /\ Update(i, s, [f EXCEPT !.vote = m.from])
 
 \* An answer to a request for a vote or a pre-vote. Of several answers of one node in one

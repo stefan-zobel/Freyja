@@ -41,6 +41,7 @@ class SystemSimulationTest {
         assertTrue(total.crashes > 12, total.toString());
         assertTrue(total.crashesInAnOperation > 3, total.toString());
         assertTrue(total.crashesBetweenHardStateAndLog > 0, total.toString());
+        assertTrue(total.appendsAheadOfACrash > 3, total.toString());
         assertTrue(total.partitions > 5, total.toString());
         assertTrue(total.dropped > 0 && total.duplicated > 0, total.toString());
         assertTrue(total.snapshotsCreated > 0, total.toString());
@@ -68,6 +69,7 @@ class SystemSimulationTest {
         assertTrue(total.tornTailsDropped > 12 && total.writesHeldBack > 12, total.toString());
         assertTrue(total.damageProvenBySyncPoint > 0, total.toString());
         assertTrue(total.crashesBetweenHardStateAndLog > 3, total.toString());
+        assertTrue(total.appendsAheadOfACrash > 3, total.toString());
     }
 
     @Test

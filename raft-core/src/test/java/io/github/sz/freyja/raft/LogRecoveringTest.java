@@ -89,6 +89,31 @@ class LogRecoveringTest {
     }
 
     @Test
+    void entriesAcknowledgedSinceTheDamageCountForTheVoteAsWell() {
+        TestNode node = followerWithFiveEntries();
+        node.step(new LogDamaged(3));
+        // A leader of term 2 that does not know of the damage yet: the entries fit, the mode
+        // stays, and the node acknowledges them. Its log now reaches beyond the lost one.
+        node.receive(0, new AppendEntries(2, 2, 1, entries(3, 8, 2), 2, 0));
+        assertTrue(node.view().logRecovering());
+        assertEquals(8, node.view().lastLogIndex());
+        AppendResponse ack = (AppendResponse) node.outbox.getLast().message();
+        assertTrue(ack.success());
+        assertEquals(8, ack.index());
+
+        // A candidate that covers the lost log but lacks acknowledged entries gets no vote.
+        node.tick(10);
+        node.receive(2, new RequestVote(3, 6, 2, true));
+        assertEquals(new VoteResponse(2, true, false), node.outbox.getLast().message());
+        node.receive(2, new RequestVote(3, 6, 2, false));
+        assertEquals(new VoteResponse(3, false, false), node.outbox.getLast().message());
+        // One that covers both logs gets it.
+        node.receive(0, new RequestVote(3, 8, 2, false));
+        node.persistAll();
+        assertEquals(new VoteResponse(3, false, true), node.outbox.getLast().message());
+    }
+
+    @Test
     void damageBeyondTheLogTheNodeWasStartedWithLeavesItWithoutAVote() {
         // The runtime found the damage when it opened the log: the node never saw the lost
         // entries and cannot know how far they went.

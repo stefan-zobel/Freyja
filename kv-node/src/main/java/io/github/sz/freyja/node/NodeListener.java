@@ -38,8 +38,19 @@ public interface NodeListener {
     }
 
     /**
-     * The node has made the work of a {@code Ready} durable and is about to send its
-     * messages. Only if {@link #observesCore}.
+     * The node is about to send the messages of a {@code Ready}. Its work is not durable
+     * yet: the core releases only messages that may leave before it is. Only if
+     * {@link #observesCore}.
+     *
+     * @param durableHardState the hard state in stable storage at this moment
+     * @param durableLastIndex the last log index in stable storage at this moment
+     */
+    default void sending(Ready ready, HardState durableHardState, long durableLastIndex) {
+    }
+
+    /**
+     * The node has made the work of a {@code Ready} durable and told its core so; its
+     * messages are sent already. Only if {@link #observesCore}.
      *
      * @param durableHardState the hard state in stable storage at this moment
      * @param durableLastIndex the last log index in stable storage at this moment

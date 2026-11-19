@@ -57,6 +57,7 @@ import io.github.sz.freyja.raft.Outbound;
 import io.github.sz.freyja.raft.ProtocolState;
 import io.github.sz.freyja.raft.RaftConfig;
 import io.github.sz.freyja.raft.RaftEvent;
+import io.github.sz.freyja.raft.RaftMessage;
 import io.github.sz.freyja.raft.Ready;
 import io.github.sz.freyja.raft.Role;
 import io.github.sz.freyja.raft.SnapshotMeta;
@@ -101,29 +102,31 @@ public final class SystemSimulation {
      * @param snapshots   whether nodes write snapshots and shorten their logs
      * @param batches     whether nodes hand their core several waiting events at once, as many
      *                    as the seed picks; otherwise one at a time
+     * @param leaks       whether some of the messages a node handed to the transport before it
+     *                    crashed in the middle of a write still go out; otherwise all are lost
      */
     public record Options(int nodes, int clients, int keys, long duration, int maxDelay, double drop,
                           double duplicate, double chaos, boolean storage, int spares, boolean snapshots,
-                          boolean batches) {
+                          boolean batches, boolean leaks) {
 
         /** A reliable network and no crashes. */
         public static Options calm() {
-            return new Options(3, 3, 4, 30_000, 3, 0, 0, 0, false, 0, true, true);
+            return new Options(3, 3, 4, 30_000, 3, 0, 0, 0, false, 0, true, true, true);
         }
 
         /** Lost and repeated messages, partitions, and crashes, also in the middle of a write. */
         public static Options faulty() {
-            return new Options(3, 4, 4, 60_000, 12, 0.03, 0.03, 0.25, false, 0, true, true);
+            return new Options(3, 4, 4, 60_000, 12, 0.03, 0.03, 0.25, false, 0, true, true, true);
         }
 
         /** All of {@link #faulty}, and damaged files, full disks, slow disks, and hand-overs. */
         public static Options hostile() {
-            return new Options(3, 4, 4, 80_000, 12, 0.02, 0.02, 0.3, true, 0, true, true);
+            return new Options(3, 4, 4, 80_000, 12, 0.02, 0.02, 0.3, true, 0, true, true, true);
         }
 
         /** All of {@link #hostile}, and members that are replaced, some after losing their identity. */
         public static Options changing() {
-            return new Options(3, 4, 4, 100_000, 12, 0.02, 0.02, 0.25, true, 4, true, true);
+            return new Options(3, 4, 4, 100_000, 12, 0.02, 0.02, 0.25, true, 4, true, true, true);
         }
 
         /**
@@ -131,9 +134,11 @@ public final class SystemSimulation {
          * are validated against has no snapshots (docs/spec/verification.md, section 2.7). Its
          * nodes hand their core one event at a time, so that the trace shows which step
          * released which message; a batch releases the messages of its events together.
+         * The messages of a node that crashes in the middle of a write are lost: the trace
+         * shows a {@code Ready} only once its work is durable.
          */
         public static Options traced() {
-            return new Options(3, 3, 4, 6_000, 12, 0.03, 0.03, 0.5, false, 0, false, false);
+            return new Options(3, 3, 4, 6_000, 12, 0.03, 0.03, 0.5, false, 0, false, false, false);
         }
     }
 
@@ -154,6 +159,8 @@ public final class SystemSimulation {
         public long crashesInAnOperation;
         /** Crashes after the hard state of a step was durable and before its log was. */
         public long crashesBetweenHardStateAndLog;
+        /** Crashes of a leader whose appends of entries went out before they were durable locally. */
+        public long appendsAheadOfACrash;
         public long partitions;
         public long dropped;
         public long duplicated;
@@ -198,6 +205,7 @@ public final class SystemSimulation {
             crashes += other.crashes;
             crashesInAnOperation += other.crashesInAnOperation;
             crashesBetweenHardStateAndLog += other.crashesBetweenHardStateAndLog;
+            appendsAheadOfACrash += other.appendsAheadOfACrash;
             partitions += other.partitions;
             dropped += other.dropped;
             duplicated += other.duplicated;
@@ -235,7 +243,8 @@ public final class SystemSimulation {
                     + " under retries), late duplicates " + lateDuplicates + ", leader changes "
                     + leaderChanges + ", crashes "
                     + crashes + " (" + crashesInAnOperation + " in an operation, " + crashesBetweenHardStateAndLog
-                    + " between hard state and log), partitions " + partitions
+                    + " between hard state and log, " + appendsAheadOfACrash
+                    + " after appends ahead of the log), partitions " + partitions
                     + ", dropped " + dropped + ", duplicated " + duplicated + ", snapshots created/installed "
                     + snapshotsCreated + "/" + snapshotsInstalled + " (" + installsAroundALeaderChange
                     + " around a leader change), applied " + highestApplied
@@ -330,6 +339,11 @@ public final class SystemSimulation {
         final List<TracedStep> traced = new ArrayList<>();
         /** The hard state of the Ready being written is durable, its log not yet. */
         boolean hardStateAheadOfLog;
+        /**
+         * Where in the outbox the appends of entries begin that are not durable on this node
+         * yet; -1 if there are none.
+         */
+        int appendsAheadFrom = -1;
 
         /** Whether the node is one of those that are meant to run. */
         boolean active() {
@@ -437,6 +451,7 @@ public final class SystemSimulation {
             stats.snapshotsCreated += dead.snapshotsCreated();
             stats.slowDiskStepDowns += dead.slowSyncStepDowns();
             outbox.clear();
+            appendsAheadFrom = -1;
             if (crashFirst) {
                 memory.crash(random);
             }
@@ -537,8 +552,21 @@ public final class SystemSimulation {
         }
 
         @Override
+        public void sending(Ready ready, HardState durableHardState, long durableLastIndex) {
+            if (!ready.entries().isEmpty() && ready.messages().stream().anyMatch(
+                    o -> o.message() instanceof RaftMessage.AppendEntries append && !append.entries().isEmpty())) {
+                appendsAheadFrom = outbox.size();
+            }
+            // Checked against what is durable when the messages leave, not after the work.
+            for (Outbound outbound : ready.messages()) {
+                protocol.released(id, outbound, durableHardState, durableLastIndex);
+            }
+        }
+
+        @Override
         public void ready(Ready ready, HardState durableHardState, long durableLastIndex) {
             hardStateAheadOfLog = false;
+            appendsAheadFrom = -1;
             if (trace != null && !traced.isEmpty()) {
                 // A node makes the work of a Ready durable and tells its core before it shows
                 // the Ready: the step that handed it out is the one before that report. A
@@ -560,14 +588,10 @@ public final class SystemSimulation {
             for (LogEntry entry : ready.entries()) {
                 protocol.appended(id, entry);
             }
-            // Roles first: the election of a leader is on record before its messages.
             for (Notification note : ready.notifications()) {
                 if (note instanceof Notification.RoleChanged change && change.role() == Role.LEADER) {
                     protocol.elected(id, change.term());
                 }
-            }
-            for (Outbound outbound : ready.messages()) {
-                protocol.released(id, outbound, durableHardState, durableLastIndex);
             }
         }
 
@@ -992,7 +1016,19 @@ public final class SystemSimulation {
                 stats.crashesBetweenHardStateAndLog++;
             }
             host.hardStateAheadOfLog = false;
+            // A node hands the messages of a Ready to its transport before the work of the
+            // Ready is durable (docs/spec/node.md, section 1): some of them may be on their
+            // way when it dies.
+            List<byte[]> left = options.leaks()
+                    ? List.copyOf(host.outbox.subList(0, random.nextInt(host.outbox.size() + 1)))
+                    : List.of();
+            if (host.appendsAheadFrom >= 0 && left.size() > host.appendsAheadFrom) {
+                stats.appendsAheadOfACrash++;
+            }
             host.down(false);
+            for (byte[] frame : left) {
+                route(host.id, frame);
+            }
             return;
         } catch (IOException | java.io.UncheckedIOException e) {
             stopped(host, e);
