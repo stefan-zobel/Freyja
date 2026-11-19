@@ -5,8 +5,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 import io.github.sz.freyja.client.FreyjaClient;
 import io.github.sz.freyja.client.FreyjaException;
@@ -23,6 +25,10 @@ import io.github.sz.freyja.client.FreyjaException;
  * <p>A fixed number of clients carry the requests out, each in a virtual thread. If they
  * cannot keep up, requests wait, and their latencies grow; if more wait than a bound allows,
  * the rest is counted as shed and not sent, so that the generator stays bounded too.
+ *
+ * <p>The clock starts when every client has connected, found the leader, and opened its
+ * session. What that costs is not part of the load: a run measures the cluster under its
+ * workload, not a crowd of clients that arrive at once.
  */
 public final class LoadGenerator {
 
@@ -119,10 +125,14 @@ public final class LoadGenerator {
      * @param rejections how long it took in microseconds, from the moment a client sent a
      *                   request, until it was rejected
      * @param writtenBytes the bytes of keys and values that completed writes put
+     * @param warmUpSeconds how long the clients took to connect and open their sessions
+     *                   before the clock started
+     * @param warmUpFailures clients that could not open their session before the clock
+     *                   started; they try again with their first command
      */
     public record Result(Config config, long due, long completed, long failed, long rejected, long shed,
                          double seconds, Histogram latencies, Histogram service, Histogram rejections,
-                         long writtenBytes) {
+                         long writtenBytes, double warmUpSeconds, long warmUpFailures) {
 
         /** Completed requests per second of the run. */
         public double throughput() {
@@ -153,7 +163,8 @@ public final class LoadGenerator {
         long[] rejected = new long[config.clients()];
         long[] written = new long[config.clients()];
         List<Thread> workers = new ArrayList<>();
-        long start = System.nanoTime();
+        CountDownLatch ready = new CountDownLatch(config.clients());
+        AtomicLong warmUpFailures = new AtomicLong();
 
         for (int c = 0; c < config.clients(); c++) {
             int worker = c;
@@ -167,6 +178,13 @@ public final class LoadGenerator {
                         config.requestTimeoutMillis(), Math.min(2_000, config.requestTimeoutMillis()), 10, 200,
                         1_000, 0).withRetryWhenOverloaded(config.retryWhenOverloaded());
                 try (FreyjaClient client = FreyjaClient.open(options)) {
+                    try {
+                        client.openSession();
+                    } catch (FreyjaException e) {
+                        warmUpFailures.incrementAndGet(); // it tries again with its first command
+                    } finally {
+                        ready.countDown();
+                    }
                     while (true) {
                         long[] request = waiting.poll(50, TimeUnit.MILLISECONDS);
                         if (request == null) {
@@ -195,6 +213,9 @@ public final class LoadGenerator {
             }));
         }
 
+        long warmUpStarted = System.nanoTime();
+        ready.await();
+        long start = System.nanoTime();
         long shed = 0;
         for (long i = 0; i < total; i++) {
             long dueAt = start + i * intervalNanos;
@@ -227,7 +248,7 @@ public final class LoadGenerator {
             bytes += written[c];
         }
         return new Result(config, total, all.count(), failures, refusals, shed, seconds, all, service, rejection,
-                bytes);
+                bytes, (start - warmUpStarted) / 1e9, warmUpFailures.get());
     }
 
     /** The list starting at another node for every client, so that they do not all ask the same first. */

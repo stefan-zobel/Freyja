@@ -45,6 +45,8 @@ public final class Baseline {
         values.put("failed", Long.toString(result.failed()));
         values.put("rejected", Long.toString(result.rejected()));
         values.put("shed", Long.toString(result.shed()));
+        values.put("warmup.seconds", String.format(java.util.Locale.ROOT, "%.1f", result.warmUpSeconds()));
+        values.put("warmup.failures", Long.toString(result.warmUpFailures()));
         values.put("throughput.per.second", String.format(java.util.Locale.ROOT, "%.1f", result.throughput()));
         values.put("latency.p50.micros", Long.toString(result.latencies().percentile(0.50)));
         values.put("latency.p99.micros", Long.toString(result.latencies().percentile(0.99)));

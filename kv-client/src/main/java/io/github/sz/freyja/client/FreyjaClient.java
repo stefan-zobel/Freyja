@@ -303,6 +303,25 @@ public final class FreyjaClient implements Closeable {
         return entries;
     }
 
+    /**
+     * Opens the session of the client now, if it has none, and not with its first command:
+     * the client connects, finds the leader, and registers the session through the log.
+     *
+     * @throws FreyjaException.TimedOut if no session was opened within the request timeout
+     */
+    public void openSession() {
+        lock.lock();
+        try {
+            if (closed) {
+                throw new IllegalStateException("the client is closed");
+            }
+            ensureSession(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(options.requestTimeoutMillis()));
+        } finally {
+            lastUsedNanos = System.nanoTime();
+            lock.unlock();
+        }
+    }
+
     /** The id of the session of this client; 0 before its first command. */
     public long sessionId() {
         lock.lock();

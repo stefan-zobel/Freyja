@@ -641,8 +641,8 @@ Details:
 - One request at a time per client; calls from several threads take turns. A session
   allows no more, because the cluster keeps the answer to its last command only. Who needs
   requests in parallel opens several clients.
-- The session is opened with the first command. A command gets the next sequence number of
-  its session and keeps it across all its attempts.
+- The session is opened with the first command, or earlier on request (`openSession`). A
+  command gets the next sequence number of its session and keeps it across all its attempts.
 - An attempt has its own, shorter time. Without an answer the client closes the connection
   and asks the next node of its list. A not-leader answer with an address sends it there at
   once; without one it asks the next node after a pause. Overloaded: the same node again

@@ -704,6 +704,12 @@ The load generator (`FreyjaBench` in `kv-bench`):
 - Request number `i` is due `i / rate` seconds after the start. A fixed number of clients
   carry the requests out. The latency of a request counts from the moment it was due, not
   from the moment a client had time for it.
+- The start is when every client has connected, found the leader, and opened its session
+  (`FreyjaClient.openSession`). A run measures the cluster under its workload, not the
+  arrival of its clients: connecting, being redirected to the leader, and registering the
+  sessions of hundreds of clients at once is a load of its own. The result names how long
+  that took (`warmup.seconds`) and how many clients could not open their session before the
+  start (`warmup.failures`; they try again with their first command).
 - If the clients cannot keep up, requests wait and their latencies grow. Beyond five seconds
   of load in the queue, further requests are counted as shed and not sent: the generator is
   bounded too.

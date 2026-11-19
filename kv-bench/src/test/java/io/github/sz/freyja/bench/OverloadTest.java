@@ -42,7 +42,7 @@ class OverloadTest {
         LoadGenerator.Config config = new LoadGenerator.Config(List.of("127.0.0.1:1"),
                 LoadGenerator.Workload.MIXED, 100, 1, 1, 10, 10, 1, 1_000);
         return new LoadGenerator.Result(config, 100, service.count(), failed, rejections.count(), shed, 1,
-                service, service, rejections, 0);
+                service, service, rejections, 0, 0, 0);
     }
 
     @Test
