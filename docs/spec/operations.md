@@ -108,6 +108,7 @@ only:
 | Kind | Names |
 |---|---|
 | Gauges of the protocol | `raft.term`, `raft.role` (0 follower, 1 pre-candidate, 2 candidate, 3 leader), `raft.leader`, `raft.last.index`, `raft.commit.index`, `raft.applied.index`, `raft.snapshot.index`, `raft.log.recovering`, `raft.log.segments`; on the leader per follower `raft.follower.N.lag` and `raft.follower.N.active` |
+| Gauges of space | `node.stored.bytes`: what the node holds, its Raft log and what its state machine holds (tables, and memtables at their size in memory, which stands in for the log of the engine they are written to); `disk.written.bytes`: the bytes the node has appended to files since it started, of every kind |
 | Gauges of the node | `node.queue.events`, `node.queue.inbound`, `node.events.rejected`, `node.messages.invalid`, `node.inbound.refused`, `node.restarts`, `node.snapshots.created`, `node.snapshots.installed`, `node.proposals.expired`, `node.slow.sync.step.downs`, `alarm.nospace`, `cluster.version`, `sessions` |
 | Gauges of transfers and network | `transfers.outgoing`, `transfers.sent`, `transfers.received`, `transfers.failed`, `transport.sent`, `transport.received`, `transport.dropped`, `transport.refused`, `listener.clients.connections`, `listener.clients.refused` |
 | Clients | durations `client.command` and `client.read`, from the arrival of a request to its answer; counters `client.redirected` and `client.rejected.REASON`; gauges `client.waiting`, `client.dropped` |

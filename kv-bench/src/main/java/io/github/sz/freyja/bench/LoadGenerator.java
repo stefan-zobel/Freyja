@@ -61,9 +61,37 @@ public final class LoadGenerator {
      *                   hundred times that
      * @param seed       decides keys, values, and the kind of every request
      * @param requestTimeoutMillis how long one request may take
+     * @param retryWhenOverloaded whether a client sends a request that a node refused as
+     *                   overloaded again; if not, the request counts as rejected
      */
     public record Config(List<String> endpoints, Workload workload, int ratePerSecond, int seconds, int clients,
-                         int keys, int valueBytes, long seed, int requestTimeoutMillis) {
+                         int keys, int valueBytes, long seed, int requestTimeoutMillis, boolean retryWhenOverloaded) {
+
+        /** Settings with clients that send a request the cluster had no room for again. */
+        public Config(List<String> endpoints, Workload workload, int ratePerSecond, int seconds, int clients,
+                      int keys, int valueBytes, long seed, int requestTimeoutMillis) {
+            this(endpoints, workload, ratePerSecond, seconds, clients, keys, valueBytes, seed, requestTimeoutMillis,
+                    true);
+        }
+
+        /** The same settings with another rate. */
+        public Config withRate(int rate) {
+            return new Config(endpoints, workload, rate, seconds, clients, keys, valueBytes, seed,
+                    requestTimeoutMillis, retryWhenOverloaded);
+        }
+
+        /** The same settings with another duration. */
+        public Config withSeconds(int duration) {
+            return new Config(endpoints, workload, ratePerSecond, duration, clients, keys, valueBytes, seed,
+                    requestTimeoutMillis, retryWhenOverloaded);
+        }
+
+        /** The same settings with clients that do or do not send a refused request again. */
+        public Config withRetryWhenOverloaded(boolean retry) {
+            return new Config(endpoints, workload, ratePerSecond, seconds, clients, keys, valueBytes, seed,
+                    requestTimeoutMillis, retry);
+        }
+
         public Config {
             endpoints = List.copyOf(endpoints);
             if (endpoints.isEmpty() || ratePerSecond < 1 || seconds < 1 || clients < 1 || keys < 1
@@ -78,14 +106,23 @@ public final class LoadGenerator {
      *
      * @param due        requests that became due
      * @param completed  requests that were answered
-     * @param failed     requests that were refused, timed out, or have an unknown outcome
+     * @param failed     requests that timed out, have an unknown outcome, or were refused
+     *                   for another reason than overload
+     * @param rejected   requests that a node refused as overloaded, with clients that do not
+     *                   send them again
      * @param shed       requests that were not sent because too many were waiting already
      * @param seconds    how long the run took, until the last request was answered
      * @param latencies  the latencies of the completed requests in microseconds, from the
      *                   moment each was due
+     * @param service    the latencies of the completed requests in microseconds, from the
+     *                   moment a client sent each
+     * @param rejections how long it took in microseconds, from the moment a client sent a
+     *                   request, until it was rejected
+     * @param writtenBytes the bytes of keys and values that completed writes put
      */
-    public record Result(Config config, long due, long completed, long failed, long shed, double seconds,
-                         Histogram latencies) {
+    public record Result(Config config, long due, long completed, long failed, long rejected, long shed,
+                         double seconds, Histogram latencies, Histogram service, Histogram rejections,
+                         long writtenBytes) {
 
         /** Completed requests per second of the run. */
         public double throughput() {
@@ -110,19 +147,25 @@ public final class LoadGenerator {
                 (int) Math.min(1_000_000, Math.max(1_000, (long) config.ratePerSecond() * 5)));
         AtomicBoolean done = new AtomicBoolean();
         Histogram[] histograms = new Histogram[config.clients()];
+        Histogram[] services = new Histogram[config.clients()];
+        Histogram[] rejections = new Histogram[config.clients()];
         long[] failed = new long[config.clients()];
+        long[] rejected = new long[config.clients()];
+        long[] written = new long[config.clients()];
         List<Thread> workers = new ArrayList<>();
         long start = System.nanoTime();
 
         for (int c = 0; c < config.clients(); c++) {
             int worker = c;
             histograms[c] = new Histogram();
+            services[c] = new Histogram();
+            rejections[c] = new Histogram();
             workers.add(Thread.ofVirtual().name("freyja-bench-" + c).start(() -> {
                 Random random = new Random(config.seed() * 31 + worker);
                 byte[] value = new byte[valueBytes];
                 FreyjaClient.Options options = new FreyjaClient.Options(rotated(config.endpoints(), worker), 0,
                         config.requestTimeoutMillis(), Math.min(2_000, config.requestTimeoutMillis()), 10, 200,
-                        1_000, 0);
+                        1_000, 0).withRetryWhenOverloaded(config.retryWhenOverloaded());
                 try (FreyjaClient client = FreyjaClient.open(options)) {
                     while (true) {
                         long[] request = waiting.poll(50, TimeUnit.MILLISECONDS);
@@ -132,10 +175,16 @@ public final class LoadGenerator {
                             }
                             continue;
                         }
+                        long sent = System.nanoTime();
                         try {
                             random.nextBytes(value);
-                            one(client, config, request[0], random, value);
-                            histograms[worker].record((System.nanoTime() - request[1]) / 1_000);
+                            written[worker] += one(client, config, request[0], random, value);
+                            long now = System.nanoTime();
+                            histograms[worker].record((now - request[1]) / 1_000);
+                            services[worker].record((now - sent) / 1_000);
+                        } catch (FreyjaException.Overloaded e) {
+                            rejected[worker]++;
+                            rejections[worker].record((System.nanoTime() - sent) / 1_000);
                         } catch (FreyjaException e) {
                             failed[worker]++;
                         }
@@ -164,12 +213,21 @@ public final class LoadGenerator {
         double seconds = (System.nanoTime() - start) / 1e9;
 
         Histogram all = new Histogram();
+        Histogram service = new Histogram();
+        Histogram rejection = new Histogram();
         long failures = 0;
+        long refusals = 0;
+        long bytes = 0;
         for (int c = 0; c < config.clients(); c++) {
             all.merge(histograms[c]);
+            service.merge(services[c]);
+            rejection.merge(rejections[c]);
             failures += failed[c];
+            refusals += rejected[c];
+            bytes += written[c];
         }
-        return new Result(config, total, all.count(), failures, shed, seconds, all);
+        return new Result(config, total, all.count(), failures, refusals, shed, seconds, all, service, rejection,
+                bytes);
     }
 
     /** The list starting at another node for every client, so that they do not all ask the same first. */
@@ -181,20 +239,26 @@ public final class LoadGenerator {
         return list;
     }
 
-    private static void one(FreyjaClient client, Config config, long number, Random random, byte[] value) {
+    /** Carries out one request; returns the bytes of key and value it wrote, 0 for a read. */
+    private static long one(FreyjaClient client, Config config, long number, Random random, byte[] value) {
         Workload workload = config.workload();
+        byte[] key;
         if (workload == Workload.BULK_LOAD) {
-            client.put(key(number), value);
-            return;
-        }
-        long keyNumber = random.nextInt(config.keys());
-        int choice = random.nextInt(100);
-        if (choice < workload.scanPercent) {
-            client.scan(key(keyNumber), new byte[0], 50);
-        } else if (choice < workload.scanPercent + workload.readPercent) {
-            client.get(key(keyNumber));
+            key = key(number);
         } else {
-            client.put(key(keyNumber), value);
+            long keyNumber = random.nextInt(config.keys());
+            int choice = random.nextInt(100);
+            if (choice < workload.scanPercent) {
+                client.scan(key(keyNumber), new byte[0], 50);
+                return 0;
+            }
+            if (choice < workload.scanPercent + workload.readPercent) {
+                client.get(key(keyNumber));
+                return 0;
+            }
+            key = key(keyNumber);
         }
+        client.put(key, value);
+        return key.length + value.length;
     }
 }

@@ -927,6 +927,11 @@ public final class Node implements Closeable {
         return log.segmentCount();
     }
 
+    /** The bytes the segments of the log take on disk. */
+    public long logStoredBytes() {
+        return log.storedBytes();
+    }
+
     /** The number of events that wait for the event loop. */
     public int waitingEvents() {
         return queue.size();

@@ -626,6 +626,12 @@ Details:
 - `NO_SUCH_SESSION`: the session has expired. If the command was sent only once, it had no
   effect; the client opens a new session and sends it again as the first command of that
   session. If it was sent before, an earlier attempt may have taken effect: unknown outcome.
+- Overloaded, with retries turned off (`withRetryWhenOverloaded(false)`, for callers that
+  shed load themselves and for the overload tests of `verification.md` §7): the request ends
+  at once and is reported as overloaded; it had no effect, and the sequence number is used
+  again. A command refused as overloaded after an earlier attempt that may have taken effect
+  (one without an answer, or one the node answered as unavailable): unknown outcome. A
+  redirect, an expired attempt, or a rejection as overloaded rules an effect out.
 - `NO_SPACE` is reported as such; the sequence number is used again for the next command.
   `INVALID` and requests the node does not offer are reported as refused.
 - An idle client tells the cluster that it is alive (default after 10 s), so that its

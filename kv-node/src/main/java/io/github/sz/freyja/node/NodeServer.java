@@ -13,6 +13,7 @@ import io.github.sz.freyja.common.admin.AdminCodec;
 import io.github.sz.freyja.common.admin.AdminRequest;
 import io.github.sz.freyja.common.admin.AdminResponse;
 import io.github.sz.freyja.common.wire.Handshake;
+import io.github.sz.freyja.lsm.fs.CountingFileSystem;
 import io.github.sz.freyja.lsm.fs.StorageFileSystem;
 import io.github.sz.freyja.node.backup.Backups;
 import io.github.sz.freyja.node.metrics.MetricsRegistry;
@@ -128,7 +129,7 @@ public final class NodeServer implements Closeable {
 
     /** Starts the node of a prepared data directory. */
     public static NodeServer start(StorageFileSystem fs, Settings settings) throws IOException {
-        return new NodeServer(fs, settings);
+        return new NodeServer(new CountingFileSystem(fs), settings);
     }
 
     /** The replicated state says where a node listens. Called on the thread of the node. */
@@ -268,6 +269,7 @@ public final class NodeServer implements Closeable {
         metrics.gauge("security.insecure", security.insecure() ? 1 : 0);
         metrics.gauge("security.reloads", security.reloadCount());
         metrics.gauge("security.reload_failures", security.reloadFailureCount());
+        metrics.gauge("disk.written.bytes", ((CountingFileSystem) fs).bytesWritten());
         return metrics.render();
     }
 

@@ -410,3 +410,8 @@ The interface has three calls: add to a counter, set a gauge, record one duratio
 
 Gauges are published after every flush, compaction, and scrub, and when the owner asks for
 them before it exports its metrics.
+
+Bytes appended to files are counted below the engine as well: `CountingFileSystem` passes
+everything on to another file system and counts what is appended through it. A node runs
+on one and reports the count (`operations.md` §2); the write amplification of a benchmark
+is computed from it (`verification.md` §7). A file made by a hard link costs nothing.

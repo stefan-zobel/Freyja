@@ -110,7 +110,10 @@ Rules:
 - **D3.** `kv-bench`: workloads, open-loop load generator, baselines. Tuning. Overload tests.
   - Done so far: the module with the open-loop load generator, the six workloads, the
     latency histogram, stored results, and the comparison with a baseline.
-  - Open: what `verification.md` §7 lists as open; tuning; baselines on Linux.
+  - Write and space amplification from the figures of the nodes; every workload during
+    compaction, snapshot transfer, and follower catch-up; the overload test at twice the
+    sustainable load (`verification.md` §7).
+  - Open: tuning and baselines on Linux.
 - **D4.** Soak tests with monitoring.
 
 ## Phase E — Operations
@@ -143,9 +146,6 @@ leaves this list in the change that completes it.
 | Trace validation of the runs with membership changes, transfers, and log damage | B3 | A run of TLC; `docs/tla/README.md` |
 | Exhaustive check of a configuration with membership change | B3 | A run of TLC; the last attempt ran out of memory |
 | Validation of the traces of whole-system runs | C3 | A run of TLC: `./mvnw test -pl kv-node -am -Ptrace-validation` |
-| Workloads during compaction, snapshot transfer, and follower catch-up | D3 | `verification.md` §7 |
-| Write and space amplification in the results | D3 | Needs figures of the nodes |
-| Overload tests at twice the sustainable load | D3 | |
 | The runbook as a text | E3 | Its execution is listed below |
 
 **Work that needs Linux:**

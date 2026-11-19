@@ -665,17 +665,73 @@ The load generator (`FreyjaBench` in `kv-bench`):
   one per client, merged at the end.
 - A result is a text file of `name = value` lines: the settings, the hardware (operating
   system, architecture, processors, Java version), the counts of requests due, completed,
-  failed, and shed, the throughput, and the latencies at p50, p99, p99.9, and the maximum.
+  failed, rejected, and shed, the throughput, the latencies at p50, p99, p99.9, and the
+  maximum, and the p99 and p99.9 of the time from sending a request to its answer.
 - A comparison with a stored result is refused if the settings or the hardware differ. A run
   is worse than its baseline if its throughput is more than ten percent lower, a latency
-  more than ten percent higher, or more requests failed or were shed.
+  more than ten percent higher, or more requests failed, were rejected, or were shed.
 - `FreyjaBench --endpoints H:P[,...] --workload NAME [--rate N] [--seconds N] [--clients N]
-  [--keys N] [--value-bytes N] [--seed N] [--timeout-ms N] [--record FILE] [--baseline FILE]`.
-  Exit code 1 if the run is worse than the baseline.
+  [--keys N] [--value-bytes N] [--seed N] [--timeout-ms N] [--record FILE] [--baseline FILE]
+  [--status H:P[,...]] [--during compaction|snapshot-transfer|catch-up [--admin H:P[,...]]
+  [--spare ID,PEER,CLIENT] [--background-rate N]] [--overload search|N [--target-p99-ms N]
+  [--probe-seconds N] [--reject-p99-ms N] [--admitted-p999-ms N]]`. Exit code 1 if the run
+  is worse than the baseline, its condition did not come about, or the overload test failed.
+  The tool talks to nodes in insecure mode only.
 
-Open: the workloads during compaction, snapshot transfer, and follower catch-up; write and
-space amplification, which need figures of the nodes; the overload tests; baselines recorded
-on the production platform.
+Write and space amplification (`--status` with the HTTP endpoints of the nodes):
+
+- Write amplification: the bytes a node appended to its files during the run
+  (`disk.written.bytes`, `operations.md` §2) per byte of keys and values the clients put;
+  the mean over the nodes. Every node writes the Raft log, the log of its engine, and what
+  the engine flushes and compacts.
+- Space amplification: what a node holds after the run (`node.stored.bytes`) per byte of
+  keys and values that are live in the cluster; the mean over the nodes. The live bytes are
+  counted by a scan of every key after the run. The Raft log counts until a snapshot
+  shortens it.
+- Both are reported, not compared with a baseline.
+
+Workloads during compaction, snapshot transfer, and follower catch-up (`--during`): the
+condition is brought about a quarter into the run, the tool watches whether it came about,
+and undoes what it changed when the run is over. A run whose condition did not come about
+fails (exit code 1): its figures are those of a run without it.
+
+- `compaction`: a writer that is not measured puts values of 4 KiB under keys of its own
+  (`--background-rate` per second, default 1,000), so that the nodes flush and compact. Its
+  bytes count for the amplification, not for the latencies. Came about if the nodes report
+  compactions during the run; that needs `--status`.
+- `snapshot-transfer`: every node shortens its log (administration request `snapshot`),
+  then an empty spare node (`--spare ID,PEER-HOST:PORT,CLIENT-HOST:PORT`, prepared with no
+  voters) joins as a learner through the leader (`--admin` with the administration
+  listeners). The leader can only send it a snapshot. Came about if the leader was seen
+  sending it one, or the spare got past the start of the log of the leader.
+- `catch-up`: the spare joins without a snapshot first and the leader brings it up to date
+  from its log (after its latest snapshot if the log no longer reaches back to the start).
+  Came about if the spare got entries of the log during the run.
+- The spare is removed again when the run is over. A spare serves one run.
+- A baseline is compared only with a run under the same condition.
+
+The overload test (`--overload search|N`):
+
+- The clients do not send a request again that a node refused as overloaded
+  (`node.md` §9); every rejection is counted with the time it took.
+- The sustainable rate is given, or searched: a first run at the given rate warms the
+  cluster and the clients up and is not judged; then the rate is doubled or halved until one
+  run is sustainable and one is not, and the gap is narrowed down four times. A rate is
+  sustainable if every request of a run of `--probe-seconds` (default 5) is answered, none
+  is rejected, and the p99 latency stays within `--target-p99-ms` (default 100).
+- The test runs at twice the sustainable rate and fails (exit code 1) if a request was
+  neither answered nor rejected in its time; if the p99 of the time until a rejection exceeds
+  `--reject-p99-ms` (default 100); if the p99.9 latency of admitted requests, from the moment
+  each was sent, exceeds `--admitted-p999-ms` (default 1,000); or if the generator shed
+  requests. Then the clients were too few: each carries one request, and there must be more
+  of them than the nodes admit at once, or the excess waits in the generator and the cluster
+  is never overloaded.
+- What the overload test showed on the development machine (three nodes in one process,
+  64 waiting events per node, 256 clients, writes only): about 2,800 writes per second were
+  sustainable; at twice that, 0.3% were rejected with a p99 of 53 ms until the rejection,
+  the admitted ones had a p99.9 of 48 ms, and none ran out of time.
+
+Open: baselines recorded on the production platform, and tuning on it.
 
 ## 8. Exit Criteria
 

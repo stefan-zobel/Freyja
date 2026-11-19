@@ -80,10 +80,14 @@ public final class FreyjaClient implements Closeable {
      *                             certificate; {@code null} for a cluster in insecure mode
      * @param token                what the client proves itself with if it has no
      *                             certificate; {@code null} for none
+     * @param retryWhenOverloaded  whether a request that a node refuses as overloaded is sent
+     *                             again after a pause; if not, the request ends at once with
+     *                             {@link FreyjaException.Overloaded}
      */
     public record Options(List<String> endpoints, long clusterId, int requestTimeoutMillis,
                           int attemptTimeoutMillis, int backoffMillis, int maxBackoffMillis,
-                          int connectTimeoutMillis, int keepAliveMillis, Tls.Settings tls, String token) {
+                          int connectTimeoutMillis, int keepAliveMillis, Tls.Settings tls, String token,
+                          boolean retryWhenOverloaded) {
         public Options {
             if (tls != null && tls.trustStore() == null) {
                 throw new IllegalArgumentException("TLS without a trust store: no node could be recognized");
@@ -105,7 +109,7 @@ public final class FreyjaClient implements Closeable {
         public Options(List<String> endpoints, long clusterId, int requestTimeoutMillis, int attemptTimeoutMillis,
                        int backoffMillis, int maxBackoffMillis, int connectTimeoutMillis, int keepAliveMillis) {
             this(endpoints, clusterId, requestTimeoutMillis, attemptTimeoutMillis, backoffMillis, maxBackoffMillis,
-                    connectTimeoutMillis, keepAliveMillis, null, null);
+                    connectTimeoutMillis, keepAliveMillis, null, null, true);
         }
 
         /** The token is a secret and is not printed. */
@@ -122,7 +126,7 @@ public final class FreyjaClient implements Closeable {
 
         public Options withRequestTimeout(int millis) {
             return new Options(endpoints, clusterId, millis, Math.min(attemptTimeoutMillis, millis), backoffMillis,
-                    maxBackoffMillis, connectTimeoutMillis, keepAliveMillis, tls, token);
+                    maxBackoffMillis, connectTimeoutMillis, keepAliveMillis, tls, token, retryWhenOverloaded);
         }
 
         /**
@@ -133,12 +137,23 @@ public final class FreyjaClient implements Closeable {
          */
         public Options withTls(Tls.Settings settings, String secret) {
             return new Options(endpoints, clusterId, requestTimeoutMillis, attemptTimeoutMillis, backoffMillis,
-                    maxBackoffMillis, connectTimeoutMillis, keepAliveMillis, settings, secret);
+                    maxBackoffMillis, connectTimeoutMillis, keepAliveMillis, settings, secret, retryWhenOverloaded);
         }
 
         public Options withKeepAlive(int millis) {
             return new Options(endpoints, clusterId, requestTimeoutMillis, attemptTimeoutMillis, backoffMillis,
-                    maxBackoffMillis, connectTimeoutMillis, millis, tls, token);
+                    maxBackoffMillis, connectTimeoutMillis, millis, tls, token, retryWhenOverloaded);
+        }
+
+        /**
+         * Whether a request that a node refuses as overloaded is sent again after a pause (the
+         * default), or ends at once with {@link FreyjaException.Overloaded}. A caller that has
+         * something else to do with a request the cluster has no room for, or that measures
+         * how the cluster sheds load, does not want the retries.
+         */
+        public Options withRetryWhenOverloaded(boolean retry) {
+            return new Options(endpoints, clusterId, requestTimeoutMillis, attemptTimeoutMillis, backoffMillis,
+                    maxBackoffMillis, connectTimeoutMillis, keepAliveMillis, tls, token, retry);
         }
     }
 
@@ -329,8 +344,13 @@ public final class FreyjaClient implements Closeable {
             long number = ++sequence;
             Exchange exchange = new Exchange();
             while (true) {
-                ClientResponse response = exchange(new ClientRequest.Execute(command.apply(number)), deadline,
-                        exchange);
+                ClientResponse response;
+                try {
+                    response = exchange(new ClientRequest.Execute(command.apply(number)), deadline, exchange);
+                } catch (FreyjaException.Overloaded e) {
+                    sequence--; // refused before it was proposed: the number is not used up
+                    throw e;
+                }
                 if (response == null) {
                     if (exchange.sent == 0) {
                         sequence--; // no node ever saw it
@@ -398,6 +418,11 @@ public final class FreyjaClient implements Closeable {
         int sent;
         /** The failure of the last attempt that failed. */
         Exception failure;
+        /**
+         * Whether an attempt was written and then got no answer that rules an effect out: none
+         * at all, or that the node became unavailable while the request waited.
+         */
+        boolean mayHaveTakenEffect;
     }
 
     /**
@@ -413,6 +438,7 @@ public final class FreyjaClient implements Closeable {
             if (remaining <= 0) {
                 return null;
             }
+            boolean written = false;
             try {
                 connect((int) Math.min(remaining, options.connectTimeoutMillis()));
                 int timeout = (int) Math.min(remaining, options.attemptTimeoutMillis());
@@ -420,6 +446,7 @@ public final class FreyjaClient implements Closeable {
                 Frames.write(out, ClientCodec.encode(id, timeout, request));
                 out.flush();
                 exchange.sent++;
+                written = true;
                 // The node drops a request whose time has passed; a little longer, and no
                 // answer will come.
                 socket.setSoTimeout(timeout + 250);
@@ -450,11 +477,26 @@ public final class FreyjaClient implements Closeable {
                             case INVALID, UNSUPPORTED -> throw new FreyjaException.Refused(
                                     "the node refused the request: " + rejected.reason());
                             case UNAVAILABLE -> {
+                                // A command that waited may be in the log of a leader that
+                                // has stepped down; it may still be committed.
+                                exchange.mayHaveTakenEffect = true;
                                 disconnect();
                                 rotate();
                             }
+                            case OVERLOADED -> {
+                                if (!options.retryWhenOverloaded()) {
+                                    if (exchange.mayHaveTakenEffect && request instanceof ClientRequest.Execute) {
+                                        throw new FreyjaException.UnknownOutcome("the cluster was overloaded"
+                                                + " after an earlier attempt of the command, which may have"
+                                                + " taken effect", exchange.failure);
+                                    }
+                                    throw new FreyjaException.Overloaded("the cluster had no room for the"
+                                            + " request; it had no effect");
+                                }
+                                // the same node again
+                            }
                             default -> {
-                                // overloaded, or too late for this attempt: the same node again
+                                // too late for this attempt: the same node again
                             }
                         }
                         pause(backoff, deadline);
@@ -466,6 +508,9 @@ public final class FreyjaClient implements Closeable {
                 }
             } catch (IOException | DecodeException e) {
                 exchange.failure = e;
+                if (written) {
+                    exchange.mayHaveTakenEffect = true;
+                }
                 disconnect();
                 rotate();
                 pause(backoff, deadline);

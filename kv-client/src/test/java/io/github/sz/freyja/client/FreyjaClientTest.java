@@ -291,6 +291,55 @@ class FreyjaClientTest {
     }
 
     @Test
+    void aClientThatIsToldNotToRetryReportsOverloadAtOnceAndUsesTheNumberAgain() throws IOException {
+        boolean[] busy = {false};
+        ScriptedNode node = node(request -> busy[0] && !(request instanceof ClientRequest.Execute execute
+                && execute.command() instanceof Command.RegisterSession)
+                ? new ClientResponse.Rejected(Reason.OVERLOADED) : obliging(request));
+        FreyjaClient client = FreyjaClient.open(new FreyjaClient.Options(List.of(node.address()), CLUSTER, 5_000,
+                300, 5, 40, 500, 0).withRetryWhenOverloaded(false));
+        open.add(client);
+        client.put(b("k"), b("v"));
+        busy[0] = true;
+        int before = node.requests.size();
+        long started = System.nanoTime();
+        assertThrows(FreyjaException.Overloaded.class, () -> client.put(b("k"), b("w")));
+        assertThrows(FreyjaException.Overloaded.class, () -> client.get(b("k")));
+        assertTrue(System.nanoTime() - started < java.util.concurrent.TimeUnit.SECONDS.toNanos(4),
+                "no retries until the deadline");
+        assertEquals(before + 2, node.requests.size(), "each request was sent once");
+        busy[0] = false;
+        client.put(b("k"), b("x"));
+        List<Command> commands = node.commands();
+        assertEquals(2, ((Command.Write) commands.get(commands.size() - 2)).sequence());
+        assertEquals(2, ((Command.Write) commands.getLast()).sequence(), "the refused command had no effect");
+
+        // A redirect rules an effect out: the command refused by the leader had none.
+        ScriptedNode leader = node(request -> new ClientResponse.Rejected(Reason.OVERLOADED));
+        ScriptedNode follower = node(request -> request instanceof ClientRequest.Execute execute
+                && execute.command() instanceof Command.RegisterSession ? obliging(request)
+                : new ClientResponse.NotLeader(1, leader.address()));
+        FreyjaClient redirected = FreyjaClient.open(new FreyjaClient.Options(List.of(follower.address()), CLUSTER,
+                5_000, 300, 5, 40, 500, 0).withRetryWhenOverloaded(false));
+        open.add(redirected);
+        assertThrows(FreyjaException.Overloaded.class, () -> redirected.put(b("k"), b("v")));
+
+        // An attempt without an answer may have taken effect.
+        boolean[] first = {true};
+        node.script = request -> {
+            if (request instanceof ClientRequest.Execute execute && execute.command() instanceof Command.Write) {
+                if (first[0]) {
+                    first[0] = false;
+                    return SILENCE;
+                }
+                return new ClientResponse.Rejected(Reason.OVERLOADED);
+            }
+            return obliging(request);
+        };
+        assertThrows(FreyjaException.UnknownOutcome.class, () -> client.put(b("k"), b("y")));
+    }
+
+    @Test
     void lackOfSpaceIsReportedAndTheNumberOfTheCommandIsUsedAgain() throws IOException {
         boolean[] full = {true};
         ScriptedNode node = node(request -> request instanceof ClientRequest.Execute execute

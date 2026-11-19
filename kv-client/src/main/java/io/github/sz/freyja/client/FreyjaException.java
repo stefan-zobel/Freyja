@@ -52,6 +52,18 @@ public class FreyjaException extends RuntimeException {
         }
     }
 
+    /**
+     * A node had no room for the request and refused it, and the client was told not to try
+     * again ({@link FreyjaClient.Options#withRetryWhenOverloaded}). The request had no effect.
+     */
+    public static final class Overloaded extends FreyjaException {
+        private static final long serialVersionUID = 1L;
+
+        public Overloaded(String message) {
+            super(message);
+        }
+    }
+
     /** The request was refused for good: it is not valid, or the node does not offer it. */
     public static final class Refused extends FreyjaException {
         private static final long serialVersionUID = 1L;

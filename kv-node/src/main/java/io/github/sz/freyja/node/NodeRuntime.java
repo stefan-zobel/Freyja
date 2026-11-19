@@ -286,6 +286,7 @@ public final class NodeRuntime implements Closeable {
         metrics.gauge("raft.snapshot.index", node.snapshot().lastIncludedIndex());
         metrics.gauge("raft.log.recovering", state.logRecovering() ? 1 : 0);
         metrics.gauge("raft.log.segments", node.logSegmentCount());
+        metrics.gauge("node.stored.bytes", node.logStoredBytes() + machine.engine().storedBytes());
         metrics.gauge("node.queue.events", node.waitingEvents());
         metrics.gauge("node.queue.inbound", inbound.size());
         metrics.gauge("node.events.rejected", node.rejectedEvents());

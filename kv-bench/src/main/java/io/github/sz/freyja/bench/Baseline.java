@@ -43,12 +43,18 @@ public final class Baseline {
         values.put("due", Long.toString(result.due()));
         values.put("completed", Long.toString(result.completed()));
         values.put("failed", Long.toString(result.failed()));
+        values.put("rejected", Long.toString(result.rejected()));
         values.put("shed", Long.toString(result.shed()));
         values.put("throughput.per.second", String.format(java.util.Locale.ROOT, "%.1f", result.throughput()));
         values.put("latency.p50.micros", Long.toString(result.latencies().percentile(0.50)));
         values.put("latency.p99.micros", Long.toString(result.latencies().percentile(0.99)));
         values.put("latency.p999.micros", Long.toString(result.latencies().percentile(0.999)));
         values.put("latency.max.micros", Long.toString(result.latencies().max()));
+        values.put("service.p99.micros", Long.toString(result.service().percentile(0.99)));
+        values.put("service.p999.micros", Long.toString(result.service().percentile(0.999)));
+        if (result.rejected() > 0) {
+            values.put("rejection.p99.micros", Long.toString(result.rejections().percentile(0.99)));
+        }
         return values;
     }
 
@@ -79,7 +85,7 @@ public final class Baseline {
      */
     public static List<String> regressions(Map<String, String> baseline, Map<String, String> run) {
         for (String same : List.of("workload", "rate.per.second", "seconds", "clients", "keys", "value.bytes",
-                "nodes", "hardware.os", "hardware.processors")) {
+                "nodes", "hardware.os", "hardware.processors", "during")) {
             if (!String.valueOf(baseline.get(same)).equals(String.valueOf(run.get(same)))) {
                 throw new IllegalArgumentException("the baseline was run with " + same + " = " + baseline.get(same)
                         + ", this run with " + run.get(same) + "; they cannot be compared");
@@ -98,11 +104,18 @@ public final class Baseline {
                 worse.add(latency + " rose from " + was + " to " + is);
             }
         }
-        long failedBefore = Long.parseLong(baseline.get("failed")) + Long.parseLong(baseline.get("shed"));
-        long failedNow = Long.parseLong(run.get("failed")) + Long.parseLong(run.get("shed"));
+        long failedBefore = count(baseline, "failed") + count(baseline, "rejected") + count(baseline, "shed");
+        long failedNow = count(run, "failed") + count(run, "rejected") + count(run, "shed");
         if (failedNow > failedBefore) {
-            worse.add("requests that failed or were shed rose from " + failedBefore + " to " + failedNow);
+            worse.add("requests that failed, were rejected, or were shed rose from " + failedBefore + " to "
+                    + failedNow);
         }
         return worse;
+    }
+
+    /** A count of a result; 0 if the result is older than the count. */
+    private static long count(Map<String, String> values, String name) {
+        String value = values.get(name);
+        return value == null ? 0 : Long.parseLong(value);
     }
 }
