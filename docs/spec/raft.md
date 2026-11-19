@@ -254,7 +254,9 @@ Details:
 - **Who counts:** votes and pre-votes count only if they come from voters of the
   configuration in force. A leader counts toward commit and toward CheckQuorum only the
   voters, and itself only if it is one. A leader that is no longer a voter (it removed
-  itself) keeps replicating until the change is committed and then steps down.
+  itself) keeps replicating until the change is committed and then steps down. In the step
+  that commits the change it still sends the appends that carry the new commit index, so
+  that the others learn of the commit without waiting for a new leader.
 - **Messages are accepted from any node**, member or not: a new node does not know its
   leader, and a node may have to learn from a non-member that its term is old.
 - **A removed node** receives nothing from the moment its removal is in the log of the

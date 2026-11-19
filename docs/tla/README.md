@@ -18,10 +18,12 @@ against it; trace validation uses the seed sets without them.
   depth 14) found no error. It did not finish. A run with smaller bounds that was meant to
   be exhaustive was stopped by the machine for lack of memory and has to be repeated.
 - Trace validation: the runs under the full fault model and all mutated runs behave as
-  required with the extended model, also with the partly durable restart (2026-11-19). The runs with membership changes, transfers, and log
-  damage (`trace-validation-membership`) have not been validated yet: that run was stopped
-  for lack of memory as well. Until it has passed, the mapping of those events (section 3.2)
-  is untested.
+  required with the extended model, also with the partly durable restart (2026-11-19).
+- Trace validation of the runs with membership changes, transfers, and log damage
+  (`trace-validation-membership`): TLC accepted all ten seeds on 2026-11-19, runs cut off
+  at 3,000 steps, in six minutes; no TLC process needed more than 1.6 GB. Seed 1 was
+  rejected at first: a leader that removed itself sends the new commit index in the step in
+  which it steps down, which the mapping did not allow (section 3.2).
 
 TLC is an external development tool and not a dependency of the build. The commands below
 expect `tla2tools.jar` in `tools/` of the repository directory (which is not under version
@@ -163,6 +165,12 @@ in which nothing happened.
 The actions that follow from a step inside the implementation are part of the action of the
 model: a candidate that has a majority becomes leader within `RecvVoteResponse` or `PersistK`,
 and a leader advances its commit index within `RecvAppendResponse` or `PersistK`.
+
+A leader that removed itself steps down within the action that commits the change, but in
+the same step it still sends the appends that carry the new commit index. The messages of
+such a step are checked against the state of the leader at the end of the step, before it
+became a follower (`ValidRelease` in `RaftTrace`). The model checks of `Raft.tla` do not
+send these appends; they are appends the leader could have sent as well if it had stayed.
 
 ### 3.3 Limits
 

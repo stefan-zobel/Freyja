@@ -40,11 +40,18 @@ Matches(e) ==
           THEN e.voters = {} /\ e.learners = {}
           ELSE CfgOf(n.log) = [v |-> e.voters, l |-> e.learners]
 
-\* A promise that waited for several snapshots is backed by one of them.
+\* A promise that waited for several snapshots is backed by one of them. A leader whose
+\* removal is committed tells the others of the commit and steps down in the same step: its
+\* messages are those of the leader it was at the end of the step (AdvanceCommit before Idle).
 ValidRelease(m, e) ==
-    \/ ValidSend(m, st'[e.node])
-    \/ /\ e.ev = "Persist"
-       /\ \E t \in 1..e.k : ValidSend(m, PersistNode(st[e.node], e.node, t))
+    LET s == st[e.node]
+        n == st'[e.node]
+    IN \/ ValidSend(m, n)
+       \/ /\ e.ev = "Persist"
+          /\ \E t \in 1..e.k : ValidSend(m, PersistNode(s, e.node, t))
+       \/ /\ s.role = "L" /\ n.role = "F" /\ n.term = s.term
+          /\ e.node \notin Voters(n) /\ n.commit >= CfgIndex(n.log)
+          /\ ValidSend(m, [n EXCEPT !.role = "L"])
 
 \* Whether the implementation acts on message m in the current state of its receiver. If it
 \* does, the step must be the action for m: a step that only changes what the trace does not

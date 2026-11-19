@@ -41,8 +41,8 @@ Rules:
   elections and replication. Trace recording and trace validation with mutation tests.
 - **B3.** Membership change with learners. Leadership transfer. Log-recovering mode. TLA+
   model and trace mapping extended to these parts.
-  - Open: the trace validation of runs with these parts, and an exhaustive check of a
-    configuration with them (`docs/tla/README.md`).
+  - The traces of runs with these parts are validated (2026-11-19).
+  - Open: an exhaustive check of a configuration with them (`docs/tla/README.md`).
 - **B4.** Log compaction and snapshot directives, verified in the simulator with an in-memory
   state machine. Snapshots are not part of the TLA+ model.
 
@@ -151,7 +151,6 @@ leaves this list in the change that completes it.
 
 | Item | Milestone | Notes |
 |---|---|---|
-| Trace validation of the runs with membership changes, transfers, and log damage | B3 | A run of TLC; `docs/tla/README.md` |
 | Exhaustive check of a configuration with membership change | B3 | A run of TLC; the last attempt ran out of memory |
 | The guard of the finalization: `set-version` is refused unless every member supports the version | E3 | `operations.md` §6; members do not tell the leader yet which versions they support |
 

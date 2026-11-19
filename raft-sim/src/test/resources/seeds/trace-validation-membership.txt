@@ -1,1 +1,2 @@
 # Seeds whose trace the model once rejected. Each runs in the trace-validation profile.
+1  # a leader that removed itself sends the new commit index in the step in which it steps down
