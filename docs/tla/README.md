@@ -5,6 +5,7 @@
 | `Raft.tla` | Elections with PreVote, log replication with asynchronous persistence, membership change with learners, leadership transfer, log-recovering mode |
 | `Raft.cfg` | Exhaustive check of three voters within small bounds, without membership change and log damage |
 | `RaftMembership.cfg` | One voter and two nodes that may join, with one log damage; a bounded search, not exhaustive |
+| `RaftDamage.cfg` | Three voters with one log damage, without membership change |
 | `RaftTrace.tla`, `RaftTrace.cfg` | Trace validation: constrains `Raft` to one recorded run |
 
 ReadIndex and snapshots are not in the model. A run with snapshots cannot be validated
@@ -15,8 +16,20 @@ against it; trace validation uses the seed sets without them.
 - `Raft.cfg`: exhaustive, no error, with the partly durable restart (section 1): 1,015,386
   distinct states, depth 27, two minutes (2026-11-19).
 - `RaftMembership.cfg`: a breadth-first search of nine minutes (14.7 million distinct states,
-  depth 14) found no error. It did not finish. A run with smaller bounds that was meant to
-  be exhaustive was stopped by the machine for lack of memory and has to be repeated.
+  depth 14) found no error. It did not finish.
+- `RaftMembership.cfg` with `MaxLog = 3` and `MaxMsgs = 2`: a breadth-first search of 92
+  minutes (41.9 million distinct states) found no error; every behavior of up to 17 steps is
+  checked. It was stopped at depth 18: each level took about 1.7 times as long as the one
+  before, and the queue on disk grew by about 5 GB an hour, so the search would have taken
+  days and more disk than the development machine has (2026-11-19). These bounds are too
+  small anyway: `MaxMsgs` bounds the messages ever sent, and a configuration of two voters
+  is committed only with a third message.
+- `RaftDamage.cfg`: exhaustive, no error, 2,481,842 distinct states, depth 30, seven minutes
+  (2026-11-19). Damage is reached, but with 4 messages no damaged node is repaired: an
+  election and a replicated entry use them all, and the repair needs two more. The check
+  covers a damaged node until its repair, not the repair itself.
+- An exhaustive check of membership change, and of damage with repair, needs larger bounds
+  than these and a machine that can run TLC for days; it is an open item.
 - Trace validation: the runs under the full fault model and all mutated runs behave as
   required with the extended model, also with the partly durable restart (2026-11-19).
 - Trace validation of the runs with membership changes, transfers, and log damage
@@ -74,7 +87,8 @@ java -cp ../../tools/tla2tools.jar tlc2.TLC -workers auto -config Raft.cfg Raft.
   2, logs up to 2 entries, one pending snapshot per node, 4 messages. The file states the
   size and the duration of the run.
 - These bounds are small because every message ever sent stays deliverable, in any order
-  and any number of times. Larger bounds are searched breadth-first for a limited time: such
+  and any number of times. `MaxMsgs` therefore bounds the messages ever sent, not those on
+  their way. Larger bounds are searched breadth-first for a limited time: such
   a search finds short counterexamples but proves nothing by ending without one.
 - `SpecMC` differs from the full specification in two ways that keep the state space small
   without losing behaviors that matter for safety:

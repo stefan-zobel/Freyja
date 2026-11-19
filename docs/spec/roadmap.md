@@ -42,7 +42,9 @@ Rules:
 - **B3.** Membership change with learners. Leadership transfer. Log-recovering mode. TLA+
   model and trace mapping extended to these parts.
   - The traces of runs with these parts are validated (2026-11-19).
-  - Open: an exhaustive check of a configuration with them (`docs/tla/README.md`).
+  - Log damage is checked exhaustively for three voters, up to the repair.
+  - Open: an exhaustive check of membership change and of the repair
+    (`docs/tla/README.md`).
 - **B4.** Log compaction and snapshot directives, verified in the simulator with an in-memory
   state machine. Snapshots are not part of the TLA+ model.
 
@@ -151,7 +153,6 @@ leaves this list in the change that completes it.
 
 | Item | Milestone | Notes |
 |---|---|---|
-| Exhaustive check of a configuration with membership change | B3 | A run of TLC; the last attempt ran out of memory |
 | The guard of the finalization: `set-version` is refused unless every member supports the version | E3 | `operations.md` §6; members do not tell the leader yet which versions they support |
 
 **Work that needs Linux:**
@@ -172,6 +173,7 @@ leaves this list in the change that completes it.
 | A scheduled job for the continuous simulation | D1 | A decision of the project lead: the build workflow is started by hand only |
 | Every procedure of the runbook executed once | E3 | A real cluster |
 | Review against the exit criteria | E3 | Everything above |
+| Exhaustive check of membership change and of the repair of a damaged log | B3 | A machine that can run TLC for days, with a large disk; the development machine cannot (`docs/tla/README.md`) |
 
 **For the project lead:**
 

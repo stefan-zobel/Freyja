@@ -247,9 +247,10 @@ the two.
     the core and by the simulator.
   - The variants are produced by hand when the model changes.
 - **State of the model for membership change, transfer, and log-recovering mode:** see
-  `docs/tla/README.md`. The exhaustive check covers three voters without these features; the
-  configuration with them has only been searched for a limited time, which is an open item
-  of milestone B3. The traces of runs with them were validated on 2026-11-19 (ten seeds of
+  `docs/tla/README.md`. The exhaustive checks cover three voters without these features, and
+  three voters with one log damage up to, not including, the repair. Membership change has
+  only been searched up to a bounded depth; an exhaustive check of it needs a machine that
+  can run TLC for days and is an open item of milestone B3. The traces of runs with them were validated on 2026-11-19 (ten seeds of
   `trace-validation-membership`).
 - TLC is an external development tool, not a dependency. Trace validation runs in its own
   profile (`-Ptrace-validation`), not in the default `./mvnw test`, on a fixed set of seeds
