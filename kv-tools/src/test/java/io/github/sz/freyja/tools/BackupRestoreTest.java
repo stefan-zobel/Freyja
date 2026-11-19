@@ -117,7 +117,15 @@ class BackupRestoreTest {
             for (int i = 0; i < 300; i++) {
                 client.put(b("key-" + i), b("before-" + i + "-" + "x".repeat(200)));
             }
-            // The backup is taken while the cluster runs; any node will do.
+            // The backup is taken while the cluster runs; any node will do. It holds what that
+            // node has applied, and a follower may not have applied the last write yet.
+            try (FreyjaClient direct = client(List.of(cluster.get(1)))) {
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+                while (direct.getStale(b("key-299")).isEmpty()) {
+                    assertTrue(System.nanoTime() < deadline, "node 1 never caught up");
+                    Thread.sleep(20);
+                }
+            }
             manifest = cluster.get(1).backup(backup);
             client.put(b("key-0"), b("after the backup"));
             client.put(b("late"), b("after the backup"));
