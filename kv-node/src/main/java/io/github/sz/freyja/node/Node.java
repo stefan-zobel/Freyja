@@ -5,9 +5,11 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.List;
+import java.util.Objects;
 
 import io.github.sz.freyja.common.Clock;
 import io.github.sz.freyja.common.DecodeException;
+import io.github.sz.freyja.common.Metrics;
 import io.github.sz.freyja.common.kv.Command;
 import io.github.sz.freyja.common.kv.CommandCodec;
 import io.github.sz.freyja.common.kv.CommandResult;
@@ -206,6 +208,7 @@ public final class Node implements Closeable {
     private long now;
     private long expiredProposals;
     private long slowSyncStepDowns;
+    private Metrics metrics = Metrics.NONE;
     private long alarmsRaised;
     /** Request ids of the proposals the node makes itself; clients use ids from 0 on. */
     private long ownRequestId = -1;
@@ -711,12 +714,15 @@ public final class Node implements Closeable {
                     logChanged = true;
                 }
                 if (logChanged) {
+                    long syncStarted = options.clock().nanoTime();
                     log.sync();
+                    metrics.duration("node.log.sync", options.clock().nanoTime() - syncStarted);
                 }
                 if (after != null) {
                     hardState.put(after);
                 }
                 long took = options.clock().nanoTime() - started;
+                metrics.duration("node.persist", took);
                 feed(new RaftEvent.Persisted(ready.sequence()));
                 if (took > options.limits().slowSyncNanos() && raft.view().role() == Role.LEADER) {
                     // A node with a healthy disk should lead (section 7).
@@ -730,12 +736,14 @@ public final class Node implements Closeable {
             if (ready.hasEntriesToApply()) {
                 List<LogEntry> entries = log.entries(ready.applyFrom(), ready.applyTo() + 1, Integer.MAX_VALUE);
                 List<CommandResult> results;
+                long applyStarted = options.clock().nanoTime();
                 try {
                     results = stateMachine.apply(entries);
                 } catch (CorruptionException e) {
                     stateMachineDamaged();
                     throw e;
                 }
+                metrics.duration("node.apply", options.clock().nanoTime() - applyStarted);
                 for (int i = 0; i < entries.size(); i++) {
                     listener.applied(entries.get(i), results.get(i));
                 }
@@ -953,6 +961,15 @@ public final class Node implements Closeable {
     /** How often this node has given its leadership up because its disk was slow. */
     public long slowSyncStepDowns() {
         return slowSyncStepDowns;
+    }
+
+    /**
+     * Where the node reports how long its work takes: {@code node.log.sync}, the sync of the
+     * log; {@code node.persist}, all that is written for one {@code Ready}; {@code node.apply},
+     * handing committed entries to the state machine.
+     */
+    public void metrics(Metrics metrics) {
+        this.metrics = Objects.requireNonNull(metrics);
     }
 
     /** How often this node, as leader, has proposed an alarm. */

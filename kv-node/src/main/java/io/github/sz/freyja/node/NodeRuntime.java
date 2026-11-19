@@ -205,6 +205,7 @@ public final class NodeRuntime implements Closeable {
                 if (now - nextTick >= 0) {
                     nextTick = now + tickNanos; // far behind: time that was missed is not made up
                 }
+                long busy = clock.nanoTime();
                 Object item = inbound.poll();
                 for (int taken = 0; item != null; item = taken < 256 ? inbound.poll() : null) {
                     dispatch(item);
@@ -215,6 +216,7 @@ public final class NodeRuntime implements Closeable {
                 }
                 service.afterStep();
                 passAddressesOn();
+                metrics.duration("node.loop", clock.nanoTime() - busy);
                 if (ticked) {
                     publish();
                 }
@@ -258,6 +260,7 @@ public final class NodeRuntime implements Closeable {
 
     private void open() throws IOException {
         node = Node.open(fs, config.dataDirectory(), config.node(), config.machine(), transport, service);
+        node.metrics(metrics);
         service.attach(node);
         admin.attach(node, restarts);
         running = true;
