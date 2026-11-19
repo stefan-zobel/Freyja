@@ -266,8 +266,9 @@ the two.
   - The runs that are validated (`traced`) have the faults of `system-faulty`, are short,
     and shorten no log, because the model has no snapshots. The profile
     `-Ptrace-validation` runs them in `kv-node` (`SystemTraceValidationTest`), complete and
-    not cut off. TLC accepted the six seeds of `system-trace-validation` on 2026-11-19:
-    26,447 steps in 13 minutes.
+    not cut off. With the partly durable restart (§3), TLC accepted the six seeds of
+    `system-trace-validation` and the three below on 2026-11-19: 42,410 steps in 21
+    minutes.
   - A crash between the write of the hard state and the write of the log of one step is
     rare in these short runs. Three seeds that reach it were found by search
     (`SystemTraceTest.CRASH_BETWEEN_WRITES`); the profile validates them as well, and every
@@ -487,8 +488,9 @@ Open in this milestone:
   log was damaged (`NodeTest`). The node now keeps the mode in the hard state until those
   entries are durable (`raft.md` §3). The simulation counts the crash (§3.1) and aims at
   it, and the model has a restart in which a step is durable in part (`PartlyDurable`).
-  Open: the runs of TLC for that model, the exhaustive check of `Raft.cfg` and the
-  validation of the traces that contain the crash (§2.7).
+  With that model the exhaustive check of `Raft.cfg` found no error, and TLC accepted the
+  traces of the Raft simulator, rejected the mutated ones, and accepted the whole-system
+  traces, among them three that contain the crash (§2.7; 2026-11-19).
 - A damaged segment that had cut the log and stored entries after the cut left those
   entries in the index of the log store, though the segment was set aside; the node read
   them from it. The store now builds its index again from the segments before the damaged

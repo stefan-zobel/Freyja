@@ -80,7 +80,8 @@ Rules:
     the node leaves log-recovering mode only once the entries that end it are durable; the
     simulation counts and aims at the crash; the model has a restart in which a step is
     durable in part (`verification.md` §3).
-  - Open: the runs of TLC for that model (`docs/tla/README.md`).
+  - With that model: `Raft.cfg` checked exhaustively, and the traces of the Raft simulator
+    and of nine whole-system runs (42,410 steps) validated (2026-11-19).
   - The Raft simulator lets the log of a node go back to an earlier state, with entries in
     it again that were cut off, as the log store of a node does after damage
     (`verification.md` §2.4).
@@ -152,7 +153,6 @@ leaves this list in the change that completes it.
 |---|---|---|
 | Trace validation of the runs with membership changes, transfers, and log damage | B3 | A run of TLC; `docs/tla/README.md` |
 | Exhaustive check of a configuration with membership change | B3 | A run of TLC; the last attempt ran out of memory |
-| The model with the partly durable restart: the exhaustive check of `Raft.cfg` and the validation of the whole-system traces, with the seeds that crash between the write of the hard state and the write of the log | C3 | Runs of TLC: `Raft.cfg`, and `./mvnw test -pl kv-node -am -Ptrace-validation` (about 20 minutes) |
 | The guard of the finalization: `set-version` is refused unless every member supports the version | E3 | `operations.md` §6; members do not tell the leader yet which versions they support |
 
 **Work that needs Linux:**

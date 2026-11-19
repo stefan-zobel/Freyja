@@ -12,13 +12,13 @@ against it; trace validation uses the seed sets without them.
 
 **State of the checks (B3):**
 
-- `Raft.cfg`: exhaustive, no error, with the model before the partly durable restart
-  (2026-11-19, section 1). With that change the check has to be repeated.
+- `Raft.cfg`: exhaustive, no error, with the partly durable restart (section 1): 1,015,386
+  distinct states, depth 27, two minutes (2026-11-19).
 - `RaftMembership.cfg`: a breadth-first search of nine minutes (14.7 million distinct states,
   depth 14) found no error. It did not finish. A run with smaller bounds that was meant to
   be exhaustive was stopped by the machine for lack of memory and has to be repeated.
 - Trace validation: the runs under the full fault model and all mutated runs behave as
-  required with the extended model. The runs with membership changes, transfers, and log
+  required with the extended model, also with the partly durable restart (2026-11-19). The runs with membership changes, transfers, and log
   damage (`trace-validation-membership`) have not been validated yet: that run was stopped
   for lack of memory as well. Until it has passed, the mapping of those events (section 3.2)
   is untested.
@@ -93,12 +93,11 @@ java -cp ../../tools/tla2tools.jar tlc2.TLC -workers auto -config Raft.cfg Raft.
 ```
 
 With `-pl kv-node -am` the same profile also runs `SystemTraceValidationTest`: traces of
-whole-system runs, recorded from complete nodes on real log stores. All six seeds of
-`system-trace-validation` were accepted on 2026-11-19: complete runs of 3,932 to 5,394 steps,
-26,447 steps in all, in 13 minutes. None of them contains a crash between the write of the
-hard state and the write of the log of one step. Three more seeds were chosen because they
-do (`SystemTraceTest.CRASH_BETWEEN_WRITES`); they are part of the profile now and have not
-been validated yet, and neither has the model with the partly durable restart.
+whole-system runs, recorded from complete nodes on real log stores. With the partly durable
+restart, TLC accepted all nine seeds on 2026-11-19: the six of `system-trace-validation` and
+the three chosen because they crash between the write of the hard state and the write of
+the log of one step (`SystemTraceTest.CRASH_BETWEEN_WRITES`). Complete runs of 3,967 to
+5,820 steps, 42,410 steps in all, in 21 minutes.
 
 The profile runs `TraceValidationTest`. For each seed it simulates a cluster under the full
 fault model, writes the run as the module `TraceData` (`TlaTraceWriter`), and lets TLC check

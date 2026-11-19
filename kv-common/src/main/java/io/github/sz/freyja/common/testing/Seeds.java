@@ -14,8 +14,9 @@ import java.util.List;
  *
  * <ul>
  *   <li>With the system property {@code freyja.seed} set, only that seed runs.</li>
- *   <li>Otherwise every seed of the corpus runs first, then the seeds {@code 1..count}. The
- *       system property {@code freyja.seeds} overrides {@code count}.</li>
+ *   <li>Otherwise every seed of the corpus runs first, then those of the seeds {@code 1..count}
+ *       that are not in the corpus. The system property {@code freyja.seeds} overrides
+ *       {@code count}.</li>
  *   <li>The corpus of a test is the class-path resource {@code /seeds/<name>.txt} of the
  *       owning test class: one decimal seed per line, {@code #} starts a comment. Every seed
  *       that ever failed is added there.</li>
@@ -52,12 +53,15 @@ public final class Seeds {
             runOne(name, Long.parseLong(single.trim()), body);
             return;
         }
-        for (long seed : corpus(owner, name)) {
+        List<Long> corpus = corpus(owner, name);
+        for (long seed : corpus) {
             runOne(name, seed, body);
         }
         int count = Integer.getInteger(COUNT_PROPERTY, defaultCount);
         for (long seed = 1; seed <= count; seed++) {
-            runOne(name, seed, body);
+            if (!corpus.contains(seed)) {
+                runOne(name, seed, body);
+            }
         }
     }
 

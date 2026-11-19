@@ -1,1 +1,1 @@
-# Freyja: Experimental replicated LSM-Tree Key-Value Store in Java
+# Freyja: Educational replicated LSM-Tree Key-Value Store in Java
