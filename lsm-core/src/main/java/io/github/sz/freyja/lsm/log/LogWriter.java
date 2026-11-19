@@ -21,7 +21,8 @@ import io.github.sz.freyja.lsm.fs.WritableFile;
  * <p>After any {@link IOException} the state of the file is unknown and the writer must not
  * be used again.
  *
- * <p>Not safe for concurrent use.
+ * <p>Not safe for concurrent use, with one exception: {@link #syncFile} may run on another
+ * thread while records are appended.
  */
 public final class LogWriter implements Closeable {
 
@@ -105,8 +106,30 @@ public final class LogWriter implements Closeable {
      */
     public void sync() throws IOException {
         file.sync();
-        if (syncedLength != offset) {
-            syncedLength = offset;
+        synced(offset);
+    }
+
+    /**
+     * Makes durable at least what was appended before the call, and records nothing: for a
+     * sync that runs on another thread while records are still appended. The file must allow
+     * that ({@link io.github.sz.freyja.lsm.fs.WritableFile#sync}). When it has returned, the
+     * thread that appends calls {@link #synced} with the size it read before the sync began.
+     * A failure is final, as for {@link #sync}.
+     */
+    public void syncFile() throws IOException {
+        file.sync();
+    }
+
+    /**
+     * Records that the first {@code length} bytes are durable: the next record carries that
+     * as its sync point.
+     */
+    public void synced(long length) {
+        if (length < 0 || length > offset) {
+            throw new IllegalArgumentException("synced length " + length + " of " + offset + " bytes");
+        }
+        if (length > syncedLength) {
+            syncedLength = length;
             syncPointPending = true;
         }
     }

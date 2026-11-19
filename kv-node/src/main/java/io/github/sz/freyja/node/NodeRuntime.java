@@ -29,7 +29,9 @@ import io.github.sz.freyja.raft.ProtocolState;
  * loop, driven by the clock.
  *
  * <p>The thread reports ticks as time passes, hands over what the network delivers, lets the
- * node work until it is idle, and lets the service answer the clients. Frames of peers,
+ * node work until it is idle, and lets the service answer the clients. The syncs of the log
+ * of the node run on a second thread ({@link SyncThread}), which wakes the first when one has
+ * ended. Frames of peers,
  * requests of clients, and calls of an administrator reach it through one bounded queue; a
  * producer never waits, and what does not fit is refused.
  *
@@ -68,6 +70,9 @@ public final class NodeRuntime implements Closeable {
     /** A node this many entries behind what is committed does not count as ready. */
     private static final long READY_LAG = 10_000;
 
+    /** Wakes the thread of the node: a sync of its log has ended. */
+    private static final Object SYNCED = new Object();
+
     /** A request of a client on its way to the thread of the node. */
     private record ClientCall(byte[] frame, ClientService.Reply reply) {
     }
@@ -97,6 +102,8 @@ public final class NodeRuntime implements Closeable {
     private long addressChanges = -1;
     private final ArrayBlockingQueue<Object> inbound;
     private Transport transport;
+    /** Runs the syncs of the log of every node this runtime opens. */
+    private SyncThread syncs;
     private Thread thread;
     private volatile boolean closed;
     private volatile boolean running;
@@ -133,6 +140,8 @@ public final class NodeRuntime implements Closeable {
             throw new IllegalStateException("the runtime was started already");
         }
         this.transport = transport;
+        // If the queue is full, the thread does not wait and needs no waking.
+        syncs = new SyncThread("freyja-sync", () -> inbound.offer(SYNCED));
         thread = Thread.ofPlatform().name("freyja-node").start(this::run);
     }
 
@@ -250,6 +259,7 @@ public final class NodeRuntime implements Closeable {
             }
         }
         stopNode();
+        syncs.close();
         // Whoever still waits in the queue is told that nothing will come.
         for (Object item = inbound.poll(); item != null; item = inbound.poll()) {
             if (item instanceof NodeCall<?> call) {
@@ -261,6 +271,7 @@ public final class NodeRuntime implements Closeable {
     private void open() throws IOException {
         node = Node.open(fs, config.dataDirectory(), config.node(), config.machine(), transport, service);
         node.metrics(metrics);
+        node.syncer(syncs);
         service.attach(node);
         admin.attach(node, restarts);
         running = true;
@@ -388,6 +399,9 @@ public final class NodeRuntime implements Closeable {
     }
 
     private void dispatch(Object item) throws IOException {
+        if (item == SYNCED) {
+            return; // the node hears of the sync when it runs next
+        }
         switch (item) {
             case byte[] frame -> node.offer(frame);
             case ClientCall call -> service.request(call.frame(), call.reply());

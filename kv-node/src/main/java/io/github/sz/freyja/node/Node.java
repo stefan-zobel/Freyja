@@ -57,7 +57,10 @@ import io.github.sz.freyja.raft.SnapshotMeta;
  *
  * <p>The work of a {@code Ready} is done in the order of the contract of the core: hard state,
  * truncation, entries, then one sync of the log; only then the core is told that the work is
- * durable. A failed write is fatal: the node stops and must be started again.
+ * durable. With a {@link LogSyncer} the sync of a {@code Ready} that only appends entries runs
+ * away from the loop, which goes on meanwhile; everything else that writes waits until what
+ * was appended before it is durable. A failed write is fatal: the node stops and must be
+ * started again.
  *
  * <p>A node comes in two forms. The complete one owns the generations of the key-value state
  * machine and with them everything about snapshots: it shortens its log, sends snapshots to
@@ -209,6 +212,21 @@ public final class Node implements Closeable {
     private long expiredProposals;
     private long slowSyncStepDowns;
     private Metrics metrics = Metrics.NONE;
+    /** Runs the syncs of the log away from the loop; {@code null}: the loop syncs itself. */
+    private LogSyncer syncer;
+    /** The sync that runs, or {@code null}. */
+    private RaftLogStore.Sync inFlight;
+    /** The last Ready whose entries the running sync covers. */
+    private long inFlightSequence;
+    private long inFlightStarted;
+    /** The last Ready whose entries are appended but not known to be durable; -1 if none. */
+    private long writtenSequence = -1;
+    /** The first index of the log that is not known to be durable; -1 if all are. */
+    private long unsyncedFrom = -1;
+    /** For an observing listener: the Readys it is shown when their work is durable. */
+    private final ArrayDeque<Ready> unsynced = new ArrayDeque<>();
+    private long appendsDuringSync;
+    private long syncsAwaited;
     private long alarmsRaised;
     /** Request ids of the proposals the node makes itself; clients use ids from 0 on. */
     private long ownRequestId = -1;
@@ -578,9 +596,11 @@ public final class Node implements Closeable {
     /**
      * Processes the next waiting event and everything that follows from it. Ticks, messages,
      * and proposals that wait right behind it, up to {@link Options#eventBatch} in all, are
-     * handed to the core with it, so that one sync of the log covers all of them.
+     * handed to the core with it, so that one sync of the log covers all of them. With a
+     * {@link LogSyncer}, a sync that has ended is reported to the core as well, also when no
+     * event waits.
      *
-     * @return whether an event was processed
+     * @return whether an event or the end of a sync was processed
      * @throws IOException if storage failed; the node has stopped then
      */
     public boolean runOnce() throws IOException {
@@ -589,7 +609,12 @@ public final class Node implements Closeable {
         }
         Object item = queue.pollFirst();
         if (item == null) {
-            return false;
+            if (inFlight == null || !syncer.done()) {
+                return false;
+            }
+            // A sync has ended while nothing waited.
+            drain();
+            return true;
         }
         try {
             take(item);
@@ -669,107 +694,219 @@ public final class Node implements Closeable {
         }
     }
 
+    /**
+     * Does the work the core has ready, until it has none. With a {@link LogSyncer}, a sync of
+     * the log that has ended is reported to the core here, and the next one is started.
+     */
     private void work() throws IOException {
-        while (raft.hasReady()) {
-            Ready ready = raft.takeReady();
-            // The messages leave before the work of the Ready is durable: the appends of a
-            // leader reach its followers while it syncs its own log, and the core holds back
-            // every message that promises something until a later Ready (raft.md section 3).
+        while (true) {
+            while (raft.hasReady()) {
+                handle(raft.takeReady());
+            }
+            if (syncer == null) {
+                return;
+            }
+            if (inFlight == null && writtenSequence != -1) {
+                startSync();
+            }
+            if (inFlight != null && syncer.done()) {
+                endSync();
+                continue; // the report may have released messages and entries
+            }
+            return;
+        }
+    }
+
+    /**
+     * Starts a sync of everything appended so far. The loop goes on while it runs; what it
+     * appends in the meantime is covered by the next sync.
+     */
+    private void startSync() throws IOException {
+        inFlight = log.beginSync(options.clock());
+        inFlightSequence = writtenSequence;
+        inFlightStarted = options.clock().nanoTime();
+        syncer.start(inFlight);
+    }
+
+    /** Ends the sync that has run and tells the core what is durable now. */
+    private void endSync() throws IOException {
+        RaftLogStore.Sync sync = inFlight;
+        inFlight = null;
+        long durable = log.endSync(sync);
+        metrics.duration("node.log.sync", sync.nanos());
+        metrics.duration("node.persist", options.clock().nanoTime() - inFlightStarted);
+        // A full segment is synced completely when it is closed; then everything is durable.
+        durableReported(durable >= log.lastIndex() ? writtenSequence : inFlightSequence, durable);
+        if (sync.nanos() > options.limits().slowSyncNanos() && raft.view().role() == Role.LEADER) {
+            slowSyncStepDowns++;
+            feed(new RaftEvent.StepDown());
+        }
+    }
+
+    /**
+     * Makes everything appended durable before the node writes anything else: the hard state,
+     * a truncation, a snapshot. The work of the Readys is then durable in their order, as if
+     * each had been synced in the loop.
+     */
+    private void syncAll() throws IOException {
+        if (inFlight != null) {
+            syncsAwaited++;
+            syncer.await();
+            endSync();
+        }
+        if (writtenSequence != -1) {
+            long started = options.clock().nanoTime();
+            log.sync();
+            metrics.duration("node.log.sync", options.clock().nanoTime() - started);
+            durableReported(writtenSequence, log.lastIndex());
+        }
+    }
+
+    /** The Readys up to {@code sequence} are durable, the log up to {@code durable}. */
+    private void durableReported(long sequence, long durable) throws IOException {
+        boolean all = sequence == writtenSequence;
+        if (all) {
+            writtenSequence = -1;
+            unsyncedFrom = -1;
+        } else {
+            unsyncedFrom = durable + 1;
+        }
+        feed(new RaftEvent.Persisted(sequence));
+        while (!unsynced.isEmpty() && (all || unsynced.getFirst().sequence() <= sequence)) {
+            listener.ready(unsynced.removeFirst(), hardState.get(), durableLastIndex());
+        }
+    }
+
+    /** The last index of the log that is durable. */
+    private long durableLastIndex() {
+        return unsyncedFrom == -1 ? log.lastIndex() : unsyncedFrom - 1;
+    }
+
+    /** Whether the persistent work of a Ready is only to append entries; their sync may wait. */
+    private static boolean appendsOnly(Ready ready) {
+        return ready.hardState() == null && ready.truncateSuffixFrom() == -1 && !ready.entries().isEmpty();
+    }
+
+    private void handle(Ready ready) throws IOException {
+        // The messages leave before the work of the Ready is durable: the appends of a
+        // leader reach its followers while it syncs its own log, and the core holds back
+        // every message that promises something until a later Ready (raft.md section 3).
+        if (observed) {
+            listener.sending(ready, hardState.get(), durableLastIndex());
+        }
+        for (Outbound outbound : ready.messages()) {
+            transport.send(outbound.toNode(),
+                    MessageCodec.encode(identity.nodeId(), outbound.toNode(), outbound.message()));
+        }
+        boolean deferred = false;
+        if (ready.hasPersistentWork() && syncer != null && appendsOnly(ready)) {
+            // The entries are written now and synced with those of later Readys; the
+            // core hears that they are durable when the sync has ended.
+            if (inFlight != null) {
+                appendsDuringSync++;
+            }
+            if (unsyncedFrom == -1) {
+                unsyncedFrom = ready.entries().getFirst().index();
+            }
+            log.append(ready.entries());
+            writtenSequence = ready.sequence();
             if (observed) {
-                listener.sending(ready, hardState.get(), log.lastIndex());
+                unsynced.addLast(ready);
             }
-            for (Outbound outbound : ready.messages()) {
-                transport.send(outbound.toNode(),
-                        MessageCodec.encode(identity.nodeId(), outbound.toNode(), outbound.message()));
+            deferred = true;
+        } else if (ready.hasPersistentWork()) {
+            syncAll();
+            long started = options.clock().nanoTime();
+            HardState after = null;
+            boolean logChanges = ready.truncateSuffixFrom() != -1 || !ready.entries().isEmpty();
+            if (ready.hardState() != null) {
+                HardState next = ready.hardState();
+                HardState stored = hardState.get();
+                if (logChanges && stored.logRecovering() && !next.logRecovering()) {
+                    // The entries that end log-recovering mode must be durable before the
+                    // mode is left: a crash in between would leave a node that votes again
+                    // without entries it acknowledged before its log was damaged
+                    // (section 3.3). Until then the hard state keeps the mode.
+                    hardState.put(new HardState(next.term(), next.votedFor(), true, next.logEpoch(),
+                            stored.lostLogIndex(), stored.lostLogTerm()));
+                    after = next;
+                } else {
+                    hardState.put(next);
+                }
+                if (observed && logChanges) {
+                    listener.hardStateWritten(ready, hardState.get());
+                }
             }
-            if (ready.hasPersistentWork()) {
-                long started = options.clock().nanoTime();
-                HardState after = null;
-                boolean logChanges = ready.truncateSuffixFrom() != -1 || !ready.entries().isEmpty();
-                if (ready.hardState() != null) {
-                    HardState next = ready.hardState();
-                    HardState stored = hardState.get();
-                    if (logChanges && stored.logRecovering() && !next.logRecovering()) {
-                        // The entries that end log-recovering mode must be durable before the
-                        // mode is left: a crash in between would leave a node that votes again
-                        // without entries it acknowledged before its log was damaged
-                        // (section 3.3). Until then the hard state keeps the mode.
-                        hardState.put(new HardState(next.term(), next.votedFor(), true, next.logEpoch(),
-                                stored.lostLogIndex(), stored.lostLogTerm()));
-                        after = next;
+            boolean logChanged = false;
+            if (ready.truncateSuffixFrom() != -1) {
+                log.truncateSuffix(ready.truncateSuffixFrom());
+                logChanged = true;
+            }
+            if (!ready.entries().isEmpty()) {
+                log.append(ready.entries());
+                logChanged = true;
+            }
+            if (logChanged) {
+                long syncStarted = options.clock().nanoTime();
+                log.sync();
+                metrics.duration("node.log.sync", options.clock().nanoTime() - syncStarted);
+            }
+            if (after != null) {
+                hardState.put(after);
+            }
+            long took = options.clock().nanoTime() - started;
+            metrics.duration("node.persist", took);
+            feed(new RaftEvent.Persisted(ready.sequence()));
+            if (took > options.limits().slowSyncNanos() && raft.view().role() == Role.LEADER) {
+                // A node with a healthy disk should lead (section 7).
+                slowSyncStepDowns++;
+                feed(new RaftEvent.StepDown());
+            }
+        }
+        if (observed) {
+            if (unsynced.isEmpty()) {
+                listener.ready(ready, hardState.get(), durableLastIndex());
+            } else if (!deferred) {
+                unsynced.addLast(ready); // shown in their order, after those it follows
+            }
+        }
+        if (ready.hasEntriesToApply()) {
+            List<LogEntry> entries = log.entries(ready.applyFrom(), ready.applyTo() + 1, Integer.MAX_VALUE);
+            List<CommandResult> results;
+            long applyStarted = options.clock().nanoTime();
+            try {
+                results = stateMachine.apply(entries);
+            } catch (CorruptionException e) {
+                stateMachineDamaged();
+                throw e;
+            }
+            metrics.duration("node.apply", options.clock().nanoTime() - applyStarted);
+            for (int i = 0; i < entries.size(); i++) {
+                listener.applied(entries.get(i), results.get(i));
+            }
+        }
+        for (Notification note : ready.notifications()) {
+            listener.notification(note);
+        }
+        if (ready.truncatePrefixThrough() != -1) {
+            // The file SNAPSHOT names this index or a later one already.
+            syncAll();
+            log.truncatePrefix(ready.truncatePrefixThrough());
+        }
+        for (SnapshotDirective directive : ready.snapshots()) {
+            switch (directive) {
+                case SnapshotDirective.Send send -> {
+                    if (transfers == null) {
+                        feed(new RaftEvent.SnapshotSendFinished(send.toNode(), false));
                     } else {
-                        hardState.put(next);
-                    }
-                    if (observed && logChanges) {
-                        listener.hardStateWritten(ready, hardState.get());
+                        transfers.send(send.toNode(), send.term());
                     }
                 }
-                boolean logChanged = false;
-                if (ready.truncateSuffixFrom() != -1) {
-                    log.truncateSuffix(ready.truncateSuffixFrom());
-                    logChanged = true;
-                }
-                if (!ready.entries().isEmpty()) {
-                    log.append(ready.entries());
-                    logChanged = true;
-                }
-                if (logChanged) {
-                    long syncStarted = options.clock().nanoTime();
-                    log.sync();
-                    metrics.duration("node.log.sync", options.clock().nanoTime() - syncStarted);
-                }
-                if (after != null) {
-                    hardState.put(after);
-                }
-                long took = options.clock().nanoTime() - started;
-                metrics.duration("node.persist", took);
-                feed(new RaftEvent.Persisted(ready.sequence()));
-                if (took > options.limits().slowSyncNanos() && raft.view().role() == Role.LEADER) {
-                    // A node with a healthy disk should lead (section 7).
-                    slowSyncStepDowns++;
-                    feed(new RaftEvent.StepDown());
-                }
-            }
-            if (observed) {
-                listener.ready(ready, hardState.get(), log.lastIndex());
-            }
-            if (ready.hasEntriesToApply()) {
-                List<LogEntry> entries = log.entries(ready.applyFrom(), ready.applyTo() + 1, Integer.MAX_VALUE);
-                List<CommandResult> results;
-                long applyStarted = options.clock().nanoTime();
-                try {
-                    results = stateMachine.apply(entries);
-                } catch (CorruptionException e) {
-                    stateMachineDamaged();
-                    throw e;
-                }
-                metrics.duration("node.apply", options.clock().nanoTime() - applyStarted);
-                for (int i = 0; i < entries.size(); i++) {
-                    listener.applied(entries.get(i), results.get(i));
-                }
-            }
-            for (Notification note : ready.notifications()) {
-                listener.notification(note);
-            }
-            if (ready.truncatePrefixThrough() != -1) {
-                // The file SNAPSHOT names this index or a later one already.
-                log.truncatePrefix(ready.truncatePrefixThrough());
-            }
-            for (SnapshotDirective directive : ready.snapshots()) {
-                switch (directive) {
-                    case SnapshotDirective.Send send -> {
-                        if (transfers == null) {
-                            feed(new RaftEvent.SnapshotSendFinished(send.toNode(), false));
-                        } else {
-                            transfers.send(send.toNode(), send.term());
-                        }
-                    }
-                    case SnapshotDirective.Install install -> install(install);
-                    case SnapshotDirective.Reject reject -> {
-                        if (staged != null && staged.offer().meta().equals(reject.meta())) {
-                            store.discard(staged.generation());
-                            staged = null;
-                        }
+                case SnapshotDirective.Install install -> install(install);
+                case SnapshotDirective.Reject reject -> {
+                    if (staged != null && staged.offer().meta().equals(reject.meta())) {
+                        store.discard(staged.generation());
+                        staged = null;
                     }
                 }
             }
@@ -857,6 +994,8 @@ public final class Node implements Closeable {
             throw new IllegalStateException("no received snapshot for " + meta);
         }
         staged = null;
+        // In the order of the Readys: what earlier ones appended is durable first.
+        syncAll();
         int clusterVersion = received.offer().clusterVersion();
         new InstallIntent(meta, received.generation(), clusterVersion, install.keepSuffix(),
                 install.replaceStateMachine()).write(fs, dataDirectory);
@@ -972,6 +1111,32 @@ public final class Node implements Closeable {
         this.metrics = Objects.requireNonNull(metrics);
     }
 
+    /**
+     * Lets the syncs of the log run away from the loop, from now on (section 1). Without, the
+     * node syncs in its loop. Set once, before the first event.
+     */
+    public void syncer(LogSyncer syncer) {
+        if (this.syncer != null || inFlight != null || writtenSequence != -1) {
+            throw new IllegalStateException("the node has a syncer already");
+        }
+        this.syncer = Objects.requireNonNull(syncer);
+    }
+
+    /** How often entries were appended while a sync of the log was running. */
+    public long appendsDuringSync() {
+        return appendsDuringSync;
+    }
+
+    /** Whether entries are appended whose sync has not ended. */
+    public boolean appendsUnsynced() {
+        return writtenSequence != -1;
+    }
+
+    /** How often the loop waited for a running sync before it wrote something else. */
+    public long syncsAwaited() {
+        return syncsAwaited;
+    }
+
     /** How often this node, as leader, has proposed an alarm. */
     public long alarmsRaised() {
         return alarmsRaised;
@@ -1038,6 +1203,11 @@ public final class Node implements Closeable {
     public void close() throws IOException {
         stopped = true;
         queue.clear();
+        if (inFlight != null) {
+            // Its file is closed only after it has ended; what it achieved does not matter.
+            syncer.await();
+            inFlight = null;
+        }
         IOException first = null;
         try {
             if (transfers != null) {

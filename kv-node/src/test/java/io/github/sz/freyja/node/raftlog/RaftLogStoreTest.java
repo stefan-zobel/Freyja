@@ -15,6 +15,7 @@ import java.util.Random;
 
 import org.junit.jupiter.api.Test;
 
+import io.github.sz.freyja.common.Clock;
 import io.github.sz.freyja.common.testing.Seeds;
 import io.github.sz.freyja.lsm.UnsupportedFormatException;
 import io.github.sz.freyja.lsm.fs.FaultyFileSystem;
@@ -504,5 +505,47 @@ class RaftLogStoreTest {
         byte[] header = RaftLogStore.encodeHeader(new RaftLogStore.SegmentHeader(1, 0, 0, THREE));
         header[1] = 2;
         assertThrows(UnsupportedFormatException.class, () -> RaftLogStore.decodeHeader(header, "x"));
+    }
+
+    @Test
+    void aSyncThatRunsWhileEntriesAreAppendedVouchesOnlyForWhatCameBefore() throws IOException {
+        MemoryFileSystem fs = new MemoryFileSystem();
+        try (RaftLogStore store = open(fs)) {
+            store.append(batch(1, 3, 1, 100));
+            RaftLogStore.Sync sync = store.beginSync(Clock.SYSTEM);
+            store.append(batch(4, 2, 1, 100));
+            sync.run();
+            assertEquals(3, sync.lastIndex());
+            assertEquals(3, store.endSync(sync), "what came after it waits for the next sync");
+
+            // A full segment is closed when a sync of it ends, after a sync of all it holds.
+            int segments = store.segmentCount();
+            store.append(batch(6, 5, 1, 500));
+            RaftLogStore.Sync full = store.beginSync(Clock.SYSTEM);
+            store.append(batch(11, 1, 1, 100));
+            full.run();
+            assertEquals(11, store.endSync(full));
+            assertEquals(segments + 1, store.segmentCount());
+        }
+        fs.crash(new Random(3));
+        try (RaftLogStore store = open(fs)) {
+            assertEquals(shapes(batch(1, 3, 1, 100)), content(store, 1).subList(0, 3));
+            assertEquals(11, store.lastIndex(), "everything was synced");
+        }
+    }
+
+    @Test
+    void aFailedSyncAwayFromTheStoreIsFatalForIt() throws IOException {
+        FaultyFileSystem fs = new FaultyFileSystem(new MemoryFileSystem());
+        try (RaftLogStore store = open(fs)) {
+            store.append(batch(1, 3, 1, 100));
+            fs.setFault((operation, path, index) ->
+                    operation == FaultyFileSystem.Operation.SYNC ? new IOException("injected") : null);
+            RaftLogStore.Sync sync = store.beginSync(Clock.SYSTEM);
+            sync.run();
+            assertThrows(IOException.class, () -> store.endSync(sync));
+            fs.setFault(null);
+            assertThrows(IOException.class, () -> store.append(batch(4, 1, 1, 100)));
+        }
     }
 }

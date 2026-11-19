@@ -24,6 +24,7 @@ class SystemSimulationTest {
         assertTrue(total.casHeld > 0 && total.casFailed > 0, total.toString());
         assertTrue(total.snapshotsCreated > 0, total.toString());
         assertTrue(total.givenUp == 0 && total.crashes == 0, total.toString());
+        assertTrue(total.appendsDuringSync > 300 && total.syncsAwaited > 12, total.toString());
     }
 
     @Test
@@ -42,6 +43,8 @@ class SystemSimulationTest {
         assertTrue(total.crashesInAnOperation > 3, total.toString());
         assertTrue(total.crashesBetweenHardStateAndLog > 0, total.toString());
         assertTrue(total.appendsAheadOfACrash > 3, total.toString());
+        assertTrue(total.crashesWithUnsyncedAppends > 12, total.toString());
+        assertTrue(total.appendsDuringSync > 1000 && total.syncsAwaited > 100, total.toString());
         assertTrue(total.partitions > 5, total.toString());
         assertTrue(total.dropped > 0 && total.duplicated > 0, total.toString());
         assertTrue(total.snapshotsCreated > 0, total.toString());
@@ -70,6 +73,7 @@ class SystemSimulationTest {
         assertTrue(total.damageProvenBySyncPoint > 0, total.toString());
         assertTrue(total.crashesBetweenHardStateAndLog > 3, total.toString());
         assertTrue(total.appendsAheadOfACrash > 3, total.toString());
+        assertTrue(total.crashesWithUnsyncedAppends > 12, total.toString());
     }
 
     @Test

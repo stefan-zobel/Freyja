@@ -4,7 +4,10 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 
-/** An append-only file handle. Not safe for concurrent use by several threads. */
+/**
+ * An append-only file handle. Not safe for concurrent use by several threads, with one
+ * exception: {@link #sync} may run on one thread while another appends.
+ */
 public interface WritableFile extends Closeable {
 
     /** Appends all remaining bytes of {@code src} to the end of the file. */
@@ -18,6 +21,9 @@ public interface WritableFile extends Closeable {
     /**
      * Makes every byte appended so far durable. A failure leaves the durable state of the
      * file unknown; the caller must not retry.
+     *
+     * <p>If another thread appends while the sync runs, at least every byte whose append had
+     * returned before the sync began is durable when it returns.
      */
     void sync() throws IOException;
 

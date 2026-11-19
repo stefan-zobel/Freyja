@@ -514,14 +514,21 @@ operation, installed snapshots, snapshots installed around a leader change, log-
 mode entered and left, rebuilt state machines, commands rejected for lack of space,
 step-downs for slow disks, aborted hand-overs, sessions lost while a retry was on its way,
 replaced members, lost identities, reverted configurations, crashes of a leader whose
-appends had left before its own log was durable, and the probes below the node (§3.1): torn
-tails dropped, damage proven by a sync point, writes held back.
+appends had left before its own log was durable, entries appended while a sync of the log
+was running, waits for a running sync, crashes with appended entries whose sync had not
+ended, and the probes below the node (§3.1): torn tails dropped, damage proven by a sync
+point, writes held back.
 
 A node that crashes in the middle of a write may have handed messages to its transport
 already (`node.md` §1); the simulation lets a random part of them go out. The runs that are
 validated as traces lose them all: their trace shows a `Ready` only once its work is
 durable. They check the release of messages by trace validation; the runs with leaked
 messages check it by the invariants, against what was durable when the messages left.
+
+The nodes of the seed sets sync their logs away from the loop (`node.md` §1): a sync that a
+node starts runs on the thread of the simulation at a later moment the seed picks, and the
+node goes on taking events and appending entries meanwhile. The runs that are validated as
+traces sync in the loop; what they check is the core, whose contract allows both.
 
 What the simulation found while it was built:
 

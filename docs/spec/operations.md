@@ -113,7 +113,7 @@ only:
 | Gauges of transfers and network | `transfers.outgoing`, `transfers.sent`, `transfers.received`, `transfers.failed`, `transport.sent`, `transport.received`, `transport.dropped`, `transport.refused`, `listener.clients.connections`, `listener.clients.refused` |
 | Clients | durations `client.command` and `client.read`, from the arrival of a request to its answer; counters `client.redirected` and `client.rejected.REASON`; gauges `client.waiting`, `client.dropped` |
 | Counters | `raft.elections.won` |
-| Durations of the node | `node.loop`: one pass of the thread of the node over what waits for it; `node.persist`: what is written for one `Ready`; `node.log.sync`: the sync of the Raft log in it; `node.apply`: handing committed entries to the state machine |
+| Durations of the node | `node.loop`: one pass of the thread of the node over what waits for it; `node.persist`: from the start of the work of a `Ready` until the core is told that it is durable, which for appended entries includes the wait for their sync; `node.log.sync`: one sync of the Raft log; `node.apply`: handing committed entries to the state machine |
 
 **What a node logs**, through `System.Logger` under the name `freyja.node`, once per change:
 its start (with a rebuilt state machine or a witnessed loss of its log end, if so), its role

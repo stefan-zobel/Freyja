@@ -3,6 +3,7 @@ package io.github.sz.freyja.node;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -441,5 +442,128 @@ class NodeTest {
         assertEquals(EntryType.values().length, 3);
         assertTrue(member.node.view().term() == 0 || member.node.view().term() == 5,
                 "the old or the new term, whichever reached the disk");
+    }
+
+    /** Runs a sync only when the test has let it. */
+    private static final class HeldSyncer implements LogSyncer {
+        Runnable pending;
+        boolean released;
+        /** Every sync runs as soon as the node asks for it. */
+        boolean free;
+        int started;
+
+        @Override
+        public void start(Runnable sync) {
+            assertNull(pending, "one sync at a time");
+            pending = sync;
+            released = false;
+            started++;
+        }
+
+        @Override
+        public boolean done() {
+            if (pending != null && (released || free)) {
+                await();
+            }
+            return pending == null;
+        }
+
+        @Override
+        public void await() {
+            Runnable sync = pending;
+            pending = null;
+            if (sync != null) {
+                sync.run();
+            }
+        }
+    }
+
+    @Test
+    void aLeaderGoesOnWhileItsLogSyncsAndAppliesOnlyWhatIsDurable() throws IOException {
+        startCluster();
+        Member leader = leader();
+        ticks(2);
+        HeldSyncer held = new HeldSyncer();
+        leader.node.syncer(held);
+        int applied = leader.machine.applied.size();
+
+        propose(leader, 1, 100);
+        settle();
+        assertNotNull(held.pending, "the sync of the leader runs");
+        long first = leader.node.view().lastLogIndex();
+        assertEquals(first, leader.node.view().commitIndex(), "the followers made it durable: it is committed");
+        assertEquals(applied, leader.machine.applied.size(), "the leader applies only what it holds durably");
+
+        propose(leader, 2, 100);
+        settle();
+        assertEquals(1, held.started, "the entry waits for the next sync");
+        assertEquals(1, leader.node.appendsDuringSync());
+        held.released = true;
+        assertTrue(leader.node.runOnce(), "the end of a sync is work");
+        assertEquals(2, held.started, "the next sync covers what was appended meanwhile");
+        assertEquals(applied + 1, leader.machine.applied.size());
+        held.released = true;
+        settle();
+        assertFalse(leader.node.appendsUnsynced());
+        assertEquals(applied + 2, leader.machine.applied.size());
+
+        // A new term is stored only after what was appended before it is durable.
+        propose(leader, 3, 100);
+        settle();
+        assertNotNull(held.pending);
+        long term = leader.node.view().term();
+        int other = (leader.id + 1) % 3;
+        assertTrue(leader.node.offer(MessageCodec.encode(other, leader.id,
+                new RaftMessage.RequestVote(term + 1, 0, 0, false, true))));
+        assertTrue(leader.node.runOnce());
+        assertEquals(1, leader.node.syncsAwaited());
+        assertNull(held.pending);
+        assertFalse(leader.node.appendsUnsynced());
+        assertEquals(term + 1, leader.node.view().term());
+
+        held.free = true;
+        Member next = leader();
+        propose(next, 4, 100);
+        ticks(5);
+        for (Member member : members) {
+            assertEquals(next.machine.applied, member.machine.applied);
+        }
+        assertTrue(next.machine.applied.size() > applied + 3, "the entries of the old leader are applied");
+        for (Member member : members) {
+            member.stop();
+            assertEquals(0, member.memory.openHandleCount());
+        }
+    }
+
+    @Test
+    void aFailedSyncAwayFromTheLoopStopsTheNodeBeforeItAcknowledges() throws IOException {
+        startCluster();
+        Member leader = leader();
+        ticks(2);
+        Member follower = members.get((leader.id + 1) % 3);
+        follower.stop();
+        FaultyFileSystem faulty = new FaultyFileSystem(follower.memory);
+        follower.fs = faulty;
+        follower.start();
+        HeldSyncer held = new HeldSyncer();
+        follower.node.syncer(held);
+        ticks(3);
+        long acknowledged = follower.node.view().lastLogIndex();
+
+        faulty.setFault((operation, path, index) ->
+                operation == FaultyFileSystem.Operation.SYNC ? new IOException("injected") : null);
+        propose(leader, 1, 100);
+        settle();
+        assertNotNull(held.pending, "the follower has appended the entry and syncs it");
+        held.released = true;
+        assertThrows(IOException.class, follower.node::runOnce);
+        assertTrue(follower.node.stopped());
+        assertEquals(acknowledged, leader.node.peers().stream().filter(p -> p.nodeId() == follower.id)
+                .findFirst().orElseThrow().matchIndex(), "the follower acknowledged nothing it failed to sync");
+        follower.node.close();
+        follower.node = null;
+        settle();
+        assertEquals(leader.node.view().lastLogIndex(), leader.node.view().commitIndex(),
+                "the other follower is enough");
     }
 }

@@ -22,7 +22,8 @@ The runtime:
 
 - One thread per node steps the event loop in real time. It reports ticks as the clock
   moves, hands over what the network delivers, lets the node work until it is idle, and
-  lets the service answer the clients.
+  lets the service answer the clients. A second thread runs the syncs of the Raft log of
+  the node; it wakes the first when a sync has ended.
 - Frames of peers, requests of clients, and calls of an administrator reach that thread
   through one bounded queue (default 4,096). A producer never waits; what does not fit is
   refused: a frame is dropped, a request is answered as overloaded.
@@ -57,9 +58,22 @@ The event loop:
 - The work of a `Ready` is done in the order of the contract of the core: hard state,
   suffix truncation, entries, then one sync of the log; a hard state that ends
   log-recovering mode is stored in two steps around them (`raft.md` §3). Only then the
-  core is told that the work is durable, and entries are applied after that. Persisting is
-  synchronous in the loop for now; the contract of the core allows to move it to its own
-  thread later without changing the core.
+  core is told that the work is durable, and entries are applied after that.
+- The sync of the log runs on a thread of its own when a `Ready` only appends entries. The
+  loop appends them, starts the sync, and goes on: it takes events, sends, applies, and
+  appends what later `Ready`s bring. When the sync has ended, the sync thread wakes the
+  loop, which tells the core that the `Ready`s it covered are durable and starts the next
+  sync for everything appended in the meantime. At most one sync runs at a time, so the
+  syncs batch themselves under load. A sync covers what was appended when it began; the
+  sync point it records in the segment says no more than that.
+- Everything else that writes waits for what was appended before it: a hard state, a
+  truncation, the installation of a snapshot, and the deletion of old segments first wait
+  for the running sync, sync the rest in the loop, and only then do their own work. The
+  work of the `Ready`s is therefore durable in their order, as if each had been synced in
+  the loop. A full segment is closed in the loop, after a sync of all it holds.
+- A node that is closed waits for its running sync before it closes the files. A failed
+  sync stops the node, as one in the loop does. A leader whose sync takes longer than the
+  limit gives up its leadership (§7).
 - A failure of storage stops the node: it rejects every further event. It is started again
   from what is on disk.
 - A message that fails its checksum, has an unknown format, or is meant for another node is

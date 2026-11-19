@@ -9,6 +9,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import io.github.sz.freyja.common.Clock;
 import io.github.sz.freyja.common.LittleEndian;
 import io.github.sz.freyja.lsm.CorruptionException;
 import io.github.sz.freyja.lsm.UnsupportedFormatException;
@@ -38,7 +39,8 @@ import io.github.sz.freyja.raft.LogView;
  * aside ({@link #quarantineDamaged}). The node does that only after its hard state says that
  * it is in log-recovering mode, so that a crash in between finds the damage again.
  *
- * <p>A failed write or sync is fatal for the instance. An instance is confined to one thread.
+ * <p>A failed write or sync is fatal for the instance. An instance is confined to one thread,
+ * except that the sync of the segment being written may run on another ({@link Sync}).
  */
 public final class RaftLogStore implements LogView, Closeable {
 
@@ -466,6 +468,89 @@ public final class RaftLogStore implements LogView, Closeable {
             startSegment();
         }
         failed = false;
+    }
+
+    /**
+     * A sync of the segment being written that runs on another thread while the store takes
+     * more appends (docs/spec/node.md, section 1). It covers what was written when it was
+     * begun. {@link #run} is the only part that may run on another thread; whoever runs it
+     * must make what it records visible to the thread of the store.
+     */
+    public static final class Sync implements Runnable {
+        private final LogWriter writer;
+        private final long length;
+        private final long lastIndex;
+        private final Clock clock;
+        private long nanos;
+        private Throwable failure;
+
+        private Sync(LogWriter writer, long length, long lastIndex, Clock clock) {
+            this.writer = writer;
+            this.length = length;
+            this.lastIndex = lastIndex;
+            this.clock = clock;
+        }
+
+        /** Syncs the segment. A failure is kept for {@link #endSync}. */
+        @Override
+        public void run() {
+            long started = clock.nanoTime();
+            try {
+                writer.syncFile();
+            } catch (Throwable e) {
+                failure = e;
+            }
+            nanos = clock.nanoTime() - started;
+        }
+
+        /** The last index the sync covers. */
+        public long lastIndex() {
+            return lastIndex;
+        }
+
+        /** How long the sync of the file took. */
+        public long nanos() {
+            return nanos;
+        }
+    }
+
+    /**
+     * Begins a sync of everything written so far, to be run by {@link Sync#run} on any thread
+     * and ended by {@link #endSync}. Until then the store takes appends, and nothing else
+     * that writes.
+     */
+    public Sync beginSync(Clock clock) throws IOException {
+        requireWritable();
+        return new Sync(writer, writer.size(), lastIndex(), clock);
+    }
+
+    /**
+     * Ends a sync that has run. A full segment is closed now, after a sync of what was
+     * appended since the sync began, and the next one is started.
+     *
+     * @return the last index that is durable now
+     * @throws IOException if the sync failed; that is fatal for the store
+     */
+    public long endSync(Sync sync) throws IOException {
+        if (sync.failure != null) {
+            failed = true;
+            switch (sync.failure) {
+                case IOException e -> throw e;
+                case RuntimeException e -> throw e;
+                case Error e -> throw e;
+                default -> throw new IOException(sync.failure);
+            }
+        }
+        requireWritable();
+        if (sync.writer != writer) {
+            throw new IllegalStateException("the sync is of another segment");
+        }
+        writer.synced(sync.length);
+        if (rollDue) {
+            sync();
+            return lastIndex();
+        }
+        return sync.lastIndex;
     }
 
     /**

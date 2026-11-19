@@ -104,29 +104,31 @@ public final class SystemSimulation {
      *                    as the seed picks; otherwise one at a time
      * @param leaks       whether some of the messages a node handed to the transport before it
      *                    crashed in the middle of a write still go out; otherwise all are lost
+     * @param syncsAway   whether nodes sync their logs away from the loop and hear of the end
+     *                    of a sync at a moment the seed picks; otherwise they sync in the loop
      */
     public record Options(int nodes, int clients, int keys, long duration, int maxDelay, double drop,
                           double duplicate, double chaos, boolean storage, int spares, boolean snapshots,
-                          boolean batches, boolean leaks) {
+                          boolean batches, boolean leaks, boolean syncsAway) {
 
         /** A reliable network and no crashes. */
         public static Options calm() {
-            return new Options(3, 3, 4, 30_000, 3, 0, 0, 0, false, 0, true, true, true);
+            return new Options(3, 3, 4, 30_000, 3, 0, 0, 0, false, 0, true, true, true, true);
         }
 
         /** Lost and repeated messages, partitions, and crashes, also in the middle of a write. */
         public static Options faulty() {
-            return new Options(3, 4, 4, 60_000, 12, 0.03, 0.03, 0.25, false, 0, true, true, true);
+            return new Options(3, 4, 4, 60_000, 12, 0.03, 0.03, 0.25, false, 0, true, true, true, true);
         }
 
         /** All of {@link #faulty}, and damaged files, full disks, slow disks, and hand-overs. */
         public static Options hostile() {
-            return new Options(3, 4, 4, 80_000, 12, 0.02, 0.02, 0.3, true, 0, true, true, true);
+            return new Options(3, 4, 4, 80_000, 12, 0.02, 0.02, 0.3, true, 0, true, true, true, true);
         }
 
         /** All of {@link #hostile}, and members that are replaced, some after losing their identity. */
         public static Options changing() {
-            return new Options(3, 4, 4, 100_000, 12, 0.02, 0.02, 0.25, true, 4, true, true, true);
+            return new Options(3, 4, 4, 100_000, 12, 0.02, 0.02, 0.25, true, 4, true, true, true, true);
         }
 
         /**
@@ -135,10 +137,10 @@ public final class SystemSimulation {
          * nodes hand their core one event at a time, so that the trace shows which step
          * released which message; a batch releases the messages of its events together.
          * The messages of a node that crashes in the middle of a write are lost: the trace
-         * shows a {@code Ready} only once its work is durable.
+         * shows a {@code Ready} only once its work is durable. Its nodes sync in the loop.
          */
         public static Options traced() {
-            return new Options(3, 3, 4, 6_000, 12, 0.03, 0.03, 0.5, false, 0, false, false, false);
+            return new Options(3, 3, 4, 6_000, 12, 0.03, 0.03, 0.5, false, 0, false, false, false, false);
         }
     }
 
@@ -161,6 +163,12 @@ public final class SystemSimulation {
         public long crashesBetweenHardStateAndLog;
         /** Crashes of a leader whose appends of entries went out before they were durable locally. */
         public long appendsAheadOfACrash;
+        /** Crashes of a node that had appended entries whose sync had not ended. */
+        public long crashesWithUnsyncedAppends;
+        /** Entries appended while a sync of the log was running. */
+        public long appendsDuringSync;
+        /** Waits of a loop for a running sync before it wrote something else. */
+        public long syncsAwaited;
         public long partitions;
         public long dropped;
         public long duplicated;
@@ -206,6 +214,9 @@ public final class SystemSimulation {
             crashesInAnOperation += other.crashesInAnOperation;
             crashesBetweenHardStateAndLog += other.crashesBetweenHardStateAndLog;
             appendsAheadOfACrash += other.appendsAheadOfACrash;
+            crashesWithUnsyncedAppends += other.crashesWithUnsyncedAppends;
+            appendsDuringSync += other.appendsDuringSync;
+            syncsAwaited += other.syncsAwaited;
             partitions += other.partitions;
             dropped += other.dropped;
             duplicated += other.duplicated;
@@ -244,7 +255,9 @@ public final class SystemSimulation {
                     + leaderChanges + ", crashes "
                     + crashes + " (" + crashesInAnOperation + " in an operation, " + crashesBetweenHardStateAndLog
                     + " between hard state and log, " + appendsAheadOfACrash
-                    + " after appends ahead of the log), partitions " + partitions
+                    + " after appends ahead of the log, " + crashesWithUnsyncedAppends
+                    + " with appends not synced), appends during a sync " + appendsDuringSync
+                    + ", syncs awaited " + syncsAwaited + ", partitions " + partitions
                     + ", dropped " + dropped + ", duplicated " + duplicated + ", snapshots created/installed "
                     + snapshotsCreated + "/" + snapshotsInstalled + " (" + installsAroundALeaderChange
                     + " around a leader change), applied " + highestApplied
@@ -344,6 +357,10 @@ public final class SystemSimulation {
          * yet; -1 if there are none.
          */
         int appendsAheadFrom = -1;
+        /** Appends of entries left in an earlier step; they are not durable on this node yet. */
+        boolean appendsDelivered;
+        /** Runs the syncs of the log of the node if they run away from its loop. */
+        DeferredSyncer syncer;
 
         /** Whether the node is one of those that are meant to run. */
         boolean active() {
@@ -359,6 +376,8 @@ public final class SystemSimulation {
                 service.detach();
                 stats.snapshotsCreated += last.snapshotsCreated();
                 stats.slowDiskStepDowns += last.slowSyncStepDowns();
+                stats.appendsDuringSync += last.appendsDuringSync();
+                stats.syncsAwaited += last.syncsAwaited();
                 outbox.clear();
                 try {
                     last.close();
@@ -401,6 +420,11 @@ public final class SystemSimulation {
                     .deterministic(true).reserveSize(0).minFreeSpace(0).memTableSize(32 * 1024)
                     .blockCacheCapacity(1024 * 1024), SESSION_TIMEOUT), (to, frame) -> outbox.add(frame), service);
             service.attach(node);
+            syncer = null;
+            if (options.syncsAway()) {
+                syncer = new DeferredSyncer();
+                node.syncer(syncer);
+            }
             everOpened = true;
             if (trace != null) {
                 // A start after the first is a line of its own: it changes the state of the
@@ -450,8 +474,11 @@ public final class SystemSimulation {
             writeTrace(traced.size()); // what it did before it died is part of the run
             stats.snapshotsCreated += dead.snapshotsCreated();
             stats.slowDiskStepDowns += dead.slowSyncStepDowns();
+            stats.appendsDuringSync += dead.appendsDuringSync();
+            stats.syncsAwaited += dead.syncsAwaited();
             outbox.clear();
             appendsAheadFrom = -1;
+            appendsDelivered = false;
             if (crashFirst) {
                 memory.crash(random);
             }
@@ -567,6 +594,7 @@ public final class SystemSimulation {
         public void ready(Ready ready, HardState durableHardState, long durableLastIndex) {
             hardStateAheadOfLog = false;
             appendsAheadFrom = -1;
+            appendsDelivered = false;
             if (trace != null && !traced.isEmpty()) {
                 // A node makes the work of a Ready durable and tells its core before it shows
                 // the Ready: the step that handed it out is the one before that report. A
@@ -996,6 +1024,9 @@ public final class SystemSimulation {
             return;
         }
         try {
+            if (host.syncer != null && host.syncer.pending() && random.nextBoolean()) {
+                host.syncer.release(); // the node hears of it when it runs next
+            }
             while (host.node.runOnce()) {
                 // work the queue off
             }
@@ -1022,8 +1053,11 @@ public final class SystemSimulation {
             List<byte[]> left = options.leaks()
                     ? List.copyOf(host.outbox.subList(0, random.nextInt(host.outbox.size() + 1)))
                     : List.of();
-            if (host.appendsAheadFrom >= 0 && left.size() > host.appendsAheadFrom) {
+            if (host.appendsDelivered || host.appendsAheadFrom >= 0 && left.size() > host.appendsAheadFrom) {
                 stats.appendsAheadOfACrash++;
+            }
+            if (host.node.appendsUnsynced()) {
+                stats.crashesWithUnsyncedAppends++;
             }
             host.down(false);
             for (byte[] frame : left) {
@@ -1036,6 +1070,10 @@ public final class SystemSimulation {
         }
         List<byte[]> frames = new ArrayList<>(host.outbox);
         host.outbox.clear();
+        if (host.appendsAheadFrom >= 0) {
+            host.appendsDelivered = true; // they leave now, durable on this node or not
+            host.appendsAheadFrom = -1;
+        }
         for (byte[] frame : frames) {
             route(host.id, frame);
         }
@@ -1696,6 +1734,8 @@ public final class SystemSimulation {
             applied = host.node.store().appliedIndex();
             stats.snapshotsCreated += host.node.snapshotsCreated();
             stats.slowDiskStepDowns += host.node.slowSyncStepDowns();
+            stats.appendsDuringSync += host.node.appendsDuringSync();
+            stats.syncsAwaited += host.node.syncsAwaited();
             if (host.node.store().machine().engine().scrub() != 0) {
                 throw new AssertionError("after healing the state machine of node " + host.id + " is damaged");
             }
