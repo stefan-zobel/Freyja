@@ -1,8 +1,12 @@
 name: build
 
-# Started by hand only: Actions tab, workflow "build", "Run workflow".
+# Started by hand (Actions tab, workflow "build", "Run workflow") and once a week:
+# Fridays at 04:00 UTC, which is 05:00 Central European Time (06:00 in summer time).
+# GitHub may start a scheduled run some minutes late.
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 4 * * 5'
 
 permissions:
   contents: read
