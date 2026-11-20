@@ -33,6 +33,7 @@ freyja-admin()  { java --enable-preview -cp "$FREYJA_CP" io.github.sz.freyja.too
 node-verify()   { java --enable-preview -cp "$FREYJA_CP" io.github.sz.freyja.tools.NodeVerify "$@"; }
 backup-verify() { java --enable-preview -cp "$FREYJA_CP" io.github.sz.freyja.tools.BackupVerify "$@"; }
 freyja-bench()  { java --enable-preview -XX:+UseZGC -cp "$FREYJA_CP" io.github.sz.freyja.bench.FreyjaBench "$@"; }
+freyja-cli()    { java --enable-preview -cp "$FREYJA_CP" io.github.sz.freyja.tools.FreyjaCli "$@"; }
 ```
 
 **The example cluster.** Cluster id `1f`. Node `N` runs on `10.0.0.1N` and listens for peers

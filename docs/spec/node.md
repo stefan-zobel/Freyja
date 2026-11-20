@@ -685,3 +685,11 @@ Details:
   session does not expire. If the session has expired all the same, the next command opens a
   new one.
 - Closing the client ends its session.
+
+The command-line tool of a user (`FreyjaCli` in `kv-tools`) does one thing through a client
+of its own and closes it: `put KEY VALUE`, `get KEY`, `delete KEY`, `scan [START [END]]`
+(at most `--limit` pairs, default 100, one `KEY<tab>VALUE` per line). Keys and values are
+UTF-8 text, or hexadecimal with `--hex`. `--stale` reads from whatever node answers first.
+TLS with `--tls-trust`, and `--tls-key` or `--token-file` (the token in the first line).
+Exit code 0: done; 1: not reached, refused, timed out, or the outcome of a write is unknown,
+which it says; 2: wrong usage; 3: `get` found no value.

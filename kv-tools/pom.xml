@@ -55,12 +55,11 @@
             <artifactId>kv-node</artifactId>
             <version>${project.version}</version>
         </dependency>
-        <!-- The end-to-end test drives a cluster of processes with the client library. -->
+        <!-- FreyjaCli reads and writes through the client library. -->
         <dependency>
             <groupId>io.github.stefan-zobel</groupId>
             <artifactId>kv-client</artifactId>
             <version>${project.version}</version>
-            <scope>test</scope>
         </dependency>
         <!-- The external fault suite checks its histories with the checker of the simulator. -->
         <dependency>

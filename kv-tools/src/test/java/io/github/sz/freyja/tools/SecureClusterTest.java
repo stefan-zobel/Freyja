@@ -163,6 +163,14 @@ class SecureClusterTest {
         return code + "\n" + bytes.toString(StandardCharsets.UTF_8);
     }
 
+    /** Runs the tool of a user: its exit code, then its output. */
+    private static String cli(String... args) {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        PrintStream out = new PrintStream(bytes, true, StandardCharsets.UTF_8);
+        int code = FreyjaCli.run(args, out, out);
+        return (code + "\n" + bytes.toString(StandardCharsets.UTF_8)).replace("\r\n", "\n").strip();
+    }
+
     /** Runs the tool as an administrator with a certificate. */
     private String admin(int port, String... command) {
         List<String> args = new ArrayList<>(List.of("--tls-key", adminKey.toString(), "--tls-trust",
@@ -284,6 +292,17 @@ class SecureClusterTest {
             assertEquals("written with a token",
                     new String(certified.get(b("key")).orElseThrow().value(), StandardCharsets.UTF_8));
         }
+        // The tool of a user, with a certificate and with a token.
+        Path tokenFile = directory.resolve("token-of-a-user");
+        Files.writeString(tokenFile, FIRST_TOKEN + "\n");
+        String stores = certificates.passwordFile().toString();
+        String cluster = String.join(",", endpoints());
+        assertEquals("0\nok", cli("--tls-trust", trust.toString(), "--tls-key", clientKey.toString(),
+                "--tls-password-file", stores, "--tls-name", "OU=node", cluster, "put", "cli", "with a certificate"));
+        assertEquals("0\nwith a certificate", cli("--tls-trust", trust.toString(), "--tls-password-file", stores,
+                "--token-file", tokenFile.toString(), cluster, "get", "cli"));
+        assertTrue(cli("--tls-trust", trust.toString(), "--tls-password-file", stores, "--timeout-ms", "1500",
+                cluster, "get", "cli").startsWith("1\nerror: "), "neither a certificate nor a token");
         assertTrue(served(clientKey, null));
         assertTrue(served(null, FIRST_TOKEN));
         assertTrue(!served(null, null), "neither a certificate nor a token");
