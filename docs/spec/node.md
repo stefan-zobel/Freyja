@@ -31,6 +31,16 @@ The runtime:
 - A node that stops (a failure of storage, a damaged state machine) is closed and started
   again from what is on disk after a pause. Requests that waited are answered as
   unavailable. A node that has lost its identity ends the runtime for good.
+- A node runs with ZGC (`-XX:+UseZGC`) and a heap of fixed size (`-Xms` equal to `-Xmx`).
+  The code relies on no particular collector; this is a setting of the process
+  (`docs/runbook.md`). Under G1 the pauses of the collector were the largest part of the
+  tail that was left once the cluster was warm: at 4,000 writes per second (three nodes
+  with heaps of 1 GiB on one machine under Linux), each node paused 40 to 80 times in a
+  run of 75 seconds, up to 70 ms, and the p99.9 latency of three runs was 59, 61, and
+  135 ms. Under ZGC no pause took longer than 0.2 ms, and the p99.9 latency of three runs
+  was 41 to 48 ms, with the same throughput and about the same CPU time. The price is memory: the heap is
+  resident from the start, 1.0 to 1.4 GiB per node in those runs against 0.6 to 0.7 GiB
+  under G1 with a heap that grew as needed.
 - Structured concurrency, a preview feature of the JDK, is used in one class only
   (`node.concurrent.Scopes`): an accept loop whose connections never outlive the listener,
   and the two halves of a connection that end together.

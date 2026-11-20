@@ -32,7 +32,7 @@ freyja-node()   { java --enable-preview -cp "$FREYJA_CP" io.github.sz.freyja.nod
 freyja-admin()  { java --enable-preview -cp "$FREYJA_CP" io.github.sz.freyja.tools.FreyjaAdmin $FREYJA_ADMIN_TLS "$@"; }
 node-verify()   { java --enable-preview -cp "$FREYJA_CP" io.github.sz.freyja.tools.NodeVerify "$@"; }
 backup-verify() { java --enable-preview -cp "$FREYJA_CP" io.github.sz.freyja.tools.BackupVerify "$@"; }
-freyja-bench()  { java --enable-preview -cp "$FREYJA_CP" io.github.sz.freyja.bench.FreyjaBench "$@"; }
+freyja-bench()  { java --enable-preview -XX:+UseZGC -cp "$FREYJA_CP" io.github.sz.freyja.bench.FreyjaBench "$@"; }
 ```
 
 **The example cluster.** Cluster id `1f`. Node `N` runs on `10.0.0.1N` and listens for peers
@@ -49,7 +49,7 @@ After=network-online.target
 
 [Service]
 User=freyja
-ExecStart=/usr/bin/java --enable-preview -Xmx4g -cp '/opt/freyja/lib/*' io.github.sz.freyja.node.FreyjaNode run \
+ExecStart=/usr/bin/java --enable-preview -XX:+UseZGC -Xms4g -Xmx4g -cp '/opt/freyja/lib/*' io.github.sz.freyja.node.FreyjaNode run \
   --data /var/lib/freyja \
   --peer 10.0.0.10:7100 --client 10.0.0.10:7200 --admin 10.0.0.10:7300 --status 10.0.0.10:7400 \
   --seed 0=10.0.0.10:7100 --seed 1=10.0.0.11:7100 --seed 2=10.0.0.12:7100 \
@@ -64,6 +64,10 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 ```
+
+A node runs with ZGC and a heap of fixed size (`docs/spec/node.md` §1). The whole heap is
+resident from the start: the machine needs that much memory besides what the operating
+system keeps for its file cache.
 
 A node stops on `SIGTERM` and closes its files. It is safe to kill it any other way: it
 recovers from its files at the next start.

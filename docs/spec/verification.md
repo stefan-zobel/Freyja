@@ -720,6 +720,8 @@ The load generator (`FreyjaBench` in `kv-bench`):
   a full load at once, including the warm-up of its code; at 4000 requests per second the first
   two seconds held from a third to most of the responses of a run that took 30 ms or more. The result names the warm-up
   (`warmup.load.seconds`), and runs with and without one are not compared with each other.
+- The generator runs with ZGC, as the nodes do (`node.md` §1). Its own pauses count as
+  latency of the cluster: under G1 they took up to 66 ms at 4,000 requests per second.
 - If the clients cannot keep up, requests wait and their latencies grow. Beyond five seconds
   of load in the queue, further requests are counted as shed and not sent: the generator is
   bounded too.
