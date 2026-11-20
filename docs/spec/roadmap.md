@@ -141,6 +141,10 @@ Rules:
     the recovery from a lost majority (`operations.md` §3).
   - The runbook (`docs/runbook.md`): every procedure but the upgrade carried out with node
     processes on one machine.
+  - The guard of the finalization: nodes name the highest cluster version they support in
+    their handshakes, the leader raises the cluster version only to one every member
+    supports, and a node ends in a cluster whose version its release does not support
+    (`operations.md` §6).
   - Open: the upgrade procedure and the compatibility suite, which need a second release;
     the execution of the runbook on a real cluster.
 
@@ -149,11 +153,7 @@ Rules:
 Everything that is not done, in one place. The milestones above say what is done. An item
 leaves this list in the change that completes it.
 
-**Work that can be done on the development machine:**
-
-| Item | Milestone | Notes |
-|---|---|---|
-| The guard of the finalization: `set-version` is refused unless every member supports the version | E3 | `operations.md` §6; members do not tell the leader yet which versions they support |
+**Work that can be done on the development machine:** none.
 
 **Work that needs Linux:**
 

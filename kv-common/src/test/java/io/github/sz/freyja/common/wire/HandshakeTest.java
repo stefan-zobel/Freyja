@@ -11,6 +11,7 @@ import java.util.Arrays;
 import org.junit.jupiter.api.Test;
 
 import io.github.sz.freyja.common.DecodeException;
+import io.github.sz.freyja.common.Version;
 
 /** The first frame of a connection (docs/spec/node.md, section 8). */
 class HandshakeTest {
@@ -20,6 +21,9 @@ class HandshakeTest {
         Handshake peer = new Handshake(Handshake.PEER, 0xABCDEFL, 3, "1.0");
         assertEquals(peer, Handshake.decode(peer.encode()));
         assertEquals("", peer.token());
+        assertEquals(Version.CLUSTER, peer.clusterVersion());
+        Handshake newer = new Handshake(Handshake.PEER, 0xABCDEFL, 3, "2.0", 7);
+        assertEquals(7, Handshake.decode(newer.encode()).clusterVersion());
         Handshake client = new Handshake(Handshake.CLIENT, 0, -1, "1.0", "a token of sixteen bytes or more");
         assertEquals(client, Handshake.decode(client.encode()));
         Handshake longest = new Handshake(Handshake.ADMIN, -1L, -1, "v".repeat(255), "t".repeat(255));
@@ -29,9 +33,10 @@ class HandshakeTest {
 
     @Test
     void theBytesAreTheOnesTheSpecificationNames() {
-        byte[] frame = new Handshake(Handshake.CLIENT, 0x0102030405060708L, 0x0A0B0C0D, "ab", "xyz").encode();
+        byte[] frame = new Handshake(Handshake.CLIENT, 0x0102030405060708L, 0x0A0B0C0D, "ab", 0x01020304, "xyz")
+                .encode();
         assertArrayEquals(new byte[] {'F', 'R', 'Y', 'A', 1, 2, 8, 7, 6, 5, 4, 3, 2, 1, 0x0D, 0x0C, 0x0B, 0x0A, 2,
-                'a', 'b', 3, 'x', 'y', 'z'}, Arrays.copyOf(frame, frame.length - 4));
+                'a', 'b', 4, 3, 2, 1, 3, 'x', 'y', 'z'}, Arrays.copyOf(frame, frame.length - 4));
     }
 
     @Test
@@ -49,6 +54,7 @@ class HandshakeTest {
         assertThrows(DecodeException.class, () -> Handshake.decode(Arrays.copyOf(good, good.length + 1)));
         assertThrows(IllegalArgumentException.class, () -> new Handshake(Handshake.CLIENT, 0, -1, "1", "t".repeat(256)));
         assertThrows(IllegalArgumentException.class, () -> new Handshake(0, 0, -1, "1"));
+        assertThrows(IllegalArgumentException.class, () -> new Handshake(Handshake.PEER, 0, 1, "1", -1));
     }
 
     @Test

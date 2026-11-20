@@ -37,7 +37,9 @@ import io.github.sz.freyja.raft.ProtocolState;
  *
  * <p>A node that stops after a failure of storage, or to give up a damaged state machine, is
  * started again from what is on disk, after a pause. A node that has lost its identity is not
- * started again: the runtime ends, and the member must be replaced.
+ * started again: the runtime ends, and the member must be replaced. The runtime ends as well if
+ * the cluster runs a cluster version that the software of the node does not support; the node
+ * must be started with a release that does (docs/spec/operations.md, section 6).
  */
 public final class NodeRuntime implements Closeable {
 
@@ -79,6 +81,13 @@ public final class NodeRuntime implements Closeable {
 
     /** A request of an administrator on its way to the thread of the node. */
     private record AdminCall(byte[] frame, ClientService.Reply reply) {
+    }
+
+    /** The cluster runs a cluster version that the software of this node does not support. */
+    private static final class UnsupportedClusterVersion extends RuntimeException {
+        UnsupportedClusterVersion(String message) {
+            super(message);
+        }
     }
 
     /** A call that runs on the thread of the node. */
@@ -140,6 +149,7 @@ public final class NodeRuntime implements Closeable {
             throw new IllegalStateException("the runtime was started already");
         }
         this.transport = transport;
+        admin.clusterVersions(transport::clusterVersionOf);
         // If the queue is full, the thread does not wait and needs no waking.
         syncs = new SyncThread("freyja-sync", () -> inbound.offer(SYNCED));
         thread = Thread.ofPlatform().name("freyja-node").start(this::run);
@@ -223,6 +233,7 @@ public final class NodeRuntime implements Closeable {
                 while (node.runOnce()) {
                     // work the queue of the node off
                 }
+                checkClusterVersion();
                 service.afterStep();
                 passAddressesOn();
                 metrics.duration("node.loop", clock.nanoTime() - busy);
@@ -244,6 +255,10 @@ public final class NodeRuntime implements Closeable {
                 fatal = e;
                 LOG.log(System.Logger.Level.ERROR, "the node has lost its identity and does not run again;"
                         + " replace the member: " + e.getMessage());
+                break;
+            } catch (UnsupportedClusterVersion e) {
+                fatal = e;
+                LOG.log(System.Logger.Level.ERROR, "the node does not run again: " + e.getMessage());
                 break;
             } catch (IOException | RuntimeException e) {
                 // The node has stopped. It is started again from what is on disk.
@@ -274,12 +289,27 @@ public final class NodeRuntime implements Closeable {
         node.syncer(syncs);
         service.attach(node);
         admin.attach(node, restarts);
+        checkClusterVersion();
         running = true;
         LOG.log(System.Logger.Level.INFO, "node " + node.identity().nodeId() + " of cluster "
                 + Long.toHexString(node.identity().clusterId()) + " started: " + node.view() + ", applied "
                 + node.store().appliedIndex()
                 + (node.repairedAtStart() ? "; its state machine was damaged and is being rebuilt" : "")
                 + (node.lostTailWitnessed() ? "; its log had lost entries that were synced" : ""));
+    }
+
+    /**
+     * Ends the runtime if the cluster version that the state machine has applied is higher than
+     * the software of this node supports: at the start, and whenever the node has worked.
+     */
+    private void checkClusterVersion() {
+        int supported = transport.clusterVersionOf(node.identity().nodeId());
+        int cluster = node.store().machine().clusterVersion();
+        if (supported >= 0 && cluster > supported) {
+            throw new UnsupportedClusterVersion("the cluster runs cluster version " + cluster
+                    + ", and this software supports cluster versions up to " + supported
+                    + "; start the node with a release that supports it");
+        }
     }
 
     /**
@@ -443,7 +473,10 @@ public final class NodeRuntime implements Closeable {
         return running;
     }
 
-    /** Why the runtime has ended for good, or {@code null}: the node has lost its identity. */
+    /**
+     * Why the runtime has ended for good, or {@code null}: the node has lost its identity, or
+     * the cluster runs a cluster version that its software does not support.
+     */
     public Throwable fatal() {
         return fatal;
     }

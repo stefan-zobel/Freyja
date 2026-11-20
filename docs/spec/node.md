@@ -546,13 +546,19 @@ repair on the one path that is verified for a node that has lost what it acknowl
 - Length-prefixed binary frames over TCP, one virtual thread per connection.
   - A frame is its length (`uint32`, little-endian) and its bytes. A frame longer than the
     limit of its listener (16 MiB between nodes, 8 MiB from clients) ends the connection.
-- A connection starts with a handshake: protocol version, cluster id, node id (peers), and
-  the software version. A node rejects peers of another cluster.
+- A connection starts with a handshake: protocol version, cluster id, node id (peers), the
+  software version, and the highest cluster version that software supports. A node rejects
+  peers of another cluster.
   - The handshake is the first frame in both directions; the side that connects speaks
     first: magic `FRYA` (`uint32`), protocol (`uint8`, 1), role (`uint8`: 1 peer, 2 client,
     3 administrator), cluster id (`uint64`), node id (`uint32`; all bits set from a client
-    or an administrator), software version (length `uint8`, UTF-8), token (length `uint8`,
-    UTF-8), CRC32C (`uint32`).
+    or an administrator), software version (length `uint8`, UTF-8), the highest cluster
+    version the software supports (`uint32`), token (length `uint8`, UTF-8), CRC32C
+    (`uint32`).
+  - A node remembers the cluster version each peer named in its latest handshake, in either
+    direction. A peer that is started with other software connects anew and names its new
+    one. The leader decides from it whether the cluster version may be raised
+    (`operations.md` §6).
   - The token is what a client without a certificate proves itself with
     (`operations.md` §5). It is empty from everybody else and in every answer.
   - With TLS, the TLS handshake comes first, and the handshake of the protocol is the first

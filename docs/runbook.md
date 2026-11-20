@@ -299,10 +299,9 @@ whole cluster.
 ## 5. Rolling Upgrade, Finalization, and Downgrade
 
 **Not executable yet:** it needs a second release. The transfer of leadership, the restart
-of one node at a time, and raising the cluster version were tried with one release.
-**Known gap:** the guard of the finalization (`docs/spec/operations.md` §6: refused unless
-every member runs the new release) is not implemented. `set-version` takes any higher
-version. Raise the cluster version only to a version that every member supports.
+of one node at a time, and raising the cluster version were tried with one release. The
+refusal of a cluster version that not every member supports is tested with nodes in one
+process (`AdminClusterTest`), not yet with node processes.
 
 1. Before: every member is `ok`, a backup is taken (procedure 6), and the release notes say
    which cluster version the new release introduces.
@@ -335,7 +334,19 @@ version. Raise the cluster version only to a version that every member supports.
    ```
    From then on the new release writes its new formats, and there is no way back: a lower
    version is refused (`refused: cluster version 1 was refused by the state machine: the
-   cluster version is higher already`).
+   cluster version is higher already`), and a node started with the old release ends at
+   once (its `/health` says `the node has ended for good: the cluster runs cluster version
+   2, and this software supports cluster versions up to 1; ...`).
+
+   The leader refuses the version if a member does not support it yet, has not been heard
+   from lately, or has not said what it supports; nothing is proposed then. For example:
+
+   ```
+   refused: cluster version 2 was refused: node 2 supports cluster versions up to 1; every
+   member must run a release that supports it
+   ```
+   Upgrade that member (step 2) and try again. A member that cannot be upgraded is removed
+   first.
 
 ## 6. Backup, Verify, and Restore
 

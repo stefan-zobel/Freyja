@@ -6,6 +6,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
+import java.util.function.IntUnaryOperator;
 
 import io.github.sz.freyja.common.DecodeException;
 import io.github.sz.freyja.common.Version;
@@ -40,6 +41,10 @@ import io.github.sz.freyja.raft.SnapshotMeta;
  * taken effect, which the status shows. A command for the state machine (an alarm, the cluster
  * version, an address) is answered when this node has applied it, with what it did.
  *
+ * <p>Only the leader raises the cluster version, and only to a version that every member
+ * supports (docs/spec/operations.md, section 6). What a member supports is the highest
+ * cluster version it named in its latest handshake with this node.
+ *
  * <p>The service runs on the thread of the node and is told what the node reports.
  */
 public final class AdminService implements NodeListener {
@@ -62,6 +67,13 @@ public final class AdminService implements NodeListener {
     private Node node;
     private long restarts;
     private long nextId = FIRST_ID;
+    /** The highest cluster version the software of a node supports; -1 if not known. */
+    private IntUnaryOperator clusterVersions = member -> -1;
+
+    /** Where this service learns which cluster versions the members support. */
+    public void clusterVersions(IntUnaryOperator clusterVersionOf) {
+        this.clusterVersions = clusterVersionOf;
+    }
 
     /** The node this service serves from now on. */
     public void attach(Node node, long restarts) {
@@ -142,9 +154,15 @@ public final class AdminService implements NodeListener {
                     "a backup copies files and is made beside the node, not on its thread", -1)));
             case AdminRequest.ClearSpaceAlarm _ -> command(new Waiting(id, reply, "the clearing of the alarm"),
                     new Command.ClearAlarm(Command.Alarm.NOSPACE));
-            case AdminRequest.SetClusterVersion version -> command(
-                    new Waiting(id, reply, "cluster version " + version.version()),
-                    new Command.SetClusterVersion(version.version()));
+            case AdminRequest.SetClusterVersion version -> {
+                Refused refused = unsupported(version.version());
+                if (refused != null) {
+                    reply.send(AdminCodec.encode(id, refused));
+                } else {
+                    command(new Waiting(id, reply, "cluster version " + version.version()),
+                            new Command.SetClusterVersion(version.version()));
+                }
+            }
             case AdminRequest.SetAddress address -> command(
                     new Waiting(id, reply, "the address of node " + address.nodeId()),
                     new Command.SetAddress(address.nodeId(), address.peerAddress(), address.clientAddress()));
@@ -208,6 +226,48 @@ public final class AdminService implements NodeListener {
             waiting.remove(id);
             send(w, new Refused("the node has too much to do", -1));
         }
+    }
+
+    /**
+     * Why the cluster version may not be raised to {@code version} now, or {@code null}. It may
+     * at the leader, and only if every member supports it: the leader itself, and every other
+     * member that the leader has heard from lately and that named a high enough version in
+     * its latest handshake. A version that is not higher than the present one goes to the
+     * state machine, which says what it does with it.
+     */
+    private Refused unsupported(int version) {
+        ProtocolState state = node.view();
+        String what = "cluster version " + version + " was refused: ";
+        if (!state.role().name().equals("LEADER")) {
+            return new Refused(what + "this node is not the leader", state.leaderId());
+        }
+        KvStateMachine machine = node.store().machine();
+        if (version <= machine.clusterVersion()) {
+            return null;
+        }
+        TreeSet<Integer> members = new TreeSet<>(state.config().voters());
+        members.addAll(state.config().learners());
+        members.addAll(machine.config().voters());
+        members.addAll(machine.config().learners());
+        Map<Integer, PeerProgress> peers = new HashMap<>();
+        for (PeerProgress peer : node.peers()) {
+            peers.put(peer.nodeId(), peer);
+        }
+        List<String> problems = new ArrayList<>();
+        for (int member : members) {
+            int supported = clusterVersions.applyAsInt(member);
+            PeerProgress peer = peers.get(member);
+            if (member != state.nodeId() && (peer == null || !peer.active())) {
+                problems.add("node " + member + " has not been heard from lately");
+            } else if (supported < 0) {
+                problems.add("node " + member + " has not said which cluster versions it supports");
+            } else if (supported < version) {
+                problems.add("node " + member + " supports cluster versions up to " + supported);
+            }
+        }
+        return problems.isEmpty() ? null
+                : new Refused(what + String.join("; ", problems) + "; every member must run a release that"
+                        + " supports it", -1);
     }
 
     private Status status() {

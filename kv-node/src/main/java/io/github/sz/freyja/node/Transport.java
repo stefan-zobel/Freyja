@@ -11,4 +11,12 @@ public interface Transport {
 
     /** Sends one encoded message to a node. A message that cannot be sent is dropped. */
     void send(int toNode, byte[] message);
+
+    /**
+     * The highest cluster version the software of a node supports, as that node said in its
+     * latest handshake with this one, or this node itself; -1 if not known.
+     */
+    default int clusterVersionOf(int node) {
+        return -1;
+    }
 }

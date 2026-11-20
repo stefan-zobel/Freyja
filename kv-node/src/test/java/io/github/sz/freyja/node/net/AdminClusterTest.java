@@ -19,8 +19,8 @@ import io.github.sz.freyja.common.admin.AdminResponse.Member;
 
 /**
  * The requests of an administrator against three running nodes (docs/spec/operations.md,
- * section 1): what the status says of the members, and which changes of the membership a
- * leader refuses.
+ * section 1): what the status says of the members, which changes of the membership a leader
+ * refuses, and when it raises the cluster version (section 6).
  */
 @Timeout(value = 120, unit = TimeUnit.SECONDS)
 class AdminClusterTest {
@@ -90,7 +90,7 @@ class AdminClusterTest {
 
     @Test
     void aChangeThatWouldLeaveNoMajorityOfVotersThatAreWellIsRefused() throws IOException {
-        cluster = new TcpCluster(60_000);
+        cluster = new TcpCluster(60_000, 2);
         TcpCluster.Server leader = leader();
         TcpCluster.Server quiet = cluster.servers.get((leader.id + 1) % 3);
         TcpCluster.Server well = cluster.servers.get((leader.id + 2) % 3);
@@ -127,5 +127,67 @@ class AdminClusterTest {
         assertTrue(down.reason().contains("higher already"), down.reason());
         assertTrue(assertInstanceOf(AdminResponse.Done.class, ask(leader, new AdminRequest.SetAddress(well.id,
                 "127.0.0.1:1", "127.0.0.1:2"))).detail().contains("is applied"));
+    }
+
+    @Test
+    void theClusterVersionIsRaisedOnlyToAVersionThatEveryMemberSupports() throws IOException {
+        cluster = new TcpCluster(60_000, 2);
+        TcpCluster.Server leader = leader();
+        TcpCluster.Server old = cluster.servers.get((leader.id + 1) % 3);
+        TcpCluster.Server other = cluster.servers.get((leader.id + 2) % 3);
+        TcpCluster.await("the leader has heard from both followers", () -> status(leader).members().stream()
+                .allMatch(m -> m.state().equals(Member.OK)));
+
+        // Only the leader knows what every member supports.
+        AdminResponse.Refused elsewhere = assertInstanceOf(AdminResponse.Refused.class,
+                ask(other, new AdminRequest.SetClusterVersion(2)));
+        assertTrue(elsewhere.reason().contains("not the leader"), elsewhere.reason());
+        assertEquals(leader.id, elsewhere.leaderId());
+
+        // No member runs a release that supports version 3, not even the leader.
+        AdminResponse.Refused unknown = assertInstanceOf(AdminResponse.Refused.class,
+                ask(leader, new AdminRequest.SetClusterVersion(3)));
+        assertTrue(unknown.reason().contains("node " + leader.id + " supports cluster versions up to 2"),
+                unknown.reason());
+
+        // One member is started again with a release that knows version 1 only.
+        cluster.clusterVersions[old.id] = 1;
+        old.stop();
+        old.restart();
+        TcpCluster.await("the leader knows what the member runs now", () -> leader.transport.clusterVersionOf(old.id)
+                == 1 && status(leader).members().stream().allMatch(m -> m.state().equals(Member.OK)));
+        AdminResponse.Refused older = assertInstanceOf(AdminResponse.Refused.class,
+                ask(leader, new AdminRequest.SetClusterVersion(2)));
+        assertTrue(older.reason().contains("node " + old.id + " supports cluster versions up to 1"), older.reason());
+        assertTrue(older.reason().contains("every member must run a release"), older.reason());
+
+        // A member that is silent cannot say what it runs.
+        cluster.clusterVersions[old.id] = 2;
+        old.stop();
+        TcpCluster.await("the leader notices the silence", () -> status(leader).members().stream()
+                .anyMatch(m -> m.nodeId() == old.id && m.state().equals(Member.SILENT)));
+        AdminResponse.Refused silent = assertInstanceOf(AdminResponse.Refused.class,
+                ask(leader, new AdminRequest.SetClusterVersion(2)));
+        assertTrue(silent.reason().contains("node " + old.id + " has not been heard from lately"), silent.reason());
+        assertEquals(1, status(leader).clusterVersion(), "nothing was proposed");
+
+        // Every member runs a release that supports version 2.
+        old.restart();
+        TcpCluster.await("the member is back with the new release", () -> leader.transport.clusterVersionOf(old.id)
+                == 2 && status(leader).members().stream().allMatch(m -> m.state().equals(Member.OK)));
+        AdminResponse.Done done = assertInstanceOf(AdminResponse.Done.class,
+                ask(leader, new AdminRequest.SetClusterVersion(2)));
+        assertTrue(done.detail().contains("is applied"), done.detail());
+        TcpCluster.await("every member has applied it", () -> cluster.servers.stream()
+                .allMatch(s -> status(s).clusterVersion() == 2));
+
+        // There is no way back: a member started with the old release does not run any more.
+        cluster.clusterVersions[old.id] = 1;
+        old.stop();
+        old.restart();
+        TcpCluster.await("the member has ended", () -> old.runtime.fatal() != null);
+        assertTrue(old.runtime.fatal().getMessage().contains("the cluster runs cluster version 2, and this"
+                + " software supports cluster versions up to 1"), old.runtime.fatal().getMessage());
+        assertTrue(old.runtime.notAlive().contains("ended for good"), old.runtime.notAlive());
     }
 }

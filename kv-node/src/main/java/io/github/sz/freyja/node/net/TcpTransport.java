@@ -20,6 +20,7 @@ import io.github.sz.freyja.common.DecodeException;
 import io.github.sz.freyja.common.wire.Frames;
 import io.github.sz.freyja.common.wire.Handshake;
 import io.github.sz.freyja.common.LittleEndian;
+import io.github.sz.freyja.common.Version;
 import io.github.sz.freyja.common.tls.Tls;
 import io.github.sz.freyja.node.Transport;
 import io.github.sz.freyja.node.concurrent.Scopes;
@@ -29,7 +30,8 @@ import io.github.sz.freyja.node.concurrent.Scopes;
  *
  * <p>Every node keeps one connection to each peer it sends to, and accepts one from each
  * peer that sends to it. A connection starts with a handshake in both directions; a peer of
- * another cluster is turned away. Frames are length-prefixed.
+ * another cluster is turned away. The transport remembers the highest cluster version each
+ * peer named in its latest handshake. Frames are length-prefixed.
  *
  * <p>With TLS, both sides of a connection show a certificate, and each checks that of the
  * other before the handshake of the protocol (docs/spec/operations.md, section 5).
@@ -125,7 +127,8 @@ public final class TcpTransport implements Transport, Closeable {
                 fresh.setSoTimeout(options.handshakeTimeoutMillis());
                 Socket secured = tls == null ? fresh : tls.connect(fresh, address.getHostString(), address.getPort());
                 OutputStream stream = new BufferedOutputStream(secured.getOutputStream(), 64 * 1024);
-                Frames.write(stream, new Handshake(Handshake.PEER, clusterId, nodeId, software).encode());
+                Frames.write(stream, new Handshake(Handshake.PEER, clusterId, nodeId, software, clusterVersion)
+                        .encode());
                 stream.flush();
                 byte[] answer = Frames.read(secured.getInputStream(), Handshake.MAX_BYTES);
                 if (answer == null) {
@@ -136,6 +139,7 @@ public final class TcpTransport implements Transport, Closeable {
                     throw new IOException("the node at " + address + " is node " + other.nodeId() + " of cluster "
                             + Long.toHexString(other.clusterId()) + ", not node " + peer + " of this cluster");
                 }
+                peerVersions.put(peer, other.clusterVersion());
                 fresh.setSoTimeout(0);
                 socket = secured;
                 out = stream;
@@ -162,6 +166,9 @@ public final class TcpTransport implements Transport, Closeable {
     private final long clusterId;
     private final int nodeId;
     private final String software;
+    private final int clusterVersion;
+    /** The highest cluster version each peer named in its latest handshake. */
+    private final Map<Integer, Integer> peerVersions = new ConcurrentHashMap<>();
     private final Options options;
     private final Consumer<byte[]> inbound;
     private final Tls tls;
@@ -190,10 +197,22 @@ public final class TcpTransport implements Transport, Closeable {
      */
     public TcpTransport(long clusterId, int nodeId, String software, Options options, Consumer<byte[]> inbound,
                         Tls tls) {
+        this(clusterId, nodeId, software, Version.CLUSTER, options, inbound, tls);
+    }
+
+    /**
+     * @param inbound takes every frame that a peer of this cluster sends; called from the
+     *                thread of its connection, it must not block
+     * @param tls     TLS between the nodes; {@code null} for none
+     * @param clusterVersion the highest cluster version the software of this node supports
+     */
+    public TcpTransport(long clusterId, int nodeId, String software, int clusterVersion, Options options,
+                        Consumer<byte[]> inbound, Tls tls) {
         this.tls = tls;
         this.clusterId = clusterId;
         this.nodeId = nodeId;
         this.software = software;
+        this.clusterVersion = clusterVersion;
         this.options = options;
         this.inbound = inbound;
     }
@@ -272,10 +291,11 @@ public final class TcpTransport implements Transport, Closeable {
             return; // not a peer of this cluster
         }
         OutputStream out = socket.getOutputStream();
-        Frames.write(out, new Handshake(Handshake.PEER, clusterId, nodeId, software).encode());
+        Frames.write(out, new Handshake(Handshake.PEER, clusterId, nodeId, software, clusterVersion).encode());
         out.flush();
         raw.setSoTimeout(0);
         int peer = other.nodeId();
+        peerVersions.put(peer, other.clusterVersion());
         for (byte[] frame = Frames.read(in, options.maxFrameBytes()); frame != null && !closed;
                 frame = Frames.read(in, options.maxFrameBytes())) {
             // Every message between nodes names its sender in the same place. A frame that
@@ -287,6 +307,11 @@ public final class TcpTransport implements Transport, Closeable {
                 refused.incrementAndGet();
             }
         }
+    }
+
+    @Override
+    public int clusterVersionOf(int node) {
+        return node == nodeId ? clusterVersion : peerVersions.getOrDefault(node, -1);
     }
 
     /** The port the transport listens on; -1 if it does not listen. */

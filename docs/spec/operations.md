@@ -39,6 +39,8 @@ in `kv-common`.
   address) goes to the leader and is answered when that node has applied it, with what it
   did: a cluster version below the present one is refused there. If another entry takes its
   place, the answer says that it was lost with a change of the leader.
+- A higher cluster version is checked before it is proposed (§6): only the leader takes it,
+  and only if every member supports it.
 - Add learner is two entries: where the node listens, then the node as a learner.
 - A node that stops while a change waits says so; the change may be in the log.
 - **Members in the status.** The leader says of every member how far its log is known to
@@ -301,11 +303,23 @@ address of the node: `--tls-key FILE --tls-trust FILE [--tls-password-file FILE]
 - **Rolling upgrade:** replace the software node by node; move leadership away first. During
   this phase every node behaves as the old release: no new message types, no new command
   types, no new file-format versions.
-- **Finalize:** an explicit admin action that raises the cluster version through the log. It
-  is refused unless every member runs the new release. Only afterward are new formats written
-  and new messages sent.
+- Every release names the highest cluster version it supports, and every node names that
+  version in its handshakes (`node.md` §8).
+- **Finalize:** an explicit admin action (`set-version V`) that raises the cluster version
+  through the log. Only afterward are new formats written and new messages sent. It is
+  refused unless every member runs a release that supports the version:
+  - A node that is not the leader refuses it and names the leader.
+  - The leader refuses it if its own release does not support the version, and for every
+    other member (voters and learners) that it has not heard from lately, that has not
+    named a cluster version, or whose latest handshake named a lower one. The answer names
+    each such member and what it supports.
+  - Nothing is proposed then. There is no way to force it: a member that cannot be upgraded
+    is removed first.
 - **Downgrade** is possible until finalization and impossible after it.
-- A node refuses to join a cluster whose cluster version it does not support.
+- A node refuses to run in a cluster whose cluster version it does not support: when it
+  starts, and as soon as it has applied a higher cluster version or installed a snapshot
+  with one, its runtime ends for good (`/health` says why). It runs again when it is started
+  with a release that supports the version.
 
 ## 7. Deployment Requirements
 
@@ -340,5 +354,3 @@ What the procedures rest on and the spec does not say elsewhere:
   cluster and gets its own set the same way.
 - A node id is used once. A member that is lost is replaced by a node with a new id, which
   is added before the lost one is removed.
-- The guard of the finalization (§6) is not implemented yet: `set-version` takes any higher
-  cluster version.

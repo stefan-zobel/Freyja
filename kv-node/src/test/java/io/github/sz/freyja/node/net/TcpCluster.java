@@ -61,8 +61,8 @@ final class TcpCluster implements Closeable {
             runtime = new NodeRuntime(memory, new NodeRuntime.Config(DATA, options, machine,
                     ClientService.Options.defaults(), 20, 4096, 50, System::currentTimeMillis,
                     node -> "127.0.0.1:" + clientPorts[node], null));
-            transport = new TcpTransport(CLUSTER, id, Version.SOFTWARE, new TcpTransport.Options(16 << 20, 1024,
-                    1_000, 50, 2_000), runtime::peerFrame);
+            transport = new TcpTransport(CLUSTER, id, Version.SOFTWARE, clusterVersions[id],
+                    new TcpTransport.Options(16 << 20, 1024, 1_000, 50, 2_000), runtime::peerFrame, null);
             peerPorts[id] = transport.listen(new InetSocketAddress(LOOPBACK, 0));
             listener = new ClientListener(CLUSTER, id, Version.SOFTWARE, Handshake.CLIENT,
                     ClientListener.Options.defaults(), runtime::clientRequest);
@@ -101,12 +101,23 @@ final class TcpCluster implements Closeable {
 
     final int[] peerPorts = new int[3];
     final int[] clientPorts = new int[3];
+    /** The highest cluster version the software of a node supports, from its next start on. */
+    final int[] clusterVersions = new int[3];
     final List<Server> servers = new ArrayList<>();
     private final long sessionTimeoutMillis;
 
     /** @param sessionTimeoutMillis after how much idle time the state machine ends a session */
     TcpCluster(long sessionTimeoutMillis) throws IOException {
+        this(sessionTimeoutMillis, Version.CLUSTER);
+    }
+
+    /**
+     * @param sessionTimeoutMillis after how much idle time the state machine ends a session
+     * @param clusterVersion       the highest cluster version the software of every node supports
+     */
+    TcpCluster(long sessionTimeoutMillis, int clusterVersion) throws IOException {
         this.sessionTimeoutMillis = sessionTimeoutMillis;
+        java.util.Arrays.fill(clusterVersions, clusterVersion);
         for (int id = 0; id < 3; id++) {
             servers.add(new Server(id));
             servers.get(id).listen();
