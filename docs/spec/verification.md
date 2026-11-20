@@ -771,7 +771,8 @@ fails (exit code 1): its figures are those of a run without it.
 - `catch-up`: the spare joins without a snapshot first and the leader brings it up to date
   from its log (after its latest snapshot if the log no longer reaches back to the start).
   Came about if the spare got entries of the log during the run.
-- The spare is removed again when the run is over. A spare serves one run.
+- The spare is removed again when the run is over; the run ends when the removal has taken
+  effect (at most 10 seconds, or the run fails). A spare serves one run.
 - A baseline is compared only with a run under the same condition.
 
 The overload test (`--overload search|N`):
@@ -794,6 +795,32 @@ The overload test (`--overload search|N`):
   64 waiting events per node, 256 clients, writes only): about 2,800 writes per second were
   sustainable; at twice that, 0.3% were rejected with a p99 of 53 ms until the rejection,
   the admitted ones had a p99.9 of 48 ms, and none ran out of time.
+
+A comparison with etcd 3.7.3 on the development machine (2026-11-20): three nodes on one
+machine under Linux (WSL2 on Windows 10, AMD Ryzen 5 5600H with 8 threads, one NVMe SSD),
+128 clients, 100,000 keys, values of 128 bytes, 15 seconds of warm-up and 60 measured
+seconds, a fresh cluster per run, the two systems alternating per workload. Freyja ran with
+ZGC and heaps of 1 GiB (`node.md` §1), etcd with its defaults, measured by a load generator
+in Go of the same open-loop design that sent every request to the leader. Every request
+was answered. Latency from the moment a request was due, in ms, p50 / p99 / p99.9 / max:
+
+| Workload | Freyja | etcd |
+|---|---|---|
+| write-only, 1,000/s | 5.8 / 18.9 / 28.4 / 34.5 | 8.7 / 26.4 / 37.4 / 48.8 |
+| write-only, 2,000/s | 10.1 / 26.1 / 35.8 / 54.4 | 13.2 / 35.7 / 50.2 / 74.4 |
+| mixed, 2,000/s | 5.1 / 21.2 / 31.7 / 41.8 | 11.7 / 32.8 / 46.2 / 63.1 |
+| read-heavy, 2,000/s | 1.1 / 15.2 / 59.4 / 226.6 | 1.8 / 44.2 / 122.6 / 165.9 |
+| write-only, 4,000/s (two runs) | 12.0 / 31.7 / 43.5 / 57.8; 12.2 / 30.5 / 45.6 / 53.7 | 17.8 / 36.0 / 44.4 / 54.9; 18.4 / 39.8 / 50.4 / 64.0 |
+| mixed, 4,000/s (two runs) | 7.7 / 25.6 / 38.4 / 50.8; 7.6 / 25.3 / 40.4 / 67.7 | 17.5 / 51.6 / 73.1 / 96.0; 17.0 / 44.4 / 55.3 / 65.8 |
+
+- Freyja had the lower median everywhere, and the lower p99 and p99.9 in every workload
+  but write-only at 4,000/s, where the two were even.
+- Both read-heavy runs fell into a slow phase of the disk: a sync of the log of Freyja took
+  up to 105 to 153 ms on every node.
+- At 4,000 writes per second the disk was active 62 to 80% of the time for both systems;
+  it is what limits them on this machine, not the processor.
+- Single runs scatter in their tail: another run of etcd, mixed at 4,000/s, had a p99 of
+  244 ms. Compare the tail only over several runs.
 
 Open: baselines recorded on the production platform, and tuning on it.
 
