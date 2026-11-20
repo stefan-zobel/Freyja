@@ -61,6 +61,8 @@ final class Background {
     static final int BACKGROUND_VALUE_BYTES = 4096;
     /** How many clients the writer that feeds compactions has. */
     private static final int BACKGROUND_CLIENTS = 8;
+    /** How long the removal of the spare may take to take effect. */
+    private static final int LEAVE_SECONDS = 10;
 
     private final During during;
     private final List<String> clientEndpoints;
@@ -310,14 +312,36 @@ final class Background {
         }
     }
 
+    /**
+     * Removes the spare and waits until the removal has taken effect: the leader answers when
+     * the removal is in its log, and the run is over only when the spare is no member any more.
+     */
     private void leave() {
         try {
             AdminResponse answer = NodeAccess.admin(leaderAdmin(), new AdminRequest.RemoveMember(spare.nodeId(), false));
             if (answer instanceof AdminResponse.Refused refused) {
                 trouble = "node " + spare.nodeId() + " could not be removed again: " + refused.reason();
+                return;
             }
         } catch (IOException e) {
             trouble = "node " + spare.nodeId() + " could not be removed again: " + e.getMessage();
+            return;
+        }
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(LEAVE_SECONDS);
+        while (true) {
+            try {
+                if (leader().members().stream().noneMatch(m -> m.nodeId() == spare.nodeId())) {
+                    return;
+                }
+            } catch (IOException e) {
+                // the next look
+            }
+            if (System.nanoTime() - deadline > 0) {
+                trouble = "node " + spare.nodeId() + " was still a member " + LEAVE_SECONDS
+                        + " seconds after its removal";
+                return;
+            }
+            pause(50);
         }
     }
 
